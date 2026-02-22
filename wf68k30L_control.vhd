@@ -349,6 +349,7 @@ signal MOVEM_FIRST_RD       : boolean;
 signal MOVEM_INH_WR         : boolean;
 signal MOVEM_LAST_WR        : boolean;
 signal MOVEM_PNTR           : std_logic_vector(3 downto 0);
+signal MOVEM_PVAR_S         : std_logic_vector(3 downto 0);
 signal MOVEP_PNTR_I         : integer range 0 to 3;
 signal OD_REQ_16            : std_logic;
 signal OD_REQ_32            : std_logic;
@@ -1251,7 +1252,6 @@ begin
     end process BITFIELD_CONTROL;
 
     MOVEM_CONTROL: process(ADR_MODE_I, CLK, BIW_0, BIW_1, OP, RESET_CPU, FETCH_STATE, NEXT_FETCH_STATE, ALU_BSY, MOVEM_PNTR)
-    variable INDEX      : integer range 0 to 15 := 0;
     variable MOVEM_PVAR : std_logic_vector(3 downto 0) := x"0";
     variable BITS       : std_logic_vector(4 downto 0);
     begin
@@ -1268,16 +1268,16 @@ begin
 
             if OP = MOVEM and ALU_INIT_I = '1' and ADR_MODE_I = "011" and MOVEM_ADn_I = '1' and MOVEM_PNTR(2 downto 0) = BIW_0(2 downto 0) then
                 MOVEM_INH_WR <= true; -- Do not write the addressing register.
-            elsif ALU_INIT_I = '1' then 
+            elsif ALU_INIT_I = '1' then
                 MOVEM_INH_WR <= false;
             end if;
-        
+
             if FETCH_STATE = START_OP then
                 MOVEM_FIRST_RD <= false;
             elsif OP = MOVEM and FETCH_STATE = FETCH_OPERAND and RD_RDY = '1' then
                 MOVEM_FIRST_RD <= true;
             end if;
-            
+
             if RESET_CPU = '1' or (FETCH_STATE /= START_OP and NEXT_FETCH_STATE = START_OP) then
                 BITS := "00000";
                 MOVEM_LAST_WR <= false;
@@ -1297,27 +1297,33 @@ begin
             -- MOVEM has read all registers from memory addressed by the initial addressing register (old value).
             -- This logic is modeled synchronously (one clock latency) due to the one clock delay of the address calculation.
             if OP /= MOVEM or BIW_0(10) /= '1' or (ADR_MODE_I /= "010" and ADR_MODE_I /= "101" and ADR_MODE_I /= "110") then
-                STORE_AEFF <= '0'; 
+                STORE_AEFF <= '0';
             elsif FETCH_STATE /= START_OP and NEXT_FETCH_STATE = START_OP then
                 STORE_AEFF <= '0'; -- Operation completed.
             elsif FETCH_STATE = SWITCH_STATE or FETCH_STATE = CALC_AEFF or FETCH_STATE = FETCH_OPERAND or FETCH_STATE = INIT_EXEC_WB then
                 STORE_AEFF <= '1';
             end if;
-        end if;
 
+            MOVEM_PVAR_S <= MOVEM_PVAR;
+        end if;
+    end process MOVEM_CONTROL;
+
+    MOVEM_COMB: process(ADR_MODE_I, OP, BIW_1, MOVEM_PVAR_S)
+    variable INDEX : integer range 0 to 15 := 0;
+    begin
         -- This signal determines whether to handle address or data registers.
         if ADR_MODE_I = "100" then -- -(An).
-            MOVEM_ADn_I <= not To_Bit(MOVEM_PVAR(3));
-            MOVEM_ADn <= not To_Bit(MOVEM_PVAR(3));
+            MOVEM_ADn_I <= not To_Bit(MOVEM_PVAR_S(3));
+            MOVEM_ADn <= not To_Bit(MOVEM_PVAR_S(3));
         else
-            MOVEM_ADn_I <= To_Bit(MOVEM_PVAR(3));
-            MOVEM_ADn <= To_Bit(MOVEM_PVAR(3));
+            MOVEM_ADn_I <= To_Bit(MOVEM_PVAR_S(3));
+            MOVEM_ADn <= To_Bit(MOVEM_PVAR_S(3));
         end if;
 
-        INDEX := To_Integer(unsigned(MOVEM_PVAR));
+        INDEX := To_Integer(unsigned(MOVEM_PVAR_S));
 
         -- The following signal determines if a register is affected or not, depending
-        -- on the status of the register list bit. 
+        -- on the status of the register list bit.
         if OP = MOVEM and BIW_1(INDEX) = '1' then
             MOVEM_COND <= true;
         else
@@ -1326,11 +1332,11 @@ begin
 
         -- This signal determines whether to handle address or data registers.
         if ADR_MODE_I = "100" then -- -(An).
-            MOVEM_PNTR <= not MOVEM_PVAR; -- Count down.
+            MOVEM_PNTR <= not MOVEM_PVAR_S; -- Count down.
         else
-            MOVEM_PNTR <= MOVEM_PVAR;
+            MOVEM_PNTR <= MOVEM_PVAR_S;
         end if;
-    end process MOVEM_CONTROL;
+    end process MOVEM_COMB;
 
     MOVEP_CONTROL: process(CLK, MOVEP_PNTR_I)
     -- This logic handles the bytes to be written or read during the MOVEP

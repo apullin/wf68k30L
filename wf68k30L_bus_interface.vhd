@@ -268,7 +268,12 @@ begin
             end case;
             --
             if BUS_CTRL_STATE = START_CYCLE and NEXT_BUS_CTRL_STATE = DATA_C1C4 then
-                SSW_80 <= To_StdLogicVector('0' & RMC & not WR_REQ) & SIZEVAR & '0' & FC_IN;
+                SSW_80(8) <= '0';
+                SSW_80(7) <= To_StdULogic(RMC);
+                SSW_80(6) <= To_StdULogic(not WR_REQ);
+                SSW_80(5 downto 4) <= SIZEVAR;
+                SSW_80(3) <= '0';
+                SSW_80(2 downto 0) <= FC_IN;
             elsif BUS_CTRL_STATE = DATA_C1C4 and (READ_ACCESS = '1' or WRITE_ACCESS = '1') and BUS_FLT = '1' then
                 SSW_80(8) <= '1';
             end if;

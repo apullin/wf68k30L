@@ -161,6 +161,9 @@ signal TRAP_CODE_I          : TRAPTYPE_OPC;
 signal FLUSHED              : boolean;
 signal PC_INC_I             : bit;
 signal PIPE_RDY             : bit;
+signal ADR_OFFSET_S         : std_logic_vector(6 downto 0);
+signal PC_VAR_S             : std_logic_vector(6 downto 0);
+signal PC_VAR_MEM_S         : std_logic_vector(6 downto 0);
 begin
     P_BSY: process(BUSY_EXH, CLK, IPIPE_FILL, OPCODE_RDY)
     -- This logic requires asynchronous reset. This flip flop is intended 
@@ -506,13 +509,13 @@ begin
         end if;
     end process HANDSHAKING;
 
-    P_PC_OFFSET: process(CLK, BUSY_EXH, LOOP_BSY_I, LOOP_EXIT, OP, PC_INC_I)
+    P_PC_OFFSET: process(CLK)
     -- Be Aware: the ADR_OFFSET requires the 'old' PC_VAR.
     -- To arrange this, the ADR_OFFSET logic is located
     -- above the PC_VAR logic. Do not change this!
     -- The PC_VAR is modeled in a way, that the PC points
     -- always to the BIW_0.
-    -- The PC_EW_OFFSET is also used for the calculation 
+    -- The PC_EW_OFFSET is also used for the calculation
     -- of the correct PC value written to the stack pointer
     -- during BSR, JSR and exceptions.
     variable ADR_OFFSET     : std_logic_vector(6 downto 0);
@@ -561,10 +564,17 @@ begin
             elsif EW_ACK = '1' and OP = JSR then -- Calculate the required extension words.
                 PC_EW_OFFSET <= PC_EW_OFFSET + "010";
             end if;
+
+            ADR_OFFSET_S <= ADR_OFFSET;
+            PC_VAR_S <= PC_VAR;
+            PC_VAR_MEM_S <= PC_VAR_MEM;
         end if;
-        --
+    end process P_PC_OFFSET;
+
+    P_PC_OFFSET_COMB: process(BUSY_EXH, PC_INC_I, PC_VAR_MEM_S, OP, LOOP_BSY_I, LOOP_EXIT, PC_VAR_S, ADR_OFFSET_S)
+    begin
         if BUSY_EXH = '1' and PC_INC_I = '1' then
-            PC_OFFSET <= PC_VAR_MEM & '0';
+            PC_OFFSET <= PC_VAR_MEM_S & '0';
         elsif OP = DBcc and LOOP_BSY_I = true and LOOP_EXIT = '0' then
             -- Suppress to increment after DBcc operation during the loop to
             -- handle a correct PC with displacement when looping around.
@@ -572,10 +582,10 @@ begin
             -- IPIPE_FLUSH in the PC logic. In loop mode we have no flush.
             PC_OFFSET <= x"00";
         else
-            PC_OFFSET <= PC_VAR & '0';
+            PC_OFFSET <= PC_VAR_S & '0';
         end if;
-        PC_ADR_OFFSET <= ADR_OFFSET & '0';
-    end process P_PC_OFFSET;
+        PC_ADR_OFFSET <= ADR_OFFSET_S & '0';
+    end process P_PC_OFFSET_COMB;
 
     P_FLUSH: process
     -- This flip flop is intended to control the incrementation
