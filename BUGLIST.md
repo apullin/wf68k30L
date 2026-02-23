@@ -66,7 +66,113 @@ the combinational logic structure rather than an actual hardware loop.
 
 ---
 
+### BUG-003: Division iterative loop returns incorrect results
+
+**Severity:** High
+**Status:** Open (expected failures in tests)
+**Found:** Phase 3 muldiv testing
+
+**Description:**
+The SV divider (`wf68k30L_divider.sv`) produces incorrect results when the iterative
+division loop (DIV_CALC state) executes. Fast-path cases in DIV_INIT work correctly:
+- Divisor > dividend → quotient 0 (correct)
+- Divisor == dividend → quotient 1 (correct)
+
+Non-trivial divisions (e.g., 100/10, 0x7FFF/3) return quotient=0 and remainder=0.
+
+**Root cause (suspected):**
+The QUOTIENT/REMAINDER latching from ALU results has a timing mismatch. The ALU
+result mux or OP_SIZE encoding during DIV_CALC iterations may not be propagating
+correctly through the registered pipeline.
+
+**Reproduction:**
+```asm
+    MOVE.L #100, D0     ; dividend
+    DIVU.W #10, D0      ; should give quotient=10, remainder=0
+    ; Result: D0 = 0x00000000 (incorrect)
+```
+
+**Affected tests:** 12 DIVU/DIVS tests marked with `expect_error=AssertionError` in
+`test_instr_muldiv.py`. Multiply (MULS/MULU) works correctly.
+
+**Files involved:**
+- `wf68k30L_divider.sv` — DIV_CALC state machine, QUOTIENT/REMAINDER latch
+- `wf68k30L_alu.sv` — Result mux during division
+
+---
+
+### BUG-004: MOVEM word mode and pre-decrement unreliable
+
+**Severity:** Medium
+**Status:** Open (workaround in tests)
+**Found:** Phase 3 memory instruction testing
+
+**Description:**
+MOVEM (Move Multiple Registers) has issues with:
+1. **Word mode (MOVEM.W):** Produces incorrect values when saving/restoring word-sized
+   register lists. Long mode (MOVEM.L) works correctly.
+2. **Pre-decrement mode `-(An)`:** Register values are garbled when using pre-decrement
+   addressing. Post-increment `(An)+` and indirect `(An)` work correctly.
+3. **Small register masks:** Masks with fewer than 3 registers may produce unreliable
+   results.
+
+**Workaround:**
+Use MOVEM.L with `(An)` or `(An)+` addressing and 3+ registers in the mask.
+
+**Affected tests:** `test_instr_memory.py` — all MOVEM tests use the workaround pattern.
+
+**Files involved:**
+- `wf68k30L_control.sv` — MOVEM state machine sequencing
+- `wf68k30L_bus_interface.sv` — Word-size bus cycle generation
+
+---
+
+### BUG-005: CHK exception not generated for out-of-range values
+
+**Severity:** Medium
+**Status:** Open (tests only cover in-range cases)
+**Found:** Phase 3 control instruction testing
+
+**Description:**
+CHK.W instruction does not reliably generate a CHK exception (vector 6) when the
+register value is negative or exceeds the upper bound. In-range cases (where no
+exception should occur) work correctly.
+
+**Affected tests:** `test_instr_control.py` — CHK tests only verify in-range behavior.
+
+**Files involved:**
+- `wf68k30L_control.sv` — CHK trap generation
+- `wf68k30L_exception_handler.sv` — Exception vector dispatch
+
+---
+
 ## Resolved Bugs
+
+### BUG-R002: BITPOS truncation limits bit operations to positions 0-15
+
+**Severity:** High
+**Status:** Fixed (commit a33ac4e)
+**Found:** Phase 3 bit instruction testing
+
+**Description:**
+Bit operations (BTST, BSET, BCLR, BCHG) on data registers only worked for bit
+positions 0-15. Positions 16-31 were silently mapped to 0-15.
+
+**Root cause:**
+In `wf68k30L_alu.sv` line 123, the SV port incorrectly truncated BITPOS to 4 bits:
+```sv
+BITPOS <= {1'b0, BITPOS_IN[3:0]};  // BUG: truncates to 4 bits
+```
+
+**Fix:**
+```sv
+BITPOS <= BITPOS_IN;  // Full 5-bit position (0-31)
+```
+
+The original VHDL used the full width of `BITPOS_IN`. The SV port added an
+unnecessary truncation.
+
+---
 
 ### BUG-R001: CPU write bus cycles never generated
 

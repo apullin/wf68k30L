@@ -218,44 +218,64 @@ end
 // We split the registered part into always_ff and the combinational part into always_comb.
 
 logic [31:0] INDEX_REG;
-logic [31:0] INDEX_SCALED_REG;
 logic [31:0] MEM_ADR_REG;
 logic [31:0] BASE_DISPL_REG;
 logic [31:0] OUTER_DISPL_REG;
 logic [31:0] ABS_ADDRESS_REG;
 
-always_ff @(posedge CLK) begin : address_modes_reg
-    // INDEX selection
-    if (STORE_ADR_FORMAT && !EXT_WORD[15] && EXT_WORD[11]) begin
-        INDEX_REG <= INDEX_IN; // Long data register.
-    end else if (STORE_ADR_FORMAT && !EXT_WORD[15]) begin
-        INDEX_REG <= {{16{INDEX_IN[15]}}, INDEX_IN[15:0]}; // Sign extended data register.
-    end else if (STORE_ADR_FORMAT && EXT_WORD[11]) begin // Long address register.
+// Combinational next-value for INDEX.
+// In the original VHDL, INDEX was a process variable with immediate (:=)
+// assignment semantics: writes were visible to later reads in the same
+// clock edge.  The SV port must reproduce this by computing the next
+// INDEX value combinationally and feeding it into the INDEX_REG register.
+logic [31:0] index_next;
+always_comb begin : index_next_calc
+    if (STORE_ADR_FORMAT && !EXT_WORD[15] && EXT_WORD[11])
+        index_next = INDEX_IN; // Long data register.
+    else if (STORE_ADR_FORMAT && !EXT_WORD[15])
+        index_next = {{16{INDEX_IN[15]}}, INDEX_IN[15:0]}; // Sign extended data register.
+    else if (STORE_ADR_FORMAT && EXT_WORD[11]) begin // Long address register.
         if (EXT_WORD[14:12] == 3'b111 && SBIT && MBIT)
-            INDEX_REG <= MSP_REG;
+            index_next = MSP_REG;
         else if (EXT_WORD[14:12] == 3'b111 && SBIT && !MBIT)
-            INDEX_REG <= ISP_REG;
+            index_next = ISP_REG;
         else if (EXT_WORD[14:12] == 3'b111 && !SBIT)
-            INDEX_REG <= USP_REG;
+            index_next = USP_REG;
         else
-            INDEX_REG <= AR[EXT_WORD[14:12]];
+            index_next = AR[EXT_WORD[14:12]];
     end else if (STORE_ADR_FORMAT) begin // Sign extended address register.
         if (EXT_WORD[14:12] == 3'b111 && SBIT && MBIT)
-            INDEX_REG <= {{16{MSP_REG[15]}}, MSP_REG[15:0]};
+            index_next = {{16{MSP_REG[15]}}, MSP_REG[15:0]};
         else if (EXT_WORD[14:12] == 3'b111 && SBIT && !MBIT)
-            INDEX_REG <= {{16{ISP_REG[15]}}, ISP_REG[15:0]};
+            index_next = {{16{ISP_REG[15]}}, ISP_REG[15:0]};
         else if (EXT_WORD[14:12] == 3'b111 && !SBIT)
-            INDEX_REG <= {{16{USP_REG[15]}}, USP_REG[15:0]};
+            index_next = {{16{USP_REG[15]}}, USP_REG[15:0]};
         else
-            INDEX_REG <= {{16{AR[EXT_WORD[14:12]][15]}}, AR[EXT_WORD[14:12]][15:0]};
+            index_next = {{16{AR[EXT_WORD[14:12]][15]}}, AR[EXT_WORD[14:12]][15:0]};
+    end else begin
+        index_next = INDEX_REG; // No update: retain current register value.
     end
-    //
+end
+
+// Combinational scaled index (mirrors VHDL variable INDEX_SCALED).
+// In the VHDL, INDEX_SCALED was re-computed every clock cycle from the
+// INDEX variable and the SCALE signal.  SCALE is registered and updates
+// one cycle after STORE_ADR_FORMAT.  At the cycle when the effective
+// address is actually used (CALC_AEFF), both INDEX_REG and SCALE hold
+// their correct values, so the combinational product is correct.
+logic [31:0] index_scaled_comb;
+always_comb begin : index_scale_calc
     case (SCALE)
-        2'b00: INDEX_SCALED_REG <= INDEX_REG; // Multiple by 1.
-        2'b01: INDEX_SCALED_REG <= {INDEX_REG[30:0], 1'b0}; // Multiple by 2.
-        2'b10: INDEX_SCALED_REG <= {INDEX_REG[29:0], 2'b00}; // Multiple by 4.
-        default: INDEX_SCALED_REG <= {INDEX_REG[28:0], 3'b000}; // Multiple by 8.
+        2'b00:   index_scaled_comb = INDEX_REG;
+        2'b01:   index_scaled_comb = {INDEX_REG[30:0], 1'b0};
+        2'b10:   index_scaled_comb = {INDEX_REG[29:0], 2'b00};
+        default: index_scaled_comb = {INDEX_REG[28:0], 3'b000};
     endcase
+end
+
+always_ff @(posedge CLK) begin : address_modes_reg
+    // Capture the combinationally-computed index into the register.
+    INDEX_REG <= index_next;
     //
     // Register for memory indirect addressing modes.
     if (STORE_MEM_ADR)
@@ -350,19 +370,19 @@ always_comb begin : adr_eff_calc
 
         ADR_AN_IDX: begin  // (d8,An,Xn) or full extension word
             if (!F_E) begin // Brief extension word
-                ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
+                ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + index_scaled_comb;
             end else begin // Full extension word
                 case (I_S_IS_comb)
                     4'b0000, 4'b1000: // No memory indirect
-                        ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
+                        ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + index_scaled_comb;
                     4'b0001, 4'b0010, 4'b0011: // Preindexed
                         ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
-                            (ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG) :
+                            (ADR_MUX_comb + BASE_DISPL_REG + index_scaled_comb) :
                             (MEM_ADR_REG + OUTER_DISPL_REG);
                     4'b0101, 4'b0110, 4'b0111: // Postindexed
                         ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
                             (ADR_MUX_comb + BASE_DISPL_REG) :
-                            (MEM_ADR_REG + INDEX_SCALED_REG + OUTER_DISPL_REG);
+                            (MEM_ADR_REG + index_scaled_comb + OUTER_DISPL_REG);
                     4'b1001, 4'b1010, 4'b1011: // Memory indirect
                         ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
                             (ADR_MUX_comb + BASE_DISPL_REG) :
@@ -381,19 +401,19 @@ always_comb begin : adr_eff_calc
                     ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG;
                 3'b011: begin // (d8, PC, Xn) or full extension
                     if (!F_E) begin
-                        ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
+                        ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + index_scaled_comb;
                     end else begin
                         case (I_S_IS_comb)
                             4'b0000, 4'b1000:
-                                ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
+                                ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + index_scaled_comb;
                             4'b0001, 4'b0010, 4'b0011:
                                 ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
-                                    (PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG) :
+                                    (PCVAR_comb + BASE_DISPL_REG + index_scaled_comb) :
                                     (MEM_ADR_REG + OUTER_DISPL_REG);
                             4'b0101, 4'b0110, 4'b0111:
                                 ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
                                     (PCVAR_comb + BASE_DISPL_REG) :
-                                    (MEM_ADR_REG + INDEX_SCALED_REG + OUTER_DISPL_REG);
+                                    (MEM_ADR_REG + index_scaled_comb + OUTER_DISPL_REG);
                             4'b1001, 4'b1010, 4'b1011:
                                 ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
                                     (PCVAR_comb + BASE_DISPL_REG) :
