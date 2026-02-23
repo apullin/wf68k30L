@@ -23,7 +23,17 @@ VERILOG_SOURCES = \
     $(SRC_DIR)/wf68k30L_bus_interface.sv \
     $(SRC_DIR)/wf68k30L_opcode_decoder.sv \
     $(SRC_DIR)/wf68k30L_exception_handler.sv \
+    $(SRC_DIR)/wf68k30L_operand_mux.sv \
+    $(SRC_DIR)/wf68k30L_shifter.sv \
+    $(SRC_DIR)/wf68k30L_divider.sv \
     $(SRC_DIR)/wf68k30L_control.sv \
+    $(SRC_DIR)/wf68k30L_ctrl_comb.sv \
+    $(SRC_DIR)/wf68k30L_ctrl_exec_dec.sv \
+    $(SRC_DIR)/wf68k30L_ctrl_fetch_dec.sv \
+    $(SRC_DIR)/wf68k30L_ctrl_fetch_other.sv \
+    $(SRC_DIR)/wf68k30L_ctrl_fetch_start.sv \
+    $(SRC_DIR)/wf68k30L_ctrl_movem.sv \
+    $(SRC_DIR)/wf68k30L_ctrl_regsel.sv \
     $(SRC_DIR)/wf68k30L_top.sv
 
 # Default: full top-level smoke test
@@ -34,6 +44,7 @@ TEST_MODULE ?= test_smoke
 # Verilator flags
 EXTRA_ARGS += -I$(SRC_DIR)
 EXTRA_ARGS += --timing
+EXTRA_ARGS += --public-flat-rw
 EXTRA_ARGS += -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-CASEINCOMPLETE
 EXTRA_ARGS += -Wno-UNSIGNED -Wno-ENUMVALUE -Wno-CMPCONST
 EXTRA_ARGS += -Wno-UNOPTFLAT -Wno-BLKANDNBLK -Wno-LATCH
