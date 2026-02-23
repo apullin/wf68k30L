@@ -190,6 +190,23 @@ parameter logic [2:0] FC_SUPER_DATA = 3'b101;
 parameter logic [2:0] FC_SUPER_PROG = 3'b110;
 parameter logic [2:0] FC_CPU_SPACE  = 3'b111;
 
+// ---- MC68030 Exception Vector Numbers ----
+// Vector offsets = vector number * 4 (each vector is a longword pointer).
+parameter logic [7:0] VEC_RESET       = 8'h00; // Reset initial SSP / PC
+parameter logic [7:0] VEC_BUS_ERROR   = 8'h02; // Bus error
+parameter logic [7:0] VEC_ADDR_ERROR  = 8'h03; // Address error
+parameter logic [7:0] VEC_ILLEGAL     = 8'h04; // Illegal instruction
+parameter logic [7:0] VEC_DIVZERO     = 8'h05; // Zero divide
+parameter logic [7:0] VEC_CHK         = 8'h06; // CHK, CHK2
+parameter logic [7:0] VEC_TRAPCC      = 8'h07; // cpTRAPcc, TRAPcc, TRAPV
+parameter logic [7:0] VEC_PRIV        = 8'h08; // Privilege violation
+parameter logic [7:0] VEC_TRACE       = 8'h09; // Trace
+parameter logic [7:0] VEC_LINE_A      = 8'h0A; // Line 1010 emulator
+parameter logic [7:0] VEC_LINE_F      = 8'h0B; // Line 1111 emulator
+parameter logic [7:0] VEC_FORMAT      = 8'h0E; // Format error
+parameter logic [7:0] VEC_SPURIOUS    = 8'h18; // Spurious interrupt
+parameter logic [7:0] VEC_TRAP_BASE   = 8'h20; // TRAP #0..#15 base (vector = base + trap#)
+
 // ---- Condition code flags struct ----
 typedef struct packed {
     logic x; // Extend

@@ -117,6 +117,7 @@ module WF68K30L_EXCEPTION_HANDLER #(
 
 `include "wf68k30L_pkg.svh"
 
+// ---- Exception handler state machine ----
 typedef enum logic [4:0] {
     EXS_IDLE            = 5'd0,
     EXS_BUILD_STACK     = 5'd1,
@@ -137,6 +138,7 @@ typedef enum logic [4:0] {
     EXS_VALIDATE_FRAME  = 5'd16
 } EX_STATES;
 
+// ---- Exception type identifiers ----
 typedef enum logic [4:0] {
     EX_NONE     = 5'd0,
     EX_1010     = 5'd1,
@@ -157,6 +159,7 @@ typedef enum logic [4:0] {
     EX_TRAPV    = 5'd16
 } EXCEPTIONS;
 
+// ---- Internal signals ----
 logic        ACCESS_ERR;
 logic        AVEC;
 logic        DATA_RD_I;
@@ -165,6 +168,8 @@ logic        DOUBLE_BUSFLT;
 EXCEPTIONS   EXCEPTION;     // Currently executed exception.
 EX_STATES    EX_STATE;
 EX_STATES    NEXT_EX_STATE;
+
+// Pending exception flags (one per exception source).
 logic        EX_P_1010;
 logic        EX_P_1111;
 logic        EX_P_AERR;
@@ -181,7 +186,8 @@ logic        EX_P_TRACE;
 logic        EX_P_TRAP;
 logic        EX_P_TRAPcc;
 logic        EX_P_TRAPV;
-logic [31:0] INT_VECT;      // Interrupt vector.
+
+logic [31:0] INT_VECT;      // Interrupt vector address (VBR + vector# * 4).
 logic        IBOUND;
 logic [2:0]  IRQ;
 logic [2:0]  IRQ_PEND_I;
@@ -192,20 +198,62 @@ integer      STACK_CNT;
 logic [3:0]  STACK_FORMAT_I;
 logic        SYS_INIT;
 
+// True when any exception pending flag is asserted.
+logic        any_exception_pending;
+
+assign any_exception_pending = EX_P_RESET | EX_P_BERR | EX_P_AERR |
+                               EX_P_TRAP | EX_P_TRAPcc | EX_P_TRAPV | EX_P_CHK | EX_P_DIVZERO |
+                               EX_P_FORMAT |
+                               EX_P_TRACE | EX_P_ILLEGAL | EX_P_1010 | EX_P_1111 | EX_P_PRIV |
+                               EX_P_RTE | EX_P_INT;
+
+// ---- Exception priority encoder (combinational) ----
+// MC68030 exception priority: reset > address/bus error > instruction traps >
+// illegal/privileged > trace > external interrupt.
+// Returns the highest-priority pending exception type.
+function automatic EXCEPTIONS resolve_exception_priority(
+    input logic p_reset, p_aerr, p_berr,
+    input logic p_chk, p_trapcc, p_divzero, p_trap, p_trapv, p_format,
+    input logic p_illegal, p_rte, p_1010, p_1111, p_priv, p_trace,
+    input logic p_int
+);
+    // Priority level 0 (highest): system reset
+         if (p_reset)   resolve_exception_priority = EX_RESET_EX;
+    // Priority level 1: bus/address faults
+    else if (p_aerr)    resolve_exception_priority = EX_AERR;
+    else if (p_berr)    resolve_exception_priority = EX_BERR;
+    // Priority level 2: instruction-generated traps
+    else if (p_chk)     resolve_exception_priority = EX_CHK;
+    else if (p_trapcc)  resolve_exception_priority = EX_TRAPcc;
+    else if (p_divzero) resolve_exception_priority = EX_DIVZERO;
+    else if (p_trap)    resolve_exception_priority = EX_TRAP;
+    else if (p_trapv)   resolve_exception_priority = EX_TRAPV;
+    else if (p_format)  resolve_exception_priority = EX_FORMAT;
+    // Priority level 3: decode-time exceptions and trace
+    else if (p_illegal) resolve_exception_priority = EX_ILLEGAL;
+    else if (p_rte)     resolve_exception_priority = EX_RTE;
+    else if (p_1010)    resolve_exception_priority = EX_1010;
+    else if (p_1111)    resolve_exception_priority = EX_1111;
+    else if (p_priv)    resolve_exception_priority = EX_PRIV;
+    else if (p_trace)   resolve_exception_priority = EX_TRACE;
+    // Priority level 4: external interrupt (lowest)
+    else if (p_int)     resolve_exception_priority = EX_INT;
+    else                resolve_exception_priority = EX_NONE;
+endfunction
+
 assign BUSY_EXH = (EX_STATE != EXS_IDLE);
 
-// IRQ_FILTER - negedge CLK
+// ---- IRQ input synchronizer (double-sample on negedge for metastability) ----
 always_ff @(negedge CLK) begin : irq_filter
     reg [2:0] IRQ_TMP_1;
     reg [2:0] IRQ_TMP_2;
-    if (IRQ_TMP_1 == IRQ_TMP_2) begin
+    if (IRQ_TMP_1 == IRQ_TMP_2)
         IRQ <= IRQ_TMP_2;
-    end
     IRQ_TMP_2 = IRQ_TMP_1;
     IRQ_TMP_1 = IRQ_IN;
 end
 
-// AVEC_FILTER
+// ---- Autovector latch ----
 always_ff @(posedge CLK) begin : avec_filter
     if (!AVECn)
         AVEC <= 1'b1;
@@ -213,7 +261,9 @@ always_ff @(posedge CLK) begin : avec_filter
         AVEC <= 1'b0;
 end
 
-// INSTRUCTION_BOUNDARY
+// ---- Instruction boundary tracker ----
+// IBOUND is set at opword acknowledge to distinguish mid-instruction
+// faults (format B stack frame) from instruction-boundary faults (format A).
 always_ff @(posedge CLK) begin : instruction_boundary
     if (RESET)
         IBOUND <= 1'b0;
@@ -223,17 +273,17 @@ always_ff @(posedge CLK) begin : instruction_boundary
         IBOUND <= 1'b0;
 end
 
-// PENDING
-always_ff @(posedge CLK) begin : pending
-    reg INT7_TRIG;
-    reg [2:0] INT_VAR;
-    reg [2:0] SR_VAR;
-
+// ---- Exception pending flag management ----
+// Each exception source sets its flag independently; flags are cleared
+// when the exception handler begins processing or at system init.
+always_ff @(posedge CLK) begin : pending_system_faults
+    // Reset exception
     if (RESET)
         EX_P_RESET <= 1'b1;
     else if (EX_STATE == EXS_RESTORE_PC && DATA_RDY && EXCEPTION == EX_RESET_EX)
         EX_P_RESET <= 1'b0;
 
+    // Bus error
     if (TRAP_BERR)
         EX_P_BERR <= 1'b1;
     else if (EX_STATE != EXS_IDLE && DATA_RDY && !DATA_VALID)
@@ -243,6 +293,7 @@ always_ff @(posedge CLK) begin : pending
     else if (SYS_INIT)
         EX_P_BERR <= 1'b0;
 
+    // Address error
     if (TRAP_AERR)
         EX_P_AERR <= 1'b1;
     else if (EX_STATE == EXS_BUILD_STACK && EXCEPTION == EX_AERR)
@@ -250,37 +301,47 @@ always_ff @(posedge CLK) begin : pending
     else if (SYS_INIT)
         EX_P_AERR <= 1'b0;
 
+    // Trace
     if (EX_TRACE_IN)
         EX_P_TRACE <= 1'b1;
     else if (EX_STATE == EXS_BUILD_STACK && EXCEPTION == EX_TRACE)
         EX_P_TRACE <= 1'b0;
     else if (SYS_INIT)
         EX_P_TRACE <= 1'b0;
+end
 
+always_ff @(posedge CLK) begin : pending_interrupts
+    reg INT7_TRIG;
+    reg [2:0] INT_VAR;
+    reg [2:0] SR_VAR;
+
+    // Detect level-7 NMI edge: either mask lowered from 7, or level-7 newly asserted.
     if (IRQ == 3'b111 && SR_VAR == 3'b111 && STATUS_REG_IN[10:8] != 3'b111)
-        INT7_TRIG = 1'b1; // Trigger by lowering the mask from 7 to any value.
+        INT7_TRIG = 1'b1;
     else if (IRQ == 3'b111 && INT_VAR < 3'b111)
-        INT7_TRIG = 1'b1; // Trigger when level 7 is entered.
+        INT7_TRIG = 1'b1;
     else
         INT7_TRIG = 1'b0;
 
     SR_VAR = STATUS_REG_IN[10:8]; // Update after use!
     INT_VAR = IRQ; // Update after use!
 
-    if (SYS_INIT) begin // Reset when disabling the interrupts.
+    if (SYS_INIT) begin
         EX_P_INT <= 1'b0;
-        IRQ_PEND_I <= 3'b111; // This is required for system startup.
+        IRQ_PEND_I <= 3'b111; // Required for system startup.
     end else if (EX_STATE == EXS_GET_VECTOR && DATA_RDY) begin
         EX_P_INT <= 1'b0;
-    end else if (INT7_TRIG) begin // Level 7 is nonmaskable ...
+    end else if (INT7_TRIG) begin // Level 7 is nonmaskable.
         EX_P_INT <= 1'b1;
         IRQ_PEND_I <= IRQ;
     end else if (INT_TRIG && STATUS_REG_IN[10:8] < IRQ) begin
         EX_P_INT <= 1'b1;
         IRQ_PEND_I <= IRQ;
     end
+end
 
-    // The following nine traps never appear at the same time:
+always_ff @(posedge CLK) begin : pending_instruction_traps
+    // These nine trap sources are mutually exclusive (never fire simultaneously).
     if (TRAP_CHK)
         EX_P_CHK <= 1'b1;
     else if (TRAP_DIVZERO)
@@ -307,38 +368,42 @@ always_ff @(posedge CLK) begin : pending
         EX_P_FORMAT <= 1'b1;
     else if (TRAP_CODE_OPC == T_RTE)
         EX_P_RTE <= 1'b1;
-    else if (EX_STATE == EXS_REFILL_PIPE && NEXT_EX_STATE != EXS_REFILL_PIPE) begin // Clear after IPIPE_FLUSH.
+    else if (EX_STATE == EXS_REFILL_PIPE && NEXT_EX_STATE != EXS_REFILL_PIPE) begin
+        // Clear instruction trap flags after IPIPE_FLUSH for relevant exceptions.
         case (EXCEPTION)
-            EX_1010, EX_1111, EX_CHK, EX_DIVZERO, EX_ILLEGAL, EX_TRAP, EX_TRAPcc, EX_TRAPV, EX_FORMAT, EX_PRIV, EX_RTE: begin
-                EX_P_CHK <= 1'b0;
+            EX_1010, EX_1111, EX_CHK, EX_DIVZERO, EX_ILLEGAL,
+            EX_TRAP, EX_TRAPcc, EX_TRAPV, EX_FORMAT, EX_PRIV, EX_RTE: begin
+                EX_P_CHK     <= 1'b0;
                 EX_P_DIVZERO <= 1'b0;
-                EX_P_PRIV <= 1'b0;
-                EX_P_1010 <= 1'b0;
-                EX_P_1111 <= 1'b0;
+                EX_P_PRIV    <= 1'b0;
+                EX_P_1010    <= 1'b0;
+                EX_P_1111    <= 1'b0;
                 EX_P_ILLEGAL <= 1'b0;
-                EX_P_RTE <= 1'b0;
-                EX_P_TRAP <= 1'b0;
-                EX_P_TRAPcc <= 1'b0;
-                EX_P_TRAPV <= 1'b0;
-                EX_P_FORMAT <= 1'b0;
+                EX_P_RTE     <= 1'b0;
+                EX_P_TRAP    <= 1'b0;
+                EX_P_TRAPcc  <= 1'b0;
+                EX_P_TRAPV   <= 1'b0;
+                EX_P_FORMAT  <= 1'b0;
             end
             default: ;
         endcase
-    // Clear all possible traps during reset exception:
     end else if (SYS_INIT) begin
-        EX_P_CHK <= 1'b0;
+        // Clear all instruction traps during reset.
+        EX_P_CHK     <= 1'b0;
         EX_P_DIVZERO <= 1'b0;
-        EX_P_PRIV <= 1'b0;
-        EX_P_1010 <= 1'b0;
-        EX_P_1111 <= 1'b0;
+        EX_P_PRIV    <= 1'b0;
+        EX_P_1010    <= 1'b0;
+        EX_P_1111    <= 1'b0;
         EX_P_ILLEGAL <= 1'b0;
-        EX_P_RTE <= 1'b0;
-        EX_P_TRAP <= 1'b0;
-        EX_P_TRAPcc <= 1'b0;
-        EX_P_TRAPV <= 1'b0;
-        EX_P_FORMAT <= 1'b0;
+        EX_P_RTE     <= 1'b0;
+        EX_P_TRAP    <= 1'b0;
+        EX_P_TRAPcc  <= 1'b0;
+        EX_P_TRAPV   <= 1'b0;
+        EX_P_FORMAT  <= 1'b0;
     end
 end
+
+// ---- Derived status signals ----
 
 assign ACCESS_ERR = (EX_STATE == EXS_RESTORE_PC && DATA_RDY && DATA_0) || // Odd PC value.
                     (DATA_RDY && !DATA_VALID); // Bus error.
@@ -348,10 +413,11 @@ assign IPENDn = !(EX_P_INT || EX_P_RESET || EX_P_TRACE);
 
 assign EXH_REQ = (EX_STATE != EXS_IDLE) ? 1'b0 :
                  (TRAP_CODE_OPC != NONE) ? 1'b1 :
-                 (EX_P_RESET | EX_P_BERR | EX_P_AERR | EX_P_DIVZERO | EX_P_CHK) ||
-                 (EX_P_TRAPcc | EX_P_TRAPV | EX_P_TRACE | EX_P_FORMAT | EX_P_INT);
+                 any_exception_pending;
 
-// INT_VECTOR
+// ---- Vector number calculation ----
+// Maps exception type to MC68030 vector number, then computes the
+// vector table address as VBR + (vector# * 4).
 always_ff @(posedge CLK) begin : int_vector
     reg [7:0] VECT_No;
     reg [31:0] VB_REG;
@@ -360,81 +426,55 @@ always_ff @(posedge CLK) begin : int_vector
         VB_REG = DATA_IN;
     else if (SYS_INIT)
         VB_REG = 32'h0;
-    //
+
     if (EX_STATE == EXS_CALC_VECT_NO || EX_STATE == EXS_GET_VECTOR) begin
         case (EXCEPTION)
-            EX_RESET_EX: VECT_No = 8'h00;
-            EX_BERR:     VECT_No = 8'h02;
-            EX_AERR:     VECT_No = 8'h03;
-            EX_ILLEGAL:  VECT_No = 8'h04;
-            EX_DIVZERO:  VECT_No = 8'h05;
-            EX_CHK:      VECT_No = 8'h06;
-            EX_TRAPcc:   VECT_No = 8'h07;
-            EX_TRAPV:    VECT_No = 8'h07;
-            EX_PRIV:     VECT_No = 8'h08;
-            EX_TRACE:    VECT_No = 8'h09;
-            EX_1010:     VECT_No = 8'h0A;
-            EX_1111:     VECT_No = 8'h0B;
-            EX_FORMAT:   VECT_No = 8'h0E;
+            EX_RESET_EX: VECT_No = VEC_RESET;
+            EX_BERR:     VECT_No = VEC_BUS_ERROR;
+            EX_AERR:     VECT_No = VEC_ADDR_ERROR;
+            EX_ILLEGAL:  VECT_No = VEC_ILLEGAL;
+            EX_DIVZERO:  VECT_No = VEC_DIVZERO;
+            EX_CHK:      VECT_No = VEC_CHK;
+            EX_TRAPcc:   VECT_No = VEC_TRAPCC;
+            EX_TRAPV:    VECT_No = VEC_TRAPCC;
+            EX_PRIV:     VECT_No = VEC_PRIV;
+            EX_TRACE:    VECT_No = VEC_TRACE;
+            EX_1010:     VECT_No = VEC_LINE_A;
+            EX_1111:     VECT_No = VEC_LINE_F;
+            EX_FORMAT:   VECT_No = VEC_FORMAT;
             EX_INT: begin
                 if (DATA_RDY && AVEC)
-                    VECT_No = 8'h18 + {5'b0, IRQ_PEND_I}; // Autovector.
+                    VECT_No = VEC_SPURIOUS + {5'b0, IRQ_PEND_I}; // Autovector.
                 else if (DATA_RDY && !DATA_VALID)
-                    VECT_No = 8'h18; // Spurious interrupt.
+                    VECT_No = VEC_SPURIOUS; // Spurious interrupt.
                 else if (DATA_RDY)
-                    VECT_No = DATA_IN[7:0]; // Non autovector.
+                    VECT_No = DATA_IN[7:0]; // Non-autovector (device supplies vector).
             end
-            EX_TRAP: VECT_No = {4'h2, TRAP_VECTOR};
-            default: VECT_No = 8'hxx; // Don't care.
+            EX_TRAP:     VECT_No = VEC_TRAP_BASE + {4'h0, TRAP_VECTOR};
+            default:     VECT_No = 8'hxx; // Don't care.
         endcase
     end
-    //
+
     INT_VECT <= VB_REG + {22'b0, VECT_No, 2'b00};
     VBR <= VB_REG;
     IVECT_OFFS <= {VECT_No, 2'b00};
 end
 
-// STORE_CURRENT_EXCEPTION
+// ---- Exception priority encoder (registered) ----
+// Latches the highest-priority pending exception when entering from idle.
 always_ff @(posedge CLK) begin : store_current_exception
-    // Priority level 0:
-    if (EX_STATE == EXS_IDLE && EX_P_RESET)
-        EXCEPTION <= EX_RESET_EX;
-    // Priority level 1:
-    else if (EX_STATE == EXS_IDLE && EX_P_AERR)
-        EXCEPTION <= EX_AERR;
-    else if (EX_STATE == EXS_IDLE && EX_P_BERR)
-        EXCEPTION <= EX_BERR;
-    // Priority level 2:
-    else if (EX_STATE == EXS_IDLE && EX_P_CHK)
-        EXCEPTION <= EX_CHK;
-    else if (EX_STATE == EXS_IDLE && EX_P_TRAPcc)
-        EXCEPTION <= EX_TRAPcc;
-    else if (EX_STATE == EXS_IDLE && EX_P_DIVZERO)
-        EXCEPTION <= EX_DIVZERO;
-    else if (EX_STATE == EXS_IDLE && EX_P_TRAP)
-        EXCEPTION <= EX_TRAP;
-    else if (EX_STATE == EXS_IDLE && EX_P_TRAPV)
-        EXCEPTION <= EX_TRAPV;
-    else if (EX_STATE == EXS_IDLE && EX_P_FORMAT)
-        EXCEPTION <= EX_FORMAT;
-    // Priority level 3:
-    else if (EX_STATE == EXS_IDLE && EX_P_ILLEGAL)
-        EXCEPTION <= EX_ILLEGAL;
-    else if (EX_STATE == EXS_IDLE && EX_P_RTE)
-        EXCEPTION <= EX_RTE;
-    else if (EX_STATE == EXS_IDLE && EX_P_1010)
-        EXCEPTION <= EX_1010;
-    else if (EX_STATE == EXS_IDLE && EX_P_1111)
-        EXCEPTION <= EX_1111;
-    else if (EX_STATE == EXS_IDLE && EX_P_PRIV)
-        EXCEPTION <= EX_PRIV;
-    else if (EX_STATE == EXS_IDLE && EX_P_TRACE)
-        EXCEPTION <= EX_TRACE;
-    else if (EX_STATE == EXS_IDLE && EX_P_INT)
-        EXCEPTION <= EX_INT;
+    if (EX_STATE == EXS_IDLE)
+        EXCEPTION <= resolve_exception_priority(
+            EX_P_RESET, EX_P_AERR, EX_P_BERR,
+            EX_P_CHK, EX_P_TRAPcc, EX_P_DIVZERO, EX_P_TRAP, EX_P_TRAPV, EX_P_FORMAT,
+            EX_P_ILLEGAL, EX_P_RTE, EX_P_1010, EX_P_1111, EX_P_PRIV, EX_P_TRACE,
+            EX_P_INT
+        );
     else if (NEXT_EX_STATE == EXS_IDLE)
         EXCEPTION <= EX_NONE;
 end
+
+// ---- CPU space and address offset routing ----
 
 assign CPU_SPACE = (NEXT_EX_STATE == EXS_GET_VECTOR);
 
@@ -444,29 +484,31 @@ assign ADR_OFFSET = (EX_STATE == EXS_REFILL_PIPE) ? {24'h0, 5'b0, PIPE_CNT, 1'b0
                     (NEXT_EX_STATE == EXS_VALIDATE_FRAME) ? 32'h6 :
                     (NEXT_EX_STATE == EXS_EXAMINE_VERSION) ? 32'h36 :
                     (NEXT_EX_STATE == EXS_READ_BOTTOM) ? 32'h5C :
-                    (NEXT_EX_STATE == EXS_UPDATE_PC) ? INT_VECT : 32'h0; // Default is top of the stack.
+                    (NEXT_EX_STATE == EXS_UPDATE_PC) ? INT_VECT : 32'h0;
+
+// ---- Operand size for bus transactions ----
 
 assign OP_SIZE = (EX_STATE == EXS_INIT) ? LONG : // Decrement the stack by four (ISP_DEC).
                  (NEXT_EX_STATE == EXS_RESTORE_ISP || NEXT_EX_STATE == EXS_RESTORE_PC) ? LONG :
-                 (NEXT_EX_STATE == EXS_BUILD_STACK || NEXT_EX_STATE == EXS_BUILD_TSTACK) ? LONG : // Always long access.
+                 (NEXT_EX_STATE == EXS_BUILD_STACK || NEXT_EX_STATE == EXS_BUILD_TSTACK) ? LONG :
                  (NEXT_EX_STATE == EXS_UPDATE_PC || EX_STATE == EXS_UPDATE_PC) ? LONG :
                  (EX_STATE == EXS_SWITCH_STATE) ? LONG :
                  (NEXT_EX_STATE == EXS_GET_VECTOR) ? BYTE : WORD;
 
-// DISPLACEMENT
-always_comb begin
+// ---- Stack frame displacement lookup ----
+always_comb begin : stack_frame_displacement
     case (STACK_FORMAT_I)
-        4'h0, 4'h1: DISPLACEMENT = 8'h08;
-        4'h2:       DISPLACEMENT = 8'h0C;
-        4'h9:       DISPLACEMENT = 8'h12;
-        4'hA:       DISPLACEMENT = 8'h20;
-        default:    DISPLACEMENT = 8'h5C; // x"B".
+        4'h0, 4'h1: DISPLACEMENT = 8'h08; // Format 0/1: 4-word frame.
+        4'h2:       DISPLACEMENT = 8'h0C; // Format 2: 6-word frame.
+        4'h9:       DISPLACEMENT = 8'h12; // Format 9: coprocessor mid-instruction.
+        4'hA:       DISPLACEMENT = 8'h20; // Format A: short bus/address error.
+        default:    DISPLACEMENT = 8'h5C; // Format B: long bus/address error.
     endcase
 end
 
 assign SP_ADD_DISPL = EX_STATE == EXS_RESTORE_STATUS && DATA_RDY && DATA_VALID;
 
-// P_D: asynchronous reset with DATA_RDY
+// ---- Data bus read/write control (async clear on DATA_RDY) ----
 always @(posedge CLK or posedge DATA_RDY) begin : data_rw_async
     if (DATA_RDY) begin
         DATA_RD <= 1'b0;
@@ -492,17 +534,20 @@ assign DATA_WR_I = DATA_RDY ? 1'b0 :
                    (EX_STATE == EXS_BUILD_STACK) ? 1'b1 :
                    (EX_STATE == EXS_BUILD_TSTACK) ? 1'b1 : 1'b0;
 
+// ---- Stack pointer, PC, and status register control ----
+
 assign ISP_LOAD = EX_STATE == EXS_RESTORE_ISP && DATA_RDY && DATA_VALID;
 assign PC_RESTORE = EX_STATE == EXS_RESTORE_PC && DATA_RDY && DATA_VALID;
 assign PC_LOAD = EXCEPTION != EX_RESET_EX && EXCEPTION != EX_RTE && EX_STATE != EXS_REFILL_PIPE && NEXT_EX_STATE == EXS_REFILL_PIPE;
 
 assign IPIPE_FILL = (EX_STATE == EXS_REFILL_PIPE);
 
+// Increment PC before stacking for exceptions that report the next instruction address.
 assign PC_INC = (EX_STATE != EXS_BUILD_STACK && NEXT_EX_STATE == EXS_BUILD_STACK) &&
                 (EXCEPTION == EX_CHK || EXCEPTION == EX_DIVZERO || EXCEPTION == EX_INT ||
                  EXCEPTION == EX_TRAP || EXCEPTION == EX_TRAPcc || EXCEPTION == EX_TRAPV);
 
-assign ISP_DEC = (EX_STATE == EXS_INIT && EXCEPTION != EX_RESET_EX && EXCEPTION != EX_RTE) || // Early due to one clock cycle address calculation.
+assign ISP_DEC = (EX_STATE == EXS_INIT && EXCEPTION != EX_RESET_EX && EXCEPTION != EX_RTE) ||
                  (EX_STATE == EXS_BUILD_STACK && DATA_RDY && NEXT_EX_STATE == EXS_BUILD_STACK) ||
                  (EX_STATE == EXS_SWITCH_STATE) ||
                  (EX_STATE == EXS_BUILD_TSTACK && DATA_RDY && NEXT_EX_STATE == EXS_BUILD_TSTACK);
@@ -526,44 +571,48 @@ assign STACK_FORMAT = STACK_FORMAT_I;
 assign IPIPE_FLUSH = (EXCEPTION == EX_RESET_EX && EX_STATE != EXS_REFILL_PIPE) ||
                      (EXCEPTION != EX_NONE && EX_STATE != EXS_REFILL_PIPE && NEXT_EX_STATE == EXS_REFILL_PIPE);
 
-assign DOUBLE_BUSFLT = ((EXCEPTION == EX_AERR || EXCEPTION == EX_RESET_EX) && EX_STATE == EXS_RESTORE_PC && DATA_RDY && DATA_0) || // Odd PC value.
+// ---- Double bus fault detection ----
+// A double fault halts the processor: bus error during bus/address error or reset processing.
+assign DOUBLE_BUSFLT = ((EXCEPTION == EX_AERR || EXCEPTION == EX_RESET_EX) && EX_STATE == EXS_RESTORE_PC && DATA_RDY && DATA_0) ||
                        (EX_STATE != EXS_IDLE && EXCEPTION == EX_AERR && DATA_RDY && !DATA_VALID) ||
                        (EX_STATE != EXS_IDLE && EXCEPTION == EX_BERR && DATA_RDY && !DATA_VALID) ||
                        (EX_STATE != EXS_IDLE && EXCEPTION == EX_RESET_EX && DATA_RDY && !DATA_VALID);
 
-// P_TMP_CPY
+// ---- Snapshot status register and address on exception entry ----
 always_ff @(posedge CLK) begin : tmp_cpy
     if (EX_STATE == EXS_IDLE && NEXT_EX_STATE != EXS_IDLE) begin
         SR_CPY <= STATUS_REG_IN;
         ADR_CPY <= ADR_IN;
         MBIT <= STATUS_REG_IN[12];
     end else if (EX_STATE == EXS_BUILD_STACK && NEXT_EX_STATE == EXS_SWITCH_STATE) begin
-        SR_CPY[13] <= 1'b1; // Set S bit.
+        SR_CPY[13] <= 1'b1; // Set S bit for master->interrupt stack switch.
     end
 end
 
-// STACK_CTRL
+// ---- Stack frame builder ----
+// Selects the stack frame format based on exception type and manages
+// the stack position counter that drives the stacking FSM.
 always_ff @(posedge CLK) begin : stack_ctrl
     reg [5:0] STACK_POS_VAR;
     if (EX_STATE != EXS_BUILD_TSTACK && NEXT_EX_STATE == EXS_BUILD_TSTACK) begin
         STACK_POS_VAR = 6'd4;
-        STACK_FORMAT_I <= 4'h1;
+        STACK_FORMAT_I <= 4'h1; // Throwaway frame (format 1).
     end else if (EX_STATE != EXS_BUILD_STACK && NEXT_EX_STATE == EXS_BUILD_STACK) begin
         case (EXCEPTION)
             EX_INT, EX_ILLEGAL, EX_1010, EX_1111, EX_FORMAT, EX_PRIV, EX_TRAP: begin
-                STACK_POS_VAR = 6'd4; // Format 0.
+                STACK_POS_VAR = 6'd4;   // Format 0: 4-word stack frame.
                 STACK_FORMAT_I <= 4'h0;
             end
             EX_CHK, EX_TRAPcc, EX_TRAPV, EX_TRACE, EX_DIVZERO: begin
-                STACK_POS_VAR = 6'd6; // Format 2.
+                STACK_POS_VAR = 6'd6;   // Format 2: 6-word stack frame.
                 STACK_FORMAT_I <= 4'h2;
             end
             EX_AERR, EX_BERR: begin
                 if (IBOUND) begin
-                    STACK_POS_VAR = 6'd16; // Format A.
+                    STACK_POS_VAR = 6'd16; // Format A: short bus fault frame.
                     STACK_FORMAT_I <= 4'hA;
                 end else begin
-                    STACK_POS_VAR = 6'd46; // Format B.
+                    STACK_POS_VAR = 6'd46; // Format B: long bus fault frame.
                     STACK_FORMAT_I <= 4'hB;
                 end
             end
@@ -574,12 +623,12 @@ always_ff @(posedge CLK) begin : stack_ctrl
     end else if ((EX_STATE == EXS_BUILD_STACK || EX_STATE == EXS_BUILD_TSTACK) && DATA_RDY) begin
         STACK_POS_VAR = STACK_POS_VAR - 6'd2; // Always long words are written.
     end
-    //
+
     STACK_CNT <= STACK_POS_VAR;
     STACK_POS <= STACK_POS_VAR;
 end
 
-// P_STATUSn
+// ---- STATUSn output timing ----
 always_ff @(posedge CLK) begin : status_out
     reg [1:0] CNT;
     if (EX_STATE == EXS_CALC_VECT_NO) begin
@@ -588,12 +637,10 @@ always_ff @(posedge CLK) begin : status_out
                 CNT = 2'b11;
                 STATUSn <= 1'b0;
             end
-            EX_INT, EX_TRACE: begin
+            EX_INT, EX_TRACE:
                 CNT = 2'b10;
-            end
-            default: begin
+            default:
                 CNT = 2'b00;
-            end
         endcase
     end
 
@@ -607,7 +654,7 @@ always_ff @(posedge CLK) begin : status_out
     end
 end
 
-// PIPE_STATUS
+// ---- Instruction pipe refill tracker ----
 always_ff @(posedge CLK) begin : pipe_status
     reg [1:0] CNT;
     if (EX_STATE != EXS_REFILL_PIPE) begin
@@ -621,7 +668,7 @@ always_ff @(posedge CLK) begin : pipe_status
     PIPE_CNT <= CNT;
 end
 
-// EXCEPTION_HANDLER_REG
+// ---- Exception handler state register ----
 always_ff @(posedge CLK) begin : exception_handler_reg
     if (RESET)
         EX_STATE <= EXS_IDLE;
@@ -629,66 +676,49 @@ always_ff @(posedge CLK) begin : exception_handler_reg
         EX_STATE <= NEXT_EX_STATE;
 end
 
-// EXCEPTION_HANDLER_DEC
+// ---- Exception handler next-state logic ----
 always_comb begin : exception_handler_dec
     case (EX_STATE)
         EXS_IDLE: begin
             if ((BUSY_MAIN || BUSY_OPD) && !EX_P_RESET)
-                NEXT_EX_STATE = EXS_IDLE; // Wait until the pipelined architecture is ready.
-            else if (EX_P_RESET || EX_P_AERR || EX_P_BERR)
+                NEXT_EX_STATE = EXS_IDLE; // Wait until the pipeline is idle.
+            else if (any_exception_pending)
                 NEXT_EX_STATE = EXS_INIT;
-            else if (EX_P_TRAP || EX_P_TRAPcc || EX_P_TRAPV || EX_P_CHK || EX_P_DIVZERO)
-                NEXT_EX_STATE = EXS_INIT;
-            else if (EX_P_FORMAT)
-                NEXT_EX_STATE = EXS_INIT;
-            else if (EX_P_TRACE || EX_P_ILLEGAL || EX_P_1010 || EX_P_1111 || EX_P_PRIV)
-                NEXT_EX_STATE = EXS_INIT;
-            else if (EX_P_RTE)
-                NEXT_EX_STATE = EXS_INIT;
-            else if (EX_P_INT)
-                NEXT_EX_STATE = EXS_INIT;
-            else // No exception.
+            else
                 NEXT_EX_STATE = EXS_IDLE;
         end
+
         EXS_INIT: begin
             case (EXCEPTION)
-                EX_RTE:
-                    NEXT_EX_STATE = EXS_VALIDATE_FRAME; // 68K10.
-                EX_INT:
-                    NEXT_EX_STATE = EXS_GET_VECTOR;
-                default:
-                    NEXT_EX_STATE = EXS_CALC_VECT_NO;
+                EX_RTE:  NEXT_EX_STATE = EXS_VALIDATE_FRAME;
+                EX_INT:  NEXT_EX_STATE = EXS_GET_VECTOR;
+                default: NEXT_EX_STATE = EXS_CALC_VECT_NO;
             endcase
         end
-        EXS_GET_VECTOR: begin
-            if (DATA_RDY)
-                NEXT_EX_STATE = EXS_BUILD_STACK;
-            else
-                NEXT_EX_STATE = EXS_GET_VECTOR;
-        end
-        EXS_CALC_VECT_NO: begin
-            case (EXCEPTION)
-                EX_RESET_EX:
-                    NEXT_EX_STATE = EXS_RESTORE_ISP; // Do not stack anything but update the SSP and PC.
-                default:
-                    NEXT_EX_STATE = EXS_BUILD_STACK;
-            endcase
-        end
+
+        EXS_GET_VECTOR:
+            NEXT_EX_STATE = DATA_RDY ? EXS_BUILD_STACK : EXS_GET_VECTOR;
+
+        EXS_CALC_VECT_NO:
+            // Reset: skip stacking, go directly to restore ISP and PC.
+            NEXT_EX_STATE = (EXCEPTION == EX_RESET_EX) ? EXS_RESTORE_ISP : EXS_BUILD_STACK;
+
         EXS_BUILD_STACK: begin
             if (DOUBLE_BUSFLT)
                 NEXT_EX_STATE = EXS_HALTED;
             else if (ACCESS_ERR)
                 NEXT_EX_STATE = EXS_IDLE;
             else if (DATA_RDY && STACK_CNT == 2 && EXCEPTION == EX_INT && MBIT)
-                NEXT_EX_STATE = EXS_SWITCH_STATE; // Build throwaway stack frame.
+                NEXT_EX_STATE = EXS_SWITCH_STATE; // Master->interrupt stack switch.
             else if (DATA_RDY && STACK_CNT == 2)
                 NEXT_EX_STATE = EXS_UPDATE_PC;
             else
                 NEXT_EX_STATE = EXS_BUILD_STACK;
         end
-        EXS_SWITCH_STATE: begin // Required to decrement the correct stack pointer.
+
+        EXS_SWITCH_STATE: // Decrement the correct stack pointer before throwaway frame.
             NEXT_EX_STATE = EXS_BUILD_TSTACK;
-        end
+
         EXS_BUILD_TSTACK: begin // Build throwaway stack frame.
             if (ACCESS_ERR)
                 NEXT_EX_STATE = EXS_IDLE;
@@ -697,6 +727,7 @@ always_comb begin : exception_handler_dec
             else
                 NEXT_EX_STATE = EXS_BUILD_TSTACK;
         end
+
         EXS_UPDATE_PC: begin
             if (DOUBLE_BUSFLT)
                 NEXT_EX_STATE = EXS_HALTED;
@@ -707,6 +738,7 @@ always_comb begin : exception_handler_dec
             else
                 NEXT_EX_STATE = EXS_UPDATE_PC;
         end
+
         EXS_VALIDATE_FRAME: begin
             if (ACCESS_ERR)
                 NEXT_EX_STATE = EXS_IDLE;
@@ -722,6 +754,7 @@ always_comb begin : exception_handler_dec
             end else
                 NEXT_EX_STATE = EXS_VALIDATE_FRAME;
         end
+
         EXS_EXAMINE_VERSION: begin
             if (ACCESS_ERR)
                 NEXT_EX_STATE = EXS_IDLE;
@@ -733,22 +766,15 @@ always_comb begin : exception_handler_dec
             end else
                 NEXT_EX_STATE = EXS_EXAMINE_VERSION;
         end
-        EXS_READ_TOP: begin
-            if (ACCESS_ERR)
-                NEXT_EX_STATE = EXS_IDLE;
-            else if (DATA_RDY)
-                NEXT_EX_STATE = EXS_READ_BOTTOM;
-            else
-                NEXT_EX_STATE = EXS_READ_TOP;
-        end
-        EXS_READ_BOTTOM: begin
-            if (ACCESS_ERR)
-                NEXT_EX_STATE = EXS_IDLE;
-            else if (DATA_RDY)
-                NEXT_EX_STATE = EXS_RESTORE_PC;
-            else
-                NEXT_EX_STATE = EXS_READ_BOTTOM;
-        end
+
+        EXS_READ_TOP:
+            NEXT_EX_STATE = ACCESS_ERR ? EXS_IDLE :
+                            DATA_RDY   ? EXS_READ_BOTTOM : EXS_READ_TOP;
+
+        EXS_READ_BOTTOM:
+            NEXT_EX_STATE = ACCESS_ERR ? EXS_IDLE :
+                            DATA_RDY   ? EXS_RESTORE_PC : EXS_READ_BOTTOM;
+
         EXS_RESTORE_STATUS: begin
             if (DOUBLE_BUSFLT)
                 NEXT_EX_STATE = EXS_HALTED;
@@ -761,6 +787,7 @@ always_comb begin : exception_handler_dec
             else
                 NEXT_EX_STATE = EXS_RESTORE_STATUS;
         end
+
         EXS_RESTORE_ISP: begin
             if (DOUBLE_BUSFLT)
                 NEXT_EX_STATE = EXS_HALTED;
@@ -771,9 +798,10 @@ always_comb begin : exception_handler_dec
             else
                 NEXT_EX_STATE = EXS_RESTORE_ISP;
         end
+
         EXS_RESTORE_PC: begin
             if (DOUBLE_BUSFLT)
-                NEXT_EX_STATE = EXS_HALTED; // Double bus fault.
+                NEXT_EX_STATE = EXS_HALTED;
             else if (ACCESS_ERR)
                 NEXT_EX_STATE = EXS_IDLE;
             else if (EXCEPTION == EX_RESET_EX && DATA_RDY)
@@ -783,6 +811,7 @@ always_comb begin : exception_handler_dec
             else
                 NEXT_EX_STATE = EXS_RESTORE_PC;
         end
+
         EXS_REFILL_PIPE: begin
             if (DOUBLE_BUSFLT)
                 NEXT_EX_STATE = EXS_HALTED;
@@ -793,13 +822,12 @@ always_comb begin : exception_handler_dec
             else
                 NEXT_EX_STATE = EXS_REFILL_PIPE;
         end
-        EXS_HALTED: begin
-            // Processor halted, Double bus error!
+
+        EXS_HALTED: // Processor halted on double bus fault.
             NEXT_EX_STATE = EXS_HALTED;
-        end
-        default: begin
+
+        default:
             NEXT_EX_STATE = EXS_IDLE;
-        end
     endcase
 end
 

@@ -200,6 +200,8 @@ module WF68K30L_TOP #(
 
 `include "wf68k30L_pkg.svh"
 
+// ---- Internal signal declarations ----
+
 logic        ADn;
 logic [31:0] ADR_CPY_EXH;
 logic [31:0] ADR_EFF;
@@ -428,221 +430,422 @@ logic        VBR_RD;
 logic        WR_REQ;
 logic        WR_REQ_I;
 
-// IDATA_BUFFER:
-// This register stores the immediate data.
-always_ff @(posedge CLK) begin
-    if (STORE_IDATA_B2) begin
+// ========================================================================
+// Immediate data buffer
+// ========================================================================
+
+always_ff @(posedge CLK) begin : idata_buffer
+    if (STORE_IDATA_B2)
         IBUFFER[31:16] <= EXT_WORD;
-    end else if (STORE_IDATA_B1) begin
+    else if (STORE_IDATA_B1)
         IBUFFER[15:0] <= EXT_WORD;
-    end
 end
 
-assign DATA_IMMEDIATE = (OP == ADDI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
-                         (OP == ANDI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
-                         (OP == CMPI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
-                         (OP == EORI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
-                         (OP == SUBI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
-                         (OP == ORI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
-                         (OP == ANDI_TO_SR) ? {16'h0, BIW_1} :
-                         (OP == EORI_TO_SR) ? {16'h0, BIW_1} :
-                         (OP == ORI_TO_SR) ? {16'h0, BIW_1} :
-                         (OP == STOP) ? {16'h0, BIW_1} :
-                         (OP == ADDI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
-                         (OP == ANDI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
-                         (OP == CMPI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
-                         (OP == EORI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
-                         (OP == SUBI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
-                         (OP == ORI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
-                         (OP == ANDI_TO_CCR) ? {24'h0, BIW_1[7:0]} :
-                         (OP == EORI_TO_CCR) ? {24'h0, BIW_1[7:0]} :
-                         (OP == ORI_TO_CCR) ? {24'h0, BIW_1[7:0]} :
-                         (OP == ADDI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
-                         (OP == ANDI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
-                         (OP == CMPI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
-                         (OP == EORI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
-                         (OP == SUBI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
-                         (OP == ORI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
-                         ((OP == ADDQ || OP == SUBQ) && BIW_0[11:9] == 3'b000) ? 32'h8 :
-                         (OP == ADDQ || OP == SUBQ) ? {24'h0, 5'b00000, BIW_0[11:9]} :
-                         (OP == MOVEQ) ? {24'h0, BIW_0[7:0]} :
-                         (OP == DBcc) ? 32'h1 :
-                         (OP == PACK || OP == UNPK) ? {16'h0, BIW_1[15:0]} :
-                         (OP_SIZE == LONG) ? IBUFFER : {16'h0, IBUFFER[15:0]};
+// ========================================================================
+// Immediate data multiplexer
+// ========================================================================
+// Selects the correct immediate value based on the current operation and
+// operand size. LONG immediates come from concatenated BIW words; shorter
+// sizes are zero-extended from BIW_1 or the instruction word itself.
 
-// Internal registers are place holders written as zeros.
-// Exception handler multiplexing:
+always_comb begin : data_immediate_mux
+    // Check for operations with dedicated immediate encodings first.
+    if ((OP == ADDQ || OP == SUBQ) && BIW_0[11:9] == 3'b000)
+        DATA_IMMEDIATE = 32'h8; // Quick #8 encoded as 000 in the instruction.
+    else if (OP == ADDQ || OP == SUBQ)
+        DATA_IMMEDIATE = {24'h0, 5'b00000, BIW_0[11:9]};
+    else if (OP == MOVEQ)
+        DATA_IMMEDIATE = {24'h0, BIW_0[7:0]};
+    else if (OP == DBcc)
+        DATA_IMMEDIATE = 32'h1;
+    else if (OP == PACK || OP == UNPK)
+        DATA_IMMEDIATE = {16'h0, BIW_1[15:0]};
+    // Status register immediate operations (always word or byte).
+    else if (OP == ANDI_TO_SR || OP == EORI_TO_SR || OP == ORI_TO_SR || OP == STOP)
+        DATA_IMMEDIATE = {16'h0, BIW_1};
+    else if (OP == ANDI_TO_CCR || OP == EORI_TO_CCR || OP == ORI_TO_CCR)
+        DATA_IMMEDIATE = {24'h0, BIW_1[7:0]};
+    // Sized ALU immediates (ADDI, ANDI, CMPI, EORI, SUBI, ORI).
+    else if ((OP == ADDI || OP == ANDI || OP == CMPI || OP == EORI || OP == SUBI || OP == ORI) && OP_SIZE == LONG)
+        DATA_IMMEDIATE = {BIW_1, BIW_2};
+    else if ((OP == ADDI || OP == ANDI || OP == CMPI || OP == EORI || OP == SUBI || OP == ORI) && OP_SIZE == WORD)
+        DATA_IMMEDIATE = {16'h0, BIW_1};
+    else if (OP == ADDI || OP == ANDI || OP == CMPI || OP == EORI || OP == SUBI || OP == ORI)
+        DATA_IMMEDIATE = {24'h0, BIW_1[7:0]}; // BYTE
+    // Default: from the immediate data buffer.
+    else if (OP_SIZE == LONG)
+        DATA_IMMEDIATE = IBUFFER;
+    else
+        DATA_IMMEDIATE = {16'h0, IBUFFER[15:0]};
+end
+
+// ========================================================================
+// Exception handler data multiplexer
+// ========================================================================
+
 assign DATA_EXH = (STACK_POS == 2) ? {SR_CPY, PC[31:16]} :
                    (STACK_POS == 4) ? {PC[15:0], STACK_FORMAT, 2'b00, IVECT_OFFS} :
                    (STACK_FORMAT == 4'h2 && STACK_POS == 6) ? PC :
                    (STACK_FORMAT == 4'h9 && STACK_POS == 6) ? PC :
                    (STACK_POS == 6) ? {BIW_0, FC, FB, RC, RB, 3'b000, SSW_80} : // Format A and B.
                    (STACK_POS == 8) ? {BIW_1, BIW_2} : // Format A and B.
-                   (STACK_FORMAT == 4'h9 && STACK_POS == 10) ? FAULT_ADR : // ADR_EFF_cp.
+                   (STACK_FORMAT == 4'h9 && STACK_POS == 10) ? FAULT_ADR :
                    (STACK_POS == 10) ? ADR_CPY_EXH :
                    (STACK_POS == 14) ? OUTBUFFER :
-                   (STACK_POS == 20) ? PC + 32'd4 : // STAGE B address.
+                   (STACK_POS == 20) ? PC + 32'd4 : // Stage B address.
                    (STACK_POS == 24) ? INBUFFER :
                    (STACK_POS == 28) ? {16'h0, VERSION} : 32'h0;
 
-assign DATA_IN_EXH = (BUSY_MAIN) ? ALU_RESULT[31:0] : DATA_TO_CORE; // MOVEC handles the VBR.
+// ========================================================================
+// Core data path routing
+// ========================================================================
 
-assign DATA_FROM_CORE = (BUSY_EXH) ? DATA_EXH :
-                         (OP_WB == CAS || OP_WB == CAS2) ? DR_OUT_2 : // Update operands.
+assign DATA_IN_EXH = BUSY_MAIN ? ALU_RESULT[31:0] : DATA_TO_CORE; // MOVEC handles the VBR.
+
+assign DATA_FROM_CORE = BUSY_EXH ? DATA_EXH :
+                         (OP_WB == CAS || OP_WB == CAS2) ? DR_OUT_2 :
                          ALU_RESULT[31:0];
 
-assign SP_ADD_DISPL = SP_ADD_DISPL_MAIN || SP_ADD_DISPL_EXH;
+// ========================================================================
+// Register file input multiplexers
+// ========================================================================
 
-assign AR_SEL_RD_1 = (BUSY_EXH) ? 3'b111 : AR_SEL_RD_1_MAIN; // ISP during exception.
+// Address register port 1 input: exception handler, ALU writeback, or instruction-specific routing.
+always_comb begin : ar_in_1_mux
+    if (BUSY_EXH)
+        AR_IN_1 = DATA_TO_CORE;
+    else if (ALU_BSY && AR_WR_1)
+        AR_IN_1 = ALU_RESULT[31:0];
+    else if (ALU_BSY && (DFC_WR || SFC_WR || ISP_WR || MSP_WR || USP_WR))
+        AR_IN_1 = ALU_RESULT[31:0];
+    else if (OP == JMP || OP == JSR)
+        AR_IN_1 = ADR_EFF;
+    else if (FETCH_MEM_ADR)
+        AR_IN_1 = DATA_TO_CORE;
+    else if (USE_DREG)
+        AR_IN_1 = DR_OUT_1; // CAS2: Address register from data register.
+    else if (OP == LINK || OP == UNLK)
+        AR_IN_1 = AR_OUT_1;
+    else
+        AR_IN_1 = DATA_TO_CORE; // Default used for RTD, RTR, RTS.
+end
 
-assign AR_IN_1 = (BUSY_EXH) ? DATA_TO_CORE :
-                  (ALU_BSY && AR_WR_1) ? ALU_RESULT[31:0] :
-                  (ALU_BSY && (DFC_WR || SFC_WR || ISP_WR || MSP_WR || USP_WR)) ? ALU_RESULT[31:0] :
-                  (OP == JMP || OP == JSR) ? ADR_EFF :
-                  (FETCH_MEM_ADR) ? DATA_TO_CORE :
-                  (USE_DREG) ? DR_OUT_1 : // CAS2: Address register from data register.
-                  (OP == LINK || OP == UNLK) ? AR_OUT_1 : DATA_TO_CORE; // Default used for RTD, RTR, RTS.
+assign AR_IN_2 = (OP_WB == EXG) ? ALU_RESULT[63:32] : ALU_RESULT[31:0];
 
-assign AR_IN_2 = (OP_WB == EXG) ? ALU_RESULT[63:32] : ALU_RESULT[31:0]; // Default is for UNLK.
-
-assign DR_IN_1 = (OP_WB == EXG && ALU_BSY && DR_WR_1 && BIW_0_WB_73 == 5'b10001) ? ALU_RESULT[63:32] : // Address and data registers.
+// Data register port 1 input: EXG swaps upper/lower result halves.
+assign DR_IN_1 = (OP_WB == EXG && ALU_BSY && DR_WR_1 && BIW_0_WB_73 == 5'b10001) ? ALU_RESULT[63:32] :
                   ALU_RESULT[31:0];
 
 assign DR_IN_2 = ALU_RESULT[63:32];
 
-assign ALU_OP1_IN = (SR_WR_EXH) ? DATA_TO_CORE :
-                     (OP == DBcc || OP == PACK || OP == UNPK) ? DATA_IMMEDIATE :
-                     ((OP == ABCD || OP == SBCD) && !BIW_0[3]) ? DR_OUT_1 :
-                     (OP == ABCD || OP == SBCD) ? DATA_TO_CORE :
-                     ((OP == ADD || OP == SUB) && BIW_0[8]) ? DR_OUT_1 :
-                     ((OP == AND_B || OP == EOR || OP == OR_B) && BIW_0[8]) ? DR_OUT_1 :
-                     ((OP == ADDX || OP == SUBX) && !BIW_0[3]) ? DR_OUT_1 :
-                     (OP == ADDX || OP == SUBX) ? DATA_TO_CORE :
-                     (OP == ASL || OP == ASR || OP == LSL || OP == LSR) ? DR_OUT_1 :
-                     (OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR) ? DR_OUT_1 :
-                     (OP == BFINS) ? DR_OUT_2 : // The pattern.
-                     (OP == CAS || OP == CAS2) ? DR_OUT_1 : // Compare operand.
-                     (OP == CMPM) ? DATA_TO_CORE :
-                     (OP == BSR || OP == JSR) ? PC + PC_EW_OFFSET :
-                     (OP == LEA || OP == PEA) ? ADR_EFF :
-                     (OP == MOVE && BIW_0[5:3] == 3'b001) ? AR_OUT_2 : // An to any location.
-                     (OP == MOVE_USP) ? AR_OUT_1 :
-                     (OP == EXG && BIW_0[7:3] == 5'b01001) ? AR_OUT_1 : // Two address registers.
-                     (OP == EXG) ? DR_OUT_1 : // Two data registers.
-                     (OP == MOVEC && VBR_RD) ? VBR :
-                     (OP == MOVEC && SFC_RD) ? {28'h0, 1'b0, SFC} :
-                     (OP == MOVEC && DFC_RD) ? {28'h0, 1'b0, DFC} :
-                     (OP == MOVEC && (ISP_RD || MSP_RD || USP_RD)) ? AR_OUT_1 :
-                     (OP == MOVEC && BIW_1[15]) ? AR_OUT_1 :
-                     (OP == MOVEC) ? DR_OUT_1 :
-                     (OP == MOVEM && !BIW_0[10] && !ADn) ? DR_OUT_1 : // Register to memory.
-                     (OP == MOVEM && !BIW_0[10]) ? AR_OUT_2 : // Register to memory.
-                     (OP == MOVES && BIW_1[11] && !BIW_1[15]) ? DR_OUT_1 : // Register to memory.
-                     (OP == MOVES && BIW_1[11]) ? AR_OUT_2 : // Register to memory.
-                     (OP == MOVEP && MOVEP_PNTR == 3 && BIW_0[7:6] > 2'b01) ? {24'h0, DR_OUT_1[31:24]} :
-                     (OP == MOVEP && MOVEP_PNTR == 2 && BIW_0[7:6] > 2'b01) ? {24'h0, DR_OUT_1[23:16]} :
-                     (OP == MOVEP && MOVEP_PNTR == 1 && BIW_0[7:6] > 2'b01) ? {24'h0, DR_OUT_1[15:8]} :
-                     (OP == MOVEP && BIW_0[7:6] > 2'b01) ? {24'h0, DR_OUT_1[7:0]} :
-                     (OP == MOVEP && MOVEP_PNTR == 3) ? {DATA_TO_CORE[7:0], DR_OUT_1[23:0]} :
-                     (OP == MOVEP && MOVEP_PNTR == 2) ? {DR_OUT_1[31:24], DATA_TO_CORE[7:0], DR_OUT_1[15:0]} :
-                     (OP == MOVEP && MOVEP_PNTR == 1) ? {DR_OUT_1[31:16], DATA_TO_CORE[7:0], DR_OUT_1[7:0]} :
-                     (OP == MOVEP) ? {DR_OUT_1[31:8], DATA_TO_CORE[7:0]} :
-                     (OP == MOVE_TO_CCR && BIW_0[5:3] == 3'b000) ? {16'h0, STATUS_REG[15:8], DR_OUT_1[7:0]} :
-                     (OP == MOVE_TO_CCR && BIW_0[5:0] == 6'b111100) ? {16'h0, STATUS_REG[15:8], DATA_IMMEDIATE[7:0]} :
-                     (OP == MOVE_TO_CCR) ? {16'h0, STATUS_REG[15:8], DATA_TO_CORE[7:0]} :
-                     (OP == MOVE_TO_SR && BIW_0[5:3] == 3'b000) ? {16'h0, DR_OUT_1[15:0]} :
-                     (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100) ? {16'h0, DATA_IMMEDIATE[15:0]} :
-                     (OP == MOVE_TO_SR) ? {16'h0, DATA_TO_CORE[15:0]} :
-                     (OP == MOVE_FROM_CCR) ? {24'h0, 3'b000, STATUS_REG[4:0]} :
-                     (OP == MOVE_FROM_SR) ? {16'h0, STATUS_REG} :
-                     (OP == STOP) ? DATA_IMMEDIATE : // Status register information.
-                     (OP == MOVEQ) ? DATA_IMMEDIATE :
-                     (OP == NEG || OP == NEGX || OP == NBCD) ? 32'h0 :
-                     (OP == ADDI || OP == CMPI || OP == SUBI || OP == ANDI || OP == EORI || OP == ORI) ? DATA_IMMEDIATE :
-                     (OP == ADDQ || OP == SUBQ) ? DATA_IMMEDIATE :
-                     (OP == ANDI_TO_CCR || OP == ANDI_TO_SR) ? DATA_IMMEDIATE :
-                     (OP == EORI_TO_CCR || OP == EORI_TO_SR) ? DATA_IMMEDIATE :
-                     (OP == ORI_TO_CCR || OP == ORI_TO_SR) ? DATA_IMMEDIATE :
-                     (BIW_0[5:3] == 3'b000) ? DR_OUT_1 :
-                     (BIW_0[5:3] == 3'b001) ? AR_OUT_1 :
-                     (BIW_0[5:0] == 6'b111100) ? DATA_IMMEDIATE : DATA_TO_CORE;
+// ========================================================================
+// ALU operand 1 multiplexer
+// ========================================================================
+// Routes the first ALU operand from the appropriate source based on the
+// current instruction. Priority ordering prevents data hazards.
 
-assign ALU_OP2_IN = ((OP == ABCD || OP == SBCD) && !BIW_0[3]) ? DR_OUT_2 :
-                     (OP == ABCD || OP == SBCD) ? DATA_TO_CORE :
-                     ((OP == ADDX || OP == SUBX) && !BIW_0[3]) ? DR_OUT_2 :
-                     (OP == ADDX || OP == SUBX) ? DATA_TO_CORE :
-                     ((OP == ADD || OP == CMP || OP == SUB) && !BIW_0[8]) ? DR_OUT_2 :
-                     ((OP == AND_B || OP == OR_B) && !BIW_0[8]) ? DR_OUT_2 :
-                     (OP == ADDA || OP == CMPA || OP == SUBA) ? AR_OUT_2 :
-                     (OP == EXG && BIW_0[7:3] == 5'b01000) ? DR_OUT_2 : // Two data registers.
-                     (OP == EXG) ? AR_OUT_2 :
-                     ((OP == ASL || OP == ASR) && BIW_0[7:6] != 2'b11) ? DR_OUT_2 : // Register shifts.
-                     ((OP == LSL || OP == LSR) && BIW_0[7:6] != 2'b11) ? DR_OUT_2 : // Register shifts.
-                     ((OP == ROTL || OP == ROTR) && BIW_0[7:6] != 2'b11) ? DR_OUT_2 : // Register shifts.
-                     ((OP == ROXL || OP == ROXR) && BIW_0[7:6] != 2'b11) ? DR_OUT_2 : // Register shifts.
-                     (OP == ANDI_TO_CCR || OP == ANDI_TO_SR) ? {16'h0, STATUS_REG} :
-                     (OP == EORI_TO_CCR || OP == EORI_TO_SR) ? {16'h0, STATUS_REG} :
-                     (OP == ORI_TO_CCR || OP == ORI_TO_SR) ? {16'h0, STATUS_REG} :
-                     (OP == CAS || OP == CAS2) ? DATA_TO_CORE : // Destination operand.
-                     ((OP == CHK2 || OP == CMP2) && USE_DREG) ? DR_OUT_2 :
-                     (OP == CHK || OP == CHK2 || OP == CMP2) ? AR_OUT_2 :
-                     (OP == CMPM) ? DATA_TO_CORE :
-                     (OP == DBcc || OP == SWAP) ? DR_OUT_2 :
-                     (OP == DIVS || OP == DIVU) ? DR_OUT_2 :
-                     (OP == MULS || OP == MULU) ? DR_OUT_2 :
-                     ((OP == PACK || OP == UNPK) && !BIW_0[3]) ? DR_OUT_1 : // Register direct.
-                     (OP == PACK || OP == UNPK) ? DATA_TO_CORE :
-                     (OP == LINK) ? AR_OUT_1 :
-                     (BIW_0[5:3] == 3'b000) ? DR_OUT_2 :
-                     (BIW_0[5:3] == 3'b001) ? AR_OUT_2 : DATA_TO_CORE;
+always_comb begin : alu_op1_mux
+    if (SR_WR_EXH)
+        ALU_OP1_IN = DATA_TO_CORE;
+    else if (OP == DBcc || OP == PACK || OP == UNPK)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    // BCD operations: register direct vs memory.
+    else if ((OP == ABCD || OP == SBCD) && !BIW_0[3])
+        ALU_OP1_IN = DR_OUT_1;
+    else if (OP == ABCD || OP == SBCD)
+        ALU_OP1_IN = DATA_TO_CORE;
+    // ADD/SUB direction bit [8]: 1=Dn op EA->EA, 0=EA op Dn->Dn.
+    else if ((OP == ADD || OP == SUB) && BIW_0[8])
+        ALU_OP1_IN = DR_OUT_1;
+    else if ((OP == AND_B || OP == EOR || OP == OR_B) && BIW_0[8])
+        ALU_OP1_IN = DR_OUT_1;
+    // Extended arithmetic: register direct vs memory.
+    else if ((OP == ADDX || OP == SUBX) && !BIW_0[3])
+        ALU_OP1_IN = DR_OUT_1;
+    else if (OP == ADDX || OP == SUBX)
+        ALU_OP1_IN = DATA_TO_CORE;
+    // Shift/rotate register operand.
+    else if (OP == ASL || OP == ASR || OP == LSL || OP == LSR)
+        ALU_OP1_IN = DR_OUT_1;
+    else if (OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR)
+        ALU_OP1_IN = DR_OUT_1;
+    // Bit field insert pattern.
+    else if (OP == BFINS)
+        ALU_OP1_IN = DR_OUT_2;
+    // CAS/CAS2 compare operand.
+    else if (OP == CAS || OP == CAS2)
+        ALU_OP1_IN = DR_OUT_1;
+    else if (OP == CMPM)
+        ALU_OP1_IN = DATA_TO_CORE;
+    // Subroutine calls push return address.
+    else if (OP == BSR || OP == JSR)
+        ALU_OP1_IN = PC + PC_EW_OFFSET;
+    // Load effective address.
+    else if (OP == LEA || OP == PEA)
+        ALU_OP1_IN = ADR_EFF;
+    // MOVE from address register.
+    else if (OP == MOVE && BIW_0[5:3] == ADR_AN)
+        ALU_OP1_IN = AR_OUT_2;
+    else if (OP == MOVE_USP)
+        ALU_OP1_IN = AR_OUT_1;
+    // EXG: two address registers vs two data registers.
+    else if (OP == EXG && BIW_0[7:3] == 5'b01001)
+        ALU_OP1_IN = AR_OUT_1;
+    else if (OP == EXG)
+        ALU_OP1_IN = DR_OUT_1;
+    // MOVEC: source depends on control register being accessed.
+    else if (OP == MOVEC && VBR_RD)
+        ALU_OP1_IN = VBR;
+    else if (OP == MOVEC && SFC_RD)
+        ALU_OP1_IN = {28'h0, 1'b0, SFC};
+    else if (OP == MOVEC && DFC_RD)
+        ALU_OP1_IN = {28'h0, 1'b0, DFC};
+    else if (OP == MOVEC && (ISP_RD || MSP_RD || USP_RD))
+        ALU_OP1_IN = AR_OUT_1;
+    else if (OP == MOVEC && BIW_1[15])
+        ALU_OP1_IN = AR_OUT_1;
+    else if (OP == MOVEC)
+        ALU_OP1_IN = DR_OUT_1;
+    // MOVEM: register to memory.
+    else if (OP == MOVEM && !BIW_0[10] && !ADn)
+        ALU_OP1_IN = DR_OUT_1;
+    else if (OP == MOVEM && !BIW_0[10])
+        ALU_OP1_IN = AR_OUT_2;
+    // MOVES: register to memory.
+    else if (OP == MOVES && BIW_1[11] && !BIW_1[15])
+        ALU_OP1_IN = DR_OUT_1;
+    else if (OP == MOVES && BIW_1[11])
+        ALU_OP1_IN = AR_OUT_2;
+    // MOVEP: byte extraction/insertion by pointer position.
+    else if (OP == MOVEP && MOVEP_PNTR == 3 && BIW_0[7:6] > 2'b01)
+        ALU_OP1_IN = {24'h0, DR_OUT_1[31:24]};
+    else if (OP == MOVEP && MOVEP_PNTR == 2 && BIW_0[7:6] > 2'b01)
+        ALU_OP1_IN = {24'h0, DR_OUT_1[23:16]};
+    else if (OP == MOVEP && MOVEP_PNTR == 1 && BIW_0[7:6] > 2'b01)
+        ALU_OP1_IN = {24'h0, DR_OUT_1[15:8]};
+    else if (OP == MOVEP && BIW_0[7:6] > 2'b01)
+        ALU_OP1_IN = {24'h0, DR_OUT_1[7:0]};
+    else if (OP == MOVEP && MOVEP_PNTR == 3)
+        ALU_OP1_IN = {DATA_TO_CORE[7:0], DR_OUT_1[23:0]};
+    else if (OP == MOVEP && MOVEP_PNTR == 2)
+        ALU_OP1_IN = {DR_OUT_1[31:24], DATA_TO_CORE[7:0], DR_OUT_1[15:0]};
+    else if (OP == MOVEP && MOVEP_PNTR == 1)
+        ALU_OP1_IN = {DR_OUT_1[31:16], DATA_TO_CORE[7:0], DR_OUT_1[7:0]};
+    else if (OP == MOVEP)
+        ALU_OP1_IN = {DR_OUT_1[31:8], DATA_TO_CORE[7:0]};
+    // MOVE to CCR/SR: source depends on EA mode.
+    else if (OP == MOVE_TO_CCR && BIW_0[5:3] == ADR_DN)
+        ALU_OP1_IN = {16'h0, STATUS_REG[15:8], DR_OUT_1[7:0]};
+    else if (OP == MOVE_TO_CCR && BIW_0[5:0] == 6'b111100)
+        ALU_OP1_IN = {16'h0, STATUS_REG[15:8], DATA_IMMEDIATE[7:0]};
+    else if (OP == MOVE_TO_CCR)
+        ALU_OP1_IN = {16'h0, STATUS_REG[15:8], DATA_TO_CORE[7:0]};
+    else if (OP == MOVE_TO_SR && BIW_0[5:3] == ADR_DN)
+        ALU_OP1_IN = {16'h0, DR_OUT_1[15:0]};
+    else if (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100)
+        ALU_OP1_IN = {16'h0, DATA_IMMEDIATE[15:0]};
+    else if (OP == MOVE_TO_SR)
+        ALU_OP1_IN = {16'h0, DATA_TO_CORE[15:0]};
+    // MOVE from CCR/SR.
+    else if (OP == MOVE_FROM_CCR)
+        ALU_OP1_IN = {24'h0, 3'b000, STATUS_REG[4:0]};
+    else if (OP == MOVE_FROM_SR)
+        ALU_OP1_IN = {16'h0, STATUS_REG};
+    // STOP loads immediate into SR.
+    else if (OP == STOP)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    else if (OP == MOVEQ)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    // Negate/BCD negate: second operand is zero.
+    else if (OP == NEG || OP == NEGX || OP == NBCD)
+        ALU_OP1_IN = 32'h0;
+    // Immediate ALU operations.
+    else if (OP == ADDI || OP == CMPI || OP == SUBI || OP == ANDI || OP == EORI || OP == ORI)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    else if (OP == ADDQ || OP == SUBQ)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    else if (OP == ANDI_TO_CCR || OP == ANDI_TO_SR)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    else if (OP == EORI_TO_CCR || OP == EORI_TO_SR)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    else if (OP == ORI_TO_CCR || OP == ORI_TO_SR)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    // Default EA-mode routing.
+    else if (BIW_0[5:3] == ADR_DN)
+        ALU_OP1_IN = DR_OUT_1;
+    else if (BIW_0[5:3] == ADR_AN)
+        ALU_OP1_IN = AR_OUT_1;
+    else if (BIW_0[5:0] == 6'b111100)
+        ALU_OP1_IN = DATA_IMMEDIATE;
+    else
+        ALU_OP1_IN = DATA_TO_CORE;
+end
 
-assign ALU_OP3_IN = ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) && BIW_0[5:3] != 3'b000) ? DATA_TO_CORE :
-                     ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && BIW_0[5:3] != 3'b000) ? DATA_TO_CORE :
+// ========================================================================
+// ALU operand 2 multiplexer
+// ========================================================================
+
+always_comb begin : alu_op2_mux
+    // BCD: register direct vs memory.
+    if ((OP == ABCD || OP == SBCD) && !BIW_0[3])
+        ALU_OP2_IN = DR_OUT_2;
+    else if (OP == ABCD || OP == SBCD)
+        ALU_OP2_IN = DATA_TO_CORE;
+    // Extended arithmetic.
+    else if ((OP == ADDX || OP == SUBX) && !BIW_0[3])
+        ALU_OP2_IN = DR_OUT_2;
+    else if (OP == ADDX || OP == SUBX)
+        ALU_OP2_IN = DATA_TO_CORE;
+    // ADD/CMP/SUB: direction bit selects register vs memory.
+    else if ((OP == ADD || OP == CMP || OP == SUB) && !BIW_0[8])
+        ALU_OP2_IN = DR_OUT_2;
+    else if ((OP == AND_B || OP == OR_B) && !BIW_0[8])
+        ALU_OP2_IN = DR_OUT_2;
+    // Address register arithmetic.
+    else if (OP == ADDA || OP == CMPA || OP == SUBA)
+        ALU_OP2_IN = AR_OUT_2;
+    // EXG: two data registers vs data+address or two address registers.
+    else if (OP == EXG && BIW_0[7:3] == 5'b01000)
+        ALU_OP2_IN = DR_OUT_2;
+    else if (OP == EXG)
+        ALU_OP2_IN = AR_OUT_2;
+    // Register shifts/rotates (not memory shifts, which use BIW_0[7:6]==11).
+    else if ((OP == ASL || OP == ASR) && BIW_0[7:6] != 2'b11)
+        ALU_OP2_IN = DR_OUT_2;
+    else if ((OP == LSL || OP == LSR) && BIW_0[7:6] != 2'b11)
+        ALU_OP2_IN = DR_OUT_2;
+    else if ((OP == ROTL || OP == ROTR) && BIW_0[7:6] != 2'b11)
+        ALU_OP2_IN = DR_OUT_2;
+    else if ((OP == ROXL || OP == ROXR) && BIW_0[7:6] != 2'b11)
+        ALU_OP2_IN = DR_OUT_2;
+    // Immediate-to-SR operations combine immediate with current SR.
+    else if (OP == ANDI_TO_CCR || OP == ANDI_TO_SR)
+        ALU_OP2_IN = {16'h0, STATUS_REG};
+    else if (OP == EORI_TO_CCR || OP == EORI_TO_SR)
+        ALU_OP2_IN = {16'h0, STATUS_REG};
+    else if (OP == ORI_TO_CCR || OP == ORI_TO_SR)
+        ALU_OP2_IN = {16'h0, STATUS_REG};
+    // CAS/CAS2 destination operand.
+    else if (OP == CAS || OP == CAS2)
+        ALU_OP2_IN = DATA_TO_CORE;
+    // CHK bounds check.
+    else if ((OP == CHK2 || OP == CMP2) && USE_DREG)
+        ALU_OP2_IN = DR_OUT_2;
+    else if (OP == CHK || OP == CHK2 || OP == CMP2)
+        ALU_OP2_IN = AR_OUT_2;
+    else if (OP == CMPM)
+        ALU_OP2_IN = DATA_TO_CORE;
+    else if (OP == DBcc || OP == SWAP)
+        ALU_OP2_IN = DR_OUT_2;
+    else if (OP == DIVS || OP == DIVU)
+        ALU_OP2_IN = DR_OUT_2;
+    else if (OP == MULS || OP == MULU)
+        ALU_OP2_IN = DR_OUT_2;
+    // PACK/UNPK: register direct vs memory.
+    else if ((OP == PACK || OP == UNPK) && !BIW_0[3])
+        ALU_OP2_IN = DR_OUT_1;
+    else if (OP == PACK || OP == UNPK)
+        ALU_OP2_IN = DATA_TO_CORE;
+    else if (OP == LINK)
+        ALU_OP2_IN = AR_OUT_1;
+    // Default EA-mode routing.
+    else if (BIW_0[5:3] == ADR_DN)
+        ALU_OP2_IN = DR_OUT_2;
+    else if (BIW_0[5:3] == ADR_AN)
+        ALU_OP2_IN = AR_OUT_2;
+    else
+        ALU_OP2_IN = DATA_TO_CORE;
+end
+
+// ========================================================================
+// ALU operand 3 multiplexer (bit field / CAS2 / CHK2)
+// ========================================================================
+
+assign ALU_OP3_IN = ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) && BIW_0[5:3] != ADR_DN) ? DATA_TO_CORE :
+                     ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && BIW_0[5:3] != ADR_DN) ? DATA_TO_CORE :
                      (OP == CAS2 || OP == CHK2 || OP == CMP2) ? DATA_TO_CORE : DR_OUT_1;
 
-assign OP_SIZE = (BUSY_EXH) ? OP_SIZE_EXH : OP_SIZE_MAIN;
-assign OP_SIZE_BUS = (DATA_WR_MAIN) ? OP_SIZE_WB : OP_SIZE;
+// ========================================================================
+// Operand size routing
+// ========================================================================
 
+assign OP_SIZE = BUSY_EXH ? OP_SIZE_EXH : OP_SIZE_MAIN;
+assign OP_SIZE_BUS = DATA_WR_MAIN ? OP_SIZE_WB : OP_SIZE;
+
+// ========================================================================
+// PC-related signals
+// ========================================================================
 
 assign PC_OFFSET = PC_OFFSET_OPD;
 assign PC_L = PC + PC_ADR_OFFSET;
+assign PC_INC_EXH_I = !LOOP_SPLIT ? PC_INC_EXH : 1'b0; // Suppress for a split loop.
+assign PC_LOAD = PC_LOAD_EXH || PC_LOAD_MAIN;
 
-assign PC_INC_EXH_I = (!LOOP_SPLIT) ? PC_INC_EXH : 1'b0; // Suppress for a split loop.
+// ========================================================================
+// Address path control
+// ========================================================================
 
-assign ADR_MODE = (BUSY_EXH) ? 3'b010 : ADR_MODE_MAIN; // (ISP)
+assign ADR_MODE = BUSY_EXH ? 3'b010 : ADR_MODE_MAIN; // (ISP) during exception.
+assign SP_ADD_DISPL = SP_ADD_DISPL_MAIN || SP_ADD_DISPL_EXH;
+assign AR_SEL_RD_1 = BUSY_EXH ? 3'b111 : AR_SEL_RD_1_MAIN; // ISP during exception.
 
-// The bit field offset is byte aligned
-assign ADR_OFFSET = (FETCH_MEM_ADR) ? 32'h0 :
-                     (BUSY_EXH) ? ADR_OFFSET_EXH :
-                     ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) && !BF_OFFSET[31]) ? {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
-                     (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? {3'b111, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
-                     ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && !BF_OFFSET[31]) ? {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
-                     (OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) ? {3'b111, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
-                     {24'h0, 2'b00, ADR_OFFSET_MAIN};
+// Byte-aligned bit field offset for address calculation.
+always_comb begin : adr_offset_mux
+    if (FETCH_MEM_ADR)
+        ADR_OFFSET = 32'h0;
+    else if (BUSY_EXH)
+        ADR_OFFSET = ADR_OFFSET_EXH;
+    else if ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) && !BF_OFFSET[31])
+        ADR_OFFSET = {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN;
+    else if (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU)
+        ADR_OFFSET = {3'b111, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN;
+    else if ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && !BF_OFFSET[31])
+        ADR_OFFSET = {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN;
+    else if (OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST)
+        ADR_OFFSET = {3'b111, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN;
+    else
+        ADR_OFFSET = {24'h0, 2'b00, ADR_OFFSET_MAIN};
+end
 
-assign DBcc_COND = (OP_WB == DBcc && ALU_RESULT[15:0] == 16'hFFFF) ? 1'b1 : 1'b0;
+// ========================================================================
+// Condition and branch prediction
+// ========================================================================
 
-// Take a branch if the CPU space will change:
-assign BRANCH_ATN = (OP == ANDI_TO_SR && !DATA_IMMEDIATE[13] && STATUS_REG[13]) ? 1'b1 :
-                     (OP == ANDI_TO_SR && !DATA_IMMEDIATE[12] && STATUS_REG[12]) ? 1'b1 :
-                     (OP == EORI_TO_SR && DATA_IMMEDIATE[13]) ? 1'b1 :
-                     (OP == EORI_TO_SR && DATA_IMMEDIATE[12]) ? 1'b1 :
-                     (OP == ORI_TO_SR && DATA_IMMEDIATE[13] && !STATUS_REG[13]) ? 1'b1 :
-                     (OP == ORI_TO_SR && DATA_IMMEDIATE[12] && !STATUS_REG[12]) ? 1'b1 :
-                     (OP == MOVE_TO_SR && BIW_0[5:3] == 3'b000 && DR_OUT_1[13:12] != STATUS_REG[13:12]) ? 1'b1 :
-                     (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100 && DATA_IMMEDIATE[13:12] != STATUS_REG[13:12]) ? 1'b1 :
-                     (OP == MOVE_TO_SR && DATA_TO_CORE[13:12] != STATUS_REG[13:12]) ? 1'b1 : 1'b0;
+assign DBcc_COND = (OP_WB == DBcc && ALU_RESULT[15:0] == 16'hFFFF);
+
+// Predict a branch if an SR-modifying instruction will change the CPU space.
+always_comb begin : branch_prediction
+    BRANCH_ATN = 1'b0;
+    if (OP == ANDI_TO_SR && !DATA_IMMEDIATE[13] && STATUS_REG[13])
+        BRANCH_ATN = 1'b1;
+    else if (OP == ANDI_TO_SR && !DATA_IMMEDIATE[12] && STATUS_REG[12])
+        BRANCH_ATN = 1'b1;
+    else if (OP == EORI_TO_SR && DATA_IMMEDIATE[13])
+        BRANCH_ATN = 1'b1;
+    else if (OP == EORI_TO_SR && DATA_IMMEDIATE[12])
+        BRANCH_ATN = 1'b1;
+    else if (OP == ORI_TO_SR && DATA_IMMEDIATE[13] && !STATUS_REG[13])
+        BRANCH_ATN = 1'b1;
+    else if (OP == ORI_TO_SR && DATA_IMMEDIATE[12] && !STATUS_REG[12])
+        BRANCH_ATN = 1'b1;
+    else if (OP == MOVE_TO_SR && BIW_0[5:3] == ADR_DN && DR_OUT_1[13:12] != STATUS_REG[13:12])
+        BRANCH_ATN = 1'b1;
+    else if (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100 && DATA_IMMEDIATE[13:12] != STATUS_REG[13:12])
+        BRANCH_ATN = 1'b1;
+    else if (OP == MOVE_TO_SR && DATA_TO_CORE[13:12] != STATUS_REG[13:12])
+        BRANCH_ATN = 1'b1;
+end
+
+// ========================================================================
+// Bus request arbitration
+// ========================================================================
 
 assign DATA_RD = DATA_RD_EXH || DATA_RD_MAIN;
 assign DATA_WR = DATA_WR_EXH || DATA_WR_MAIN;
 
-// P_BUSREQ:
-always_ff @(posedge CLK) begin
-    // We need these flip flops to avoid combinatorial loops:
-    // The requests are valid until the bus controller enters
-    // its START_CYCLE bus phase and asserts there the BUS_BSY.
-    // After the bus controller enters the bus access state,
-    // the requests are withdrawn.
+always_ff @(posedge CLK) begin : bus_req_latch
+    // Flip-flops break combinatorial loops between core requests and bus controller.
+    // Requests are valid until the bus controller enters START_CYCLE and asserts BUS_BSY.
     if (!BUS_BSY) begin
         RD_REQ_I <= DATA_RD;
         WR_REQ_I <= DATA_WR;
@@ -654,81 +857,92 @@ always_ff @(posedge CLK) begin
     end
 end
 
-assign RD_REQ = (!BUS_BSY) ? DATA_RD : RD_REQ_I;
-assign WR_REQ = (!BUS_BSY) ? DATA_WR : WR_REQ_I;
-assign OPCODE_REQ = (!BUS_BSY) ? OPCODE_RD : OPCODE_REQ_I;
+assign RD_REQ = !BUS_BSY ? DATA_RD : RD_REQ_I;
+assign WR_REQ = !BUS_BSY ? DATA_WR : WR_REQ_I;
+assign OPCODE_REQ = !BUS_BSY ? OPCODE_RD : OPCODE_REQ_I;
 
-assign DISPLACEMENT = (BUSY_MAIN) ? DISPLACEMENT_MAIN : {24'h0, DISPLACEMENT_EXH};
+// ========================================================================
+// Miscellaneous signal multiplexing
+// ========================================================================
 
+assign DISPLACEMENT = BUSY_MAIN ? DISPLACEMENT_MAIN : {24'h0, DISPLACEMENT_EXH};
 assign SR_WR = SR_WR_EXH || SR_WR_MAIN;
-
 assign IPIPE_FLUSH = IPIPE_FLUSH_EXH || IPIPE_FLUSH_MAIN;
-
 assign ISP_WR = ISP_WR_MAIN || ISP_LOAD_EXH;
-
-assign AVECn_BUSIF = (BUSY_EXH) ? AVECn : 1'b1;
+assign AVECn_BUSIF = BUSY_EXH ? AVECn : 1'b1;
 
 assign CPU_SPACE = (OP == BKPT && DATA_RD_MAIN) ? 1'b1 :
-                    (BUSY_EXH) ? CPU_SPACE_EXH : 1'b0;
+                    BUSY_EXH ? CPU_SPACE_EXH : 1'b0;
 
-// The bit field offset is bit wise.
-assign BF_OFFSET = (!BIW_1[11]) ? {24'h0, 3'b000, BIW_1[10:6]} : DR_OUT_1;
+// ========================================================================
+// Bit field offset/width and BITPOS
+// ========================================================================
+
+// The bit field offset is bit-wise.
+assign BF_OFFSET = !BIW_1[11] ? {24'h0, 3'b000, BIW_1[10:6]} : DR_OUT_1;
 assign BF_WIDTH = (BIW_1[4:0] != 5'b00000 && !BIW_1[5]) ? {1'b0, BIW_1[4:0]} :
                    (DR_OUT_1[4:0] != 5'b00000 && BIW_1[5]) ? {1'b0, DR_OUT_1[4:0]} : 6'b100000;
 
-// The BITPOS is valid for bit operations and bit field operations. For BCHG, BCLR, BSET and BTST
-// the BITPOS spans 0 to 31 bytes, when it is in register direct mode. It is modulo 8 in memory
-// manipulation mode. For the bit field operations in register direct mode it also in the
-// range 0 to 31. For bit fields in memory the value is byte wide (0 to 7) because the bit
-// field from a memory location are loaded from byte boundaries.
-assign BITPOS = ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && !BIW_0[8] && ADR_MODE == 3'b000) ? BIW_1[4:0] :
-                 ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && !BIW_0[8]) ? {2'b00, BIW_1[2:0]} :
-                 ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && ADR_MODE == 3'b000) ? DR_OUT_1[4:0] :
-                 (OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) ? {2'b00, DR_OUT_1[2:0]} :
-                 (!BIW_1[11] && ADR_MODE == 3'b000) ? BIW_1[10:6] :
-                 (!BIW_1[11]) ? {2'b00, BIW_1[8:6]} :
-                 (ADR_MODE == 3'b000) ? DR_OUT_1[4:0] : {2'b00, DR_OUT_1[2:0]};
+// BITPOS spans 0-31 for register direct mode, modulo-8 for memory mode.
+// For bit field operations in memory, values are 0-7 (byte-aligned loads).
+always_comb begin : bitpos_mux
+    if ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && !BIW_0[8] && ADR_MODE == ADR_DN)
+        BITPOS = BIW_1[4:0];
+    else if ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && !BIW_0[8])
+        BITPOS = {2'b00, BIW_1[2:0]};
+    else if ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && ADR_MODE == ADR_DN)
+        BITPOS = DR_OUT_1[4:0];
+    else if (OP == BCHG || OP == BCLR || OP == BSET || OP == BTST)
+        BITPOS = {2'b00, DR_OUT_1[2:0]};
+    else if (!BIW_1[11] && ADR_MODE == ADR_DN)
+        BITPOS = BIW_1[10:6];
+    else if (!BIW_1[11])
+        BITPOS = {2'b00, BIW_1[8:6]};
+    else if (ADR_MODE == ADR_DN)
+        BITPOS = DR_OUT_1[4:0];
+    else
+        BITPOS = {2'b00, DR_OUT_1[2:0]};
+end
 
-assign TRAP_AERR = (!BUSY_EXH) ? AERR : 1'b0; // No address error from the system during exception processing.
+// ========================================================================
+// Trap and function code signals
+// ========================================================================
 
-assign USE_DFC = (OP_WB == MOVES && DATA_WR_MAIN) ? 1'b1 : 1'b0;
-assign USE_SFC = (OP_WB == MOVES && DATA_RD_MAIN) ? 1'b1 : 1'b0;
+assign TRAP_AERR = !BUSY_EXH ? AERR : 1'b0; // No address error from the system during exception processing.
+assign USE_DFC = (OP_WB == MOVES && DATA_WR_MAIN);
+assign USE_SFC = (OP_WB == MOVES && DATA_RD_MAIN);
 
-assign PC_LOAD = PC_LOAD_EXH || PC_LOAD_MAIN;
+// ========================================================================
+// Input synchronization
+// ========================================================================
 
 assign RESET_IN = ~RESET_INn;
 assign IPL = ~IPLn;
 
-// REFILL_STATUS:
-// This tiny logic provides signal transition on the negative
-// clock edge.
-always_ff @(negedge CLK) begin
-    if (STATUSn_EXH && STATUSn_MAIN) begin
-        STATUSn <= 1'b1;
-    end else begin
-        STATUSn <= 1'b0;
-    end
+// ========================================================================
+// Status output (active on negedge CLK)
+// ========================================================================
+
+always_ff @(negedge CLK) begin : refill_status
+    STATUSn <= !(STATUSn_EXH && STATUSn_MAIN) ? 1'b0 : 1'b1;
     REFILLn <= REFILLn_EXH;
 end
+
+// ========================================================================
+// Status register and address bus
+// ========================================================================
 
 assign SBIT = STATUS_REG[13];
 
 assign ADR_L = BKPT_CYCLE ? {24'h0, 3'b000, BIW_0[2:0], 2'b00} :
                 CPU_SPACE_EXH ? {28'hFFFFFFF, IRQ_PEND, 1'b1} :
-                (DATA_WR_MAIN) ? ADR_EFF_WB : ADR_EFF; // Exception handler uses ADR_EFF for read and write access.
+                DATA_WR_MAIN ? ADR_EFF_WB : ADR_EFF;
 
-assign ADR_P = (BUS_BSY) ? ADR_LATCH :
+assign ADR_P = BUS_BSY ? ADR_LATCH :
                 (DATA_RD || DATA_WR) ? ADR_L : PC_L;
 
-// P_ADR_LATCHES:
-// This register stores the address during a running bus cycle.
-// The signals RD_DATA, WR_DATA and RD_OPCODE may change during
-// the cycle. Opcode read is lower prioritized.
-// FAULT_ADR latches the faulty address for stacking it via
-// the exception handler.
-// The FC_LATCH register stores the function code during a running
-// bus cycle.
-always_ff @(posedge CLK) begin
+// Address and fault address latches.
+always_ff @(posedge CLK) begin : adr_latches
     if (!BUS_BSY) begin
         ADR_LATCH <= ADR_P;
         FC_LATCH <= FC_I;
@@ -737,13 +951,29 @@ always_ff @(posedge CLK) begin
     end
 end
 
-assign FC_I = (BUS_BSY) ? FC_LATCH :
-               USE_SFC ? SFC :
-               USE_DFC ? DFC :
-               ((DATA_RD || DATA_WR) && CPU_SPACE) ? 3'b111 :
-               ((DATA_RD || DATA_WR) && SBIT) ? 3'b101 :
-               (DATA_RD || DATA_WR) ? 3'b001 :
-               (OPCODE_RD && SBIT) ? 3'b110 : 3'b010; // Default is OPCODE_RD and SBIT = '0'.
+// Function code generation.
+always_comb begin : fc_generation
+    if (BUS_BSY)
+        FC_I = FC_LATCH;
+    else if (USE_SFC)
+        FC_I = SFC;
+    else if (USE_DFC)
+        FC_I = DFC;
+    else if ((DATA_RD || DATA_WR) && CPU_SPACE)
+        FC_I = FC_CPU_SPACE;
+    else if ((DATA_RD || DATA_WR) && SBIT)
+        FC_I = FC_SUPER_DATA;
+    else if (DATA_RD || DATA_WR)
+        FC_I = FC_USER_DATA;
+    else if (OPCODE_RD && SBIT)
+        FC_I = FC_SUPER_PROG;
+    else
+        FC_I = FC_USER_PROG;
+end
+
+// ========================================================================
+// Submodule instantiations
+// ========================================================================
 
     WF68K30L_ADDRESS_REGISTERS I_ADDRESSREGISTERS (
         .CLK                    (CLK),
