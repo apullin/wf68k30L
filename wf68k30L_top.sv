@@ -43,105 +43,8 @@
 // applicable conditions                                                //
 //                                                                      //
 //----------------------------------------------------------------------//
-//
-// Revision History
-//
-// Revision 2K14B 20141201 WF
-//   Initial Release.
-// Revision 2K16A 20160620 WF
-//   Control section: fixed a bug in the MOVEM operation. Thanks to Raymond Mounissamy.
-//   Address section: minor optimizations.
-// Revision 2K18A 20180620 WF
-//   Control: Fixed a bug in MOVE An,-(Ay). Thanks to Gary Bingham for the support.
-//   Top: changed ALU_OP1_IN multiplexer due to MOVE An,-(Ay) bug.
-//   Address registers: Changed ADR_ATN logic to be valid one clock cycle earlier.
-// Revision 2K18A (unreleased) WF
-//   Top / Opdecoder / Exhandler: Removed REST_BIW_0.
-//   Exhandler: Removed PC_OFFSET.
-//   ALU: Bug fix: MOVEM sign extension.
-//   Address registers: Removed PC_REG.
-//   Control: Fixed wrong PEA behaviour.
-//   Control: Fixed the displacement for LINK.
-//   ALU: Fix for restoring correct values during the DIVS and DIVU in word format.
-//   Control: Fixed the operation size for MOVEQ.
-//   Control: ADDQ, SUBQ Fix: address registers are always written long.
-//   Top, exception handler, address registers: Fixed PC restoring during exception processing.
-//   Control: ADDI, ANDI, EORI, ORI, SUBI: address is not marked used if destination is Dn.
-//   Control: ADDI, ANDI, EORI, ORI, SUBI: data register is marked used if destination is Dn.
-//   Bus interface: Suppress bus faults during RESET instruction.
-//   Bus interface: Optimized ASn and DSn timing for synchronous RAM.
-//   ALU: Fixed the SUBQ calculation.
-//   Opcode decoder: Fixed the PW_EW_OFFSET calculation for JSR.
-//   Top: fixed the value of DATA_IMMEDIATE for ADDQ and SUBQ in case of #8.
-//   ALU: Rearanged the Offset for the JSR instruction.
-//   Control: Fixed AR_MARK_USED in LINK.
-//   ALU: EXT instruction uses now RESULT(63 downto 0).
-//   Top: Introduced OP_WB form the control unit.
-//   Top: Rearanged the AR_IN_1 multiplexer to avoid data hazards.
-//   Top: Rearanged the AR_IN_2 multiplexer to avoid data hazards.
-//   Top: Rearanged the DR_IN_1 multiplexer to avoid data hazards.
-//   Top: Rearanged the DR_IN_2 multiplexer to avoid data hazards.
-//   EXG: rearanged logic to meet the new top level multiplexers.
-//   Control: LINK, UNLK: wait in START_OP until the ALU is ready (avoids possible data hazards).
-//   Top: ALU_OP1_IN to meet the new EXG multiplexers.
-//   Top: ALU_OP2_IN to meet the new EXG multiplexers.
-//   Address registers: Fixed the writing of ISP_REG during EXG instruction with two address registers.
-//   Control: MOVEM: Fixed predecrement mode for consecutive MOVEM -(An).
-//   Control: MOVEP: MOVEP_PNTR is now correct for consecutive MOVEP.
-//   Control: MOVEP: avoid structural hazard in SWITCH_STATE by waiting for ALU.
-//   Control: LINK, UNLK: fixed the write back operation size.
-//   Exception handler: Fixed the vector calculation of INT vectors.
-//   Exception handler: Fixed faulty modelling in IRQ_FILTER.
-//   Exception handler: Implemented the AVEC_FILTER to better meet bus timings.
-//   Control: EOR: fixed a bug in the writeback mechanism.
-//   Control: BSR, JSR: EXEC_WB state machine waits now for ALU_INIT. Avoid structural / data hazard.
-//   Control: the instruction pipe is not flushed for MOVE_FROM_CCR, MOVE_FROM_SR, MOVE_USP, MOVEC.
-//   Control: Modifications in the FETCH state machine to avoid several data hazards for MOVEM, MOVE_FROM_CCR, MOVE_FROM_SR.
-//   Control: Modifications in the FETCH state machine to avoid several data hazards for ANDI_TO_CCR, ANDI_TO_SR, EORI_TO_CCR, EORI_TO_SR, ORI_TO_CCR, ORI_TO_SR.
-//   Exception handler: The RTE exception has now highest priority (avoids mismatch).
-//   Control: Bugfix: the condition codes were not updated if there was a pending interrupt.
-//   Control: We have to stop a pending operation in case of a pending interrupt. This is done by rejecting OW_RDY.
-//   TOP, Control, Exception handler Opcode Decoder: Rearanged PC_INC and ipipe flush logic.
-//   Bus interface: BUS_EN is now active except during arbitration.
-//   Control: Write the undecremented Register for MOVE Ax, -(Ax).
-//   ALU: Fixed wrong condition codes for AND_B, ANDI, EOR, EORI, OR_B, ORI and NOT_B.
-//   Exception handler: Update the IRQ mask only for RESET and interrupts.
-//   Bus interface: Opted out START_READ and CHK_RD.
-//   Control: UNMARK is now asserted in the end of the write cycle. This avoids data hazards.
-//   Exception handler: external interrupts are postponed if any system controllers are in initialize operation status.
-//   ALU: Fixed writeback issues in the status register logic.
-//   ALU: Fixed writing the stack pointer registers (MSBIT is used now).
-//   Control: Fixed a MOVEC writeback issue (use BIW_WB... instead of BIW_...).
-//   Control: Fixed a USP writeback issue (use BIW_WB... instead of BIW_...).
-//   ALU: the address registers are always written long.
-//   Top: opted out SBIT_AREG and MBIT_AREG.
-//   Address register bugfix: exception handler do not increment and decrement the USP any more.
-//   Control: Introduced a switch NO_PIPELINE.
-//   Address registers, Control: MOVEM-Fix see STORE_AEFF.
-//   Control: DBcc: fixed a data hazard for DBcc_COND evaluation by waiting on the ALU result.
-//   Control: Fixed DR_WR_1 locking against AR_WR_2.
-//   Control: IPIPE is flushed, when there is a memory space change in the end of xx_TO_SR operations.
-//   Control: To handle correct addressing, ADR_OFFSET is now cleared right in the end of the respective operation.
-//   Control: Fixed a bug in EOR writing back in register direct mode.
-//   ALU: Fixed a bug in MULU.W (input operands are now 16 bit wide).
-//   Control: ADDQ and SUBQ: fixed (An)+ mode. An increments now.
-//   Control: Fixed DIVS, DIVU in memory address modes (wrong control flow).
-//   Control: ADDQ and SUBQ: fixed condition code control UPDT_CC.
-//   Control: fixed a data hazard bug using addressing modes with index register.
-//   Opcode decoder: Fix for unimplemented or illegal operations: PC is increased before stacked.
-//   Exception handler: RTE now loads the address offset correctly when entering the handler.
-//   Control: Implemented the 68K10 loop mechanism.
-//   Opcode decoder Implemented the 68K10 loop mechanism.
-//   Bus interface: Fixed the faulty bus arbitration logic.
-//   Opcode decoder: Removed CAHR, we have no cache.
-//   Top: Removed a data hazard in the DR_IN_1 multiplexer (EXG operation).
-// Revision 2K19A 20190419 WF
-//   Control: Fixed several pipelinig issues (hazards).
-//   New feature: Branch prediction for the status register manipulation operations (BRANCH_ATN).
-//   Exception handler, Opcode decoder, Top: Rearranged address error handling.
-//   Bus interface, Exception handler, Opcode decoder, Top: Rearranged address error handling.
-//   Top, Address registers: Removed ADR_ATN. Not required any more.
-//   Control: Introdeced a new state CALC_AEFF which results in no need of ADR_ATN and a twice highre fmax.
+// Revision History: see original VHDL source for full changelog.
+// Revisions 2K14B through 2K19A by Wolfgang Foerster.
 //
 
 module WF68K30L_TOP #(
@@ -254,7 +157,7 @@ logic [7:3]  BIW_0_WB_73;
 logic [15:0] BIW_1;
 logic [15:0] BIW_2;
 logic [31:0] BF_OFFSET;
-logic [5:0]  BF_WIDTH = 6'b100000; // Default needed for simulation!
+logic [5:0]  BF_WIDTH;
 logic        BKPT_CYCLE;
 logic        BKPT_INSERT;
 logic        BRANCH_ATN;
@@ -312,7 +215,6 @@ logic        FETCH_MEM_ADR;
 logic [2:0]  FC_I;
 logic [2:0]  FC_LATCH;
 logic        HILOn;
-logic [31:0] IBUFFER;
 logic [31:0] INBUFFER;
 logic        INT_TRIG;
 logic [2:0]  IPL;
@@ -431,55 +333,6 @@ logic        WR_REQ;
 logic        WR_REQ_I;
 
 // ========================================================================
-// Immediate data buffer
-// ========================================================================
-
-always_ff @(posedge CLK) begin : idata_buffer
-    if (STORE_IDATA_B2)
-        IBUFFER[31:16] <= EXT_WORD;
-    else if (STORE_IDATA_B1)
-        IBUFFER[15:0] <= EXT_WORD;
-end
-
-// ========================================================================
-// Immediate data multiplexer
-// ========================================================================
-// Selects the correct immediate value based on the current operation and
-// operand size. LONG immediates come from concatenated BIW words; shorter
-// sizes are zero-extended from BIW_1 or the instruction word itself.
-
-always_comb begin : data_immediate_mux
-    // Check for operations with dedicated immediate encodings first.
-    if ((OP == ADDQ || OP == SUBQ) && BIW_0[11:9] == 3'b000)
-        DATA_IMMEDIATE = 32'h8; // Quick #8 encoded as 000 in the instruction.
-    else if (OP == ADDQ || OP == SUBQ)
-        DATA_IMMEDIATE = {24'h0, 5'b00000, BIW_0[11:9]};
-    else if (OP == MOVEQ)
-        DATA_IMMEDIATE = {24'h0, BIW_0[7:0]};
-    else if (OP == DBcc)
-        DATA_IMMEDIATE = 32'h1;
-    else if (OP == PACK || OP == UNPK)
-        DATA_IMMEDIATE = {16'h0, BIW_1[15:0]};
-    // Status register immediate operations (always word or byte).
-    else if (OP == ANDI_TO_SR || OP == EORI_TO_SR || OP == ORI_TO_SR || OP == STOP)
-        DATA_IMMEDIATE = {16'h0, BIW_1};
-    else if (OP == ANDI_TO_CCR || OP == EORI_TO_CCR || OP == ORI_TO_CCR)
-        DATA_IMMEDIATE = {24'h0, BIW_1[7:0]};
-    // Sized ALU immediates (ADDI, ANDI, CMPI, EORI, SUBI, ORI).
-    else if ((OP == ADDI || OP == ANDI || OP == CMPI || OP == EORI || OP == SUBI || OP == ORI) && OP_SIZE == LONG)
-        DATA_IMMEDIATE = {BIW_1, BIW_2};
-    else if ((OP == ADDI || OP == ANDI || OP == CMPI || OP == EORI || OP == SUBI || OP == ORI) && OP_SIZE == WORD)
-        DATA_IMMEDIATE = {16'h0, BIW_1};
-    else if (OP == ADDI || OP == ANDI || OP == CMPI || OP == EORI || OP == SUBI || OP == ORI)
-        DATA_IMMEDIATE = {24'h0, BIW_1[7:0]}; // BYTE
-    // Default: from the immediate data buffer.
-    else if (OP_SIZE == LONG)
-        DATA_IMMEDIATE = IBUFFER;
-    else
-        DATA_IMMEDIATE = {16'h0, IBUFFER[15:0]};
-end
-
-// ========================================================================
 // Exception handler data multiplexer
 // ========================================================================
 
@@ -507,263 +360,76 @@ assign DATA_FROM_CORE = BUSY_EXH ? DATA_EXH :
                          ALU_RESULT[31:0];
 
 // ========================================================================
-// Register file input multiplexers
+// Operand routing submodule
 // ========================================================================
+// ALU operand multiplexers, register file input muxes, bit field
+// offset/width/BITPOS, branch prediction, and DBcc condition are all
+// handled by the operand mux submodule.
 
-// Address register port 1 input: exception handler, ALU writeback, or instruction-specific routing.
-always_comb begin : ar_in_1_mux
-    if (BUSY_EXH)
-        AR_IN_1 = DATA_TO_CORE;
-    else if (ALU_BSY && AR_WR_1)
-        AR_IN_1 = ALU_RESULT[31:0];
-    else if (ALU_BSY && (DFC_WR || SFC_WR || ISP_WR || MSP_WR || USP_WR))
-        AR_IN_1 = ALU_RESULT[31:0];
-    else if (OP == JMP || OP == JSR)
-        AR_IN_1 = ADR_EFF;
-    else if (FETCH_MEM_ADR)
-        AR_IN_1 = DATA_TO_CORE;
-    else if (USE_DREG)
-        AR_IN_1 = DR_OUT_1; // CAS2: Address register from data register.
-    else if (OP == LINK || OP == UNLK)
-        AR_IN_1 = AR_OUT_1;
-    else
-        AR_IN_1 = DATA_TO_CORE; // Default used for RTD, RTR, RTS.
-end
-
-assign AR_IN_2 = (OP_WB == EXG) ? ALU_RESULT[63:32] : ALU_RESULT[31:0];
-
-// Data register port 1 input: EXG swaps upper/lower result halves.
-assign DR_IN_1 = (OP_WB == EXG && ALU_BSY && DR_WR_1 && BIW_0_WB_73 == 5'b10001) ? ALU_RESULT[63:32] :
-                  ALU_RESULT[31:0];
-
-assign DR_IN_2 = ALU_RESULT[63:32];
-
-// ========================================================================
-// ALU operand 1 multiplexer
-// ========================================================================
-// Routes the first ALU operand from the appropriate source based on the
-// current instruction. Priority ordering prevents data hazards.
-
-always_comb begin : alu_op1_mux
-    if (SR_WR_EXH)
-        ALU_OP1_IN = DATA_TO_CORE;
-    else if (OP == DBcc || OP == PACK || OP == UNPK)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    // BCD operations: register direct vs memory.
-    else if ((OP == ABCD || OP == SBCD) && !BIW_0[3])
-        ALU_OP1_IN = DR_OUT_1;
-    else if (OP == ABCD || OP == SBCD)
-        ALU_OP1_IN = DATA_TO_CORE;
-    // ADD/SUB direction bit [8]: 1=Dn op EA->EA, 0=EA op Dn->Dn.
-    else if ((OP == ADD || OP == SUB) && BIW_0[8])
-        ALU_OP1_IN = DR_OUT_1;
-    else if ((OP == AND_B || OP == EOR || OP == OR_B) && BIW_0[8])
-        ALU_OP1_IN = DR_OUT_1;
-    // Extended arithmetic: register direct vs memory.
-    else if ((OP == ADDX || OP == SUBX) && !BIW_0[3])
-        ALU_OP1_IN = DR_OUT_1;
-    else if (OP == ADDX || OP == SUBX)
-        ALU_OP1_IN = DATA_TO_CORE;
-    // Shift/rotate register operand.
-    else if (OP == ASL || OP == ASR || OP == LSL || OP == LSR)
-        ALU_OP1_IN = DR_OUT_1;
-    else if (OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR)
-        ALU_OP1_IN = DR_OUT_1;
-    // Bit field insert pattern.
-    else if (OP == BFINS)
-        ALU_OP1_IN = DR_OUT_2;
-    // CAS/CAS2 compare operand.
-    else if (OP == CAS || OP == CAS2)
-        ALU_OP1_IN = DR_OUT_1;
-    else if (OP == CMPM)
-        ALU_OP1_IN = DATA_TO_CORE;
-    // Subroutine calls push return address.
-    else if (OP == BSR || OP == JSR)
-        ALU_OP1_IN = PC + PC_EW_OFFSET;
-    // Load effective address.
-    else if (OP == LEA || OP == PEA)
-        ALU_OP1_IN = ADR_EFF;
-    // MOVE from address register.
-    else if (OP == MOVE && BIW_0[5:3] == ADR_AN)
-        ALU_OP1_IN = AR_OUT_2;
-    else if (OP == MOVE_USP)
-        ALU_OP1_IN = AR_OUT_1;
-    // EXG: two address registers vs two data registers.
-    else if (OP == EXG && BIW_0[7:3] == 5'b01001)
-        ALU_OP1_IN = AR_OUT_1;
-    else if (OP == EXG)
-        ALU_OP1_IN = DR_OUT_1;
-    // MOVEC: source depends on control register being accessed.
-    else if (OP == MOVEC && VBR_RD)
-        ALU_OP1_IN = VBR;
-    else if (OP == MOVEC && SFC_RD)
-        ALU_OP1_IN = {28'h0, 1'b0, SFC};
-    else if (OP == MOVEC && DFC_RD)
-        ALU_OP1_IN = {28'h0, 1'b0, DFC};
-    else if (OP == MOVEC && (ISP_RD || MSP_RD || USP_RD))
-        ALU_OP1_IN = AR_OUT_1;
-    else if (OP == MOVEC && BIW_1[15])
-        ALU_OP1_IN = AR_OUT_1;
-    else if (OP == MOVEC)
-        ALU_OP1_IN = DR_OUT_1;
-    // MOVEM: register to memory.
-    else if (OP == MOVEM && !BIW_0[10] && !ADn)
-        ALU_OP1_IN = DR_OUT_1;
-    else if (OP == MOVEM && !BIW_0[10])
-        ALU_OP1_IN = AR_OUT_2;
-    // MOVES: register to memory.
-    else if (OP == MOVES && BIW_1[11] && !BIW_1[15])
-        ALU_OP1_IN = DR_OUT_1;
-    else if (OP == MOVES && BIW_1[11])
-        ALU_OP1_IN = AR_OUT_2;
-    // MOVEP: byte extraction/insertion by pointer position.
-    else if (OP == MOVEP && MOVEP_PNTR == 3 && BIW_0[7:6] > 2'b01)
-        ALU_OP1_IN = {24'h0, DR_OUT_1[31:24]};
-    else if (OP == MOVEP && MOVEP_PNTR == 2 && BIW_0[7:6] > 2'b01)
-        ALU_OP1_IN = {24'h0, DR_OUT_1[23:16]};
-    else if (OP == MOVEP && MOVEP_PNTR == 1 && BIW_0[7:6] > 2'b01)
-        ALU_OP1_IN = {24'h0, DR_OUT_1[15:8]};
-    else if (OP == MOVEP && BIW_0[7:6] > 2'b01)
-        ALU_OP1_IN = {24'h0, DR_OUT_1[7:0]};
-    else if (OP == MOVEP && MOVEP_PNTR == 3)
-        ALU_OP1_IN = {DATA_TO_CORE[7:0], DR_OUT_1[23:0]};
-    else if (OP == MOVEP && MOVEP_PNTR == 2)
-        ALU_OP1_IN = {DR_OUT_1[31:24], DATA_TO_CORE[7:0], DR_OUT_1[15:0]};
-    else if (OP == MOVEP && MOVEP_PNTR == 1)
-        ALU_OP1_IN = {DR_OUT_1[31:16], DATA_TO_CORE[7:0], DR_OUT_1[7:0]};
-    else if (OP == MOVEP)
-        ALU_OP1_IN = {DR_OUT_1[31:8], DATA_TO_CORE[7:0]};
-    // MOVE to CCR/SR: source depends on EA mode.
-    else if (OP == MOVE_TO_CCR && BIW_0[5:3] == ADR_DN)
-        ALU_OP1_IN = {16'h0, STATUS_REG[15:8], DR_OUT_1[7:0]};
-    else if (OP == MOVE_TO_CCR && BIW_0[5:0] == 6'b111100)
-        ALU_OP1_IN = {16'h0, STATUS_REG[15:8], DATA_IMMEDIATE[7:0]};
-    else if (OP == MOVE_TO_CCR)
-        ALU_OP1_IN = {16'h0, STATUS_REG[15:8], DATA_TO_CORE[7:0]};
-    else if (OP == MOVE_TO_SR && BIW_0[5:3] == ADR_DN)
-        ALU_OP1_IN = {16'h0, DR_OUT_1[15:0]};
-    else if (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100)
-        ALU_OP1_IN = {16'h0, DATA_IMMEDIATE[15:0]};
-    else if (OP == MOVE_TO_SR)
-        ALU_OP1_IN = {16'h0, DATA_TO_CORE[15:0]};
-    // MOVE from CCR/SR.
-    else if (OP == MOVE_FROM_CCR)
-        ALU_OP1_IN = {24'h0, 3'b000, STATUS_REG[4:0]};
-    else if (OP == MOVE_FROM_SR)
-        ALU_OP1_IN = {16'h0, STATUS_REG};
-    // STOP loads immediate into SR.
-    else if (OP == STOP)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    else if (OP == MOVEQ)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    // Negate/BCD negate: second operand is zero.
-    else if (OP == NEG || OP == NEGX || OP == NBCD)
-        ALU_OP1_IN = 32'h0;
-    // Immediate ALU operations.
-    else if (OP == ADDI || OP == CMPI || OP == SUBI || OP == ANDI || OP == EORI || OP == ORI)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    else if (OP == ADDQ || OP == SUBQ)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    else if (OP == ANDI_TO_CCR || OP == ANDI_TO_SR)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    else if (OP == EORI_TO_CCR || OP == EORI_TO_SR)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    else if (OP == ORI_TO_CCR || OP == ORI_TO_SR)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    // Default EA-mode routing.
-    else if (BIW_0[5:3] == ADR_DN)
-        ALU_OP1_IN = DR_OUT_1;
-    else if (BIW_0[5:3] == ADR_AN)
-        ALU_OP1_IN = AR_OUT_1;
-    else if (BIW_0[5:0] == 6'b111100)
-        ALU_OP1_IN = DATA_IMMEDIATE;
-    else
-        ALU_OP1_IN = DATA_TO_CORE;
-end
-
-// ========================================================================
-// ALU operand 2 multiplexer
-// ========================================================================
-
-always_comb begin : alu_op2_mux
-    // BCD: register direct vs memory.
-    if ((OP == ABCD || OP == SBCD) && !BIW_0[3])
-        ALU_OP2_IN = DR_OUT_2;
-    else if (OP == ABCD || OP == SBCD)
-        ALU_OP2_IN = DATA_TO_CORE;
-    // Extended arithmetic.
-    else if ((OP == ADDX || OP == SUBX) && !BIW_0[3])
-        ALU_OP2_IN = DR_OUT_2;
-    else if (OP == ADDX || OP == SUBX)
-        ALU_OP2_IN = DATA_TO_CORE;
-    // ADD/CMP/SUB: direction bit selects register vs memory.
-    else if ((OP == ADD || OP == CMP || OP == SUB) && !BIW_0[8])
-        ALU_OP2_IN = DR_OUT_2;
-    else if ((OP == AND_B || OP == OR_B) && !BIW_0[8])
-        ALU_OP2_IN = DR_OUT_2;
-    // Address register arithmetic.
-    else if (OP == ADDA || OP == CMPA || OP == SUBA)
-        ALU_OP2_IN = AR_OUT_2;
-    // EXG: two data registers vs data+address or two address registers.
-    else if (OP == EXG && BIW_0[7:3] == 5'b01000)
-        ALU_OP2_IN = DR_OUT_2;
-    else if (OP == EXG)
-        ALU_OP2_IN = AR_OUT_2;
-    // Register shifts/rotates (not memory shifts, which use BIW_0[7:6]==11).
-    else if ((OP == ASL || OP == ASR) && BIW_0[7:6] != 2'b11)
-        ALU_OP2_IN = DR_OUT_2;
-    else if ((OP == LSL || OP == LSR) && BIW_0[7:6] != 2'b11)
-        ALU_OP2_IN = DR_OUT_2;
-    else if ((OP == ROTL || OP == ROTR) && BIW_0[7:6] != 2'b11)
-        ALU_OP2_IN = DR_OUT_2;
-    else if ((OP == ROXL || OP == ROXR) && BIW_0[7:6] != 2'b11)
-        ALU_OP2_IN = DR_OUT_2;
-    // Immediate-to-SR operations combine immediate with current SR.
-    else if (OP == ANDI_TO_CCR || OP == ANDI_TO_SR)
-        ALU_OP2_IN = {16'h0, STATUS_REG};
-    else if (OP == EORI_TO_CCR || OP == EORI_TO_SR)
-        ALU_OP2_IN = {16'h0, STATUS_REG};
-    else if (OP == ORI_TO_CCR || OP == ORI_TO_SR)
-        ALU_OP2_IN = {16'h0, STATUS_REG};
-    // CAS/CAS2 destination operand.
-    else if (OP == CAS || OP == CAS2)
-        ALU_OP2_IN = DATA_TO_CORE;
-    // CHK bounds check.
-    else if ((OP == CHK2 || OP == CMP2) && USE_DREG)
-        ALU_OP2_IN = DR_OUT_2;
-    else if (OP == CHK || OP == CHK2 || OP == CMP2)
-        ALU_OP2_IN = AR_OUT_2;
-    else if (OP == CMPM)
-        ALU_OP2_IN = DATA_TO_CORE;
-    else if (OP == DBcc || OP == SWAP)
-        ALU_OP2_IN = DR_OUT_2;
-    else if (OP == DIVS || OP == DIVU)
-        ALU_OP2_IN = DR_OUT_2;
-    else if (OP == MULS || OP == MULU)
-        ALU_OP2_IN = DR_OUT_2;
-    // PACK/UNPK: register direct vs memory.
-    else if ((OP == PACK || OP == UNPK) && !BIW_0[3])
-        ALU_OP2_IN = DR_OUT_1;
-    else if (OP == PACK || OP == UNPK)
-        ALU_OP2_IN = DATA_TO_CORE;
-    else if (OP == LINK)
-        ALU_OP2_IN = AR_OUT_1;
-    // Default EA-mode routing.
-    else if (BIW_0[5:3] == ADR_DN)
-        ALU_OP2_IN = DR_OUT_2;
-    else if (BIW_0[5:3] == ADR_AN)
-        ALU_OP2_IN = AR_OUT_2;
-    else
-        ALU_OP2_IN = DATA_TO_CORE;
-end
-
-// ========================================================================
-// ALU operand 3 multiplexer (bit field / CAS2 / CHK2)
-// ========================================================================
-
-assign ALU_OP3_IN = ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) && BIW_0[5:3] != ADR_DN) ? DATA_TO_CORE :
-                     ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && BIW_0[5:3] != ADR_DN) ? DATA_TO_CORE :
-                     (OP == CAS2 || OP == CHK2 || OP == CMP2) ? DATA_TO_CORE : DR_OUT_1;
+    WF68K30L_OPERAND_MUX I_OPERAND_MUX (
+        .CLK                    (CLK),
+        .OP                     (OP),
+        .OP_WB                  (OP_WB),
+        .OP_SIZE                (OP_SIZE),
+        .BIW_0                  (BIW_0),
+        .BIW_0_WB_73            (BIW_0_WB_73),
+        .BIW_1                  (BIW_1),
+        .BIW_2                  (BIW_2),
+        .ADR_MODE               (ADR_MODE),
+        .DATA_TO_CORE           (DATA_TO_CORE),
+        .DR_OUT_1               (DR_OUT_1),
+        .DR_OUT_2               (DR_OUT_2),
+        .AR_OUT_1               (AR_OUT_1),
+        .AR_OUT_2               (AR_OUT_2),
+        .ADR_EFF                (ADR_EFF),
+        .PC                     (PC),
+        .PC_EW_OFFSET           (PC_EW_OFFSET),
+        .STATUS_REG             (STATUS_REG),
+        .VBR                    (VBR),
+        .SFC                    (SFC),
+        .DFC                    (DFC),
+        .ALU_RESULT             (ALU_RESULT),
+        .STORE_IDATA_B1         (STORE_IDATA_B1),
+        .STORE_IDATA_B2         (STORE_IDATA_B2),
+        .EXT_WORD               (EXT_WORD),
+        .BUSY_MAIN              (BUSY_MAIN),
+        .ADR_OFFSET_EXH         (ADR_OFFSET_EXH),
+        .ADR_OFFSET_MAIN        (ADR_OFFSET_MAIN),
+        .BUSY_EXH               (BUSY_EXH),
+        .ALU_BSY                (ALU_BSY),
+        .AR_WR_1                (AR_WR_1),
+        .DR_WR_1                (DR_WR_1),
+        .DFC_WR                 (DFC_WR),
+        .SFC_WR                 (SFC_WR),
+        .ISP_WR                 (ISP_WR),
+        .MSP_WR                 (MSP_WR),
+        .USP_WR                 (USP_WR),
+        .FETCH_MEM_ADR          (FETCH_MEM_ADR),
+        .USE_DREG               (USE_DREG),
+        .VBR_RD                 (VBR_RD),
+        .SFC_RD                 (SFC_RD),
+        .DFC_RD                 (DFC_RD),
+        .ISP_RD                 (ISP_RD),
+        .MSP_RD                 (MSP_RD),
+        .USP_RD                 (USP_RD),
+        .SR_WR_EXH              (SR_WR_EXH),
+        .ADn                    (ADn),
+        .MOVEP_PNTR             (MOVEP_PNTR),
+        .ALU_OP1_IN             (ALU_OP1_IN),
+        .ALU_OP2_IN             (ALU_OP2_IN),
+        .ALU_OP3_IN             (ALU_OP3_IN),
+        .AR_IN_1                (AR_IN_1),
+        .AR_IN_2                (AR_IN_2),
+        .DR_IN_1                (DR_IN_1),
+        .DR_IN_2                (DR_IN_2),
+        .BF_OFFSET              (BF_OFFSET),
+        .BF_WIDTH               (BF_WIDTH),
+        .BITPOS                 (BITPOS),
+        .BRANCH_ATN             (BRANCH_ATN),
+        .DBcc_COND              (DBcc_COND),
+        .DATA_IMMEDIATE         (DATA_IMMEDIATE),
+        .ADR_OFFSET             (ADR_OFFSET)
+    );
 
 // ========================================================================
 // Operand size routing
@@ -789,52 +455,7 @@ assign ADR_MODE = BUSY_EXH ? 3'b010 : ADR_MODE_MAIN; // (ISP) during exception.
 assign SP_ADD_DISPL = SP_ADD_DISPL_MAIN || SP_ADD_DISPL_EXH;
 assign AR_SEL_RD_1 = BUSY_EXH ? 3'b111 : AR_SEL_RD_1_MAIN; // ISP during exception.
 
-// Byte-aligned bit field offset for address calculation.
-always_comb begin : adr_offset_mux
-    if (FETCH_MEM_ADR)
-        ADR_OFFSET = 32'h0;
-    else if (BUSY_EXH)
-        ADR_OFFSET = ADR_OFFSET_EXH;
-    else if ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) && !BF_OFFSET[31])
-        ADR_OFFSET = {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN;
-    else if (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU)
-        ADR_OFFSET = {3'b111, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN;
-    else if ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && !BF_OFFSET[31])
-        ADR_OFFSET = {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN;
-    else if (OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST)
-        ADR_OFFSET = {3'b111, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN;
-    else
-        ADR_OFFSET = {24'h0, 2'b00, ADR_OFFSET_MAIN};
-end
 
-// ========================================================================
-// Condition and branch prediction
-// ========================================================================
-
-assign DBcc_COND = (OP_WB == DBcc && ALU_RESULT[15:0] == 16'hFFFF);
-
-// Predict a branch if an SR-modifying instruction will change the CPU space.
-always_comb begin : branch_prediction
-    BRANCH_ATN = 1'b0;
-    if (OP == ANDI_TO_SR && !DATA_IMMEDIATE[13] && STATUS_REG[13])
-        BRANCH_ATN = 1'b1;
-    else if (OP == ANDI_TO_SR && !DATA_IMMEDIATE[12] && STATUS_REG[12])
-        BRANCH_ATN = 1'b1;
-    else if (OP == EORI_TO_SR && DATA_IMMEDIATE[13])
-        BRANCH_ATN = 1'b1;
-    else if (OP == EORI_TO_SR && DATA_IMMEDIATE[12])
-        BRANCH_ATN = 1'b1;
-    else if (OP == ORI_TO_SR && DATA_IMMEDIATE[13] && !STATUS_REG[13])
-        BRANCH_ATN = 1'b1;
-    else if (OP == ORI_TO_SR && DATA_IMMEDIATE[12] && !STATUS_REG[12])
-        BRANCH_ATN = 1'b1;
-    else if (OP == MOVE_TO_SR && BIW_0[5:3] == ADR_DN && DR_OUT_1[13:12] != STATUS_REG[13:12])
-        BRANCH_ATN = 1'b1;
-    else if (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100 && DATA_IMMEDIATE[13:12] != STATUS_REG[13:12])
-        BRANCH_ATN = 1'b1;
-    else if (OP == MOVE_TO_SR && DATA_TO_CORE[13:12] != STATUS_REG[13:12])
-        BRANCH_ATN = 1'b1;
-end
 
 // ========================================================================
 // Bus request arbitration
@@ -874,35 +495,6 @@ assign AVECn_BUSIF = BUSY_EXH ? AVECn : 1'b1;
 assign CPU_SPACE = (OP == BKPT && DATA_RD_MAIN) ? 1'b1 :
                     BUSY_EXH ? CPU_SPACE_EXH : 1'b0;
 
-// ========================================================================
-// Bit field offset/width and BITPOS
-// ========================================================================
-
-// The bit field offset is bit-wise.
-assign BF_OFFSET = !BIW_1[11] ? {24'h0, 3'b000, BIW_1[10:6]} : DR_OUT_1;
-assign BF_WIDTH = (BIW_1[4:0] != 5'b00000 && !BIW_1[5]) ? {1'b0, BIW_1[4:0]} :
-                   (DR_OUT_1[4:0] != 5'b00000 && BIW_1[5]) ? {1'b0, DR_OUT_1[4:0]} : 6'b100000;
-
-// BITPOS spans 0-31 for register direct mode, modulo-8 for memory mode.
-// For bit field operations in memory, values are 0-7 (byte-aligned loads).
-always_comb begin : bitpos_mux
-    if ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && !BIW_0[8] && ADR_MODE == ADR_DN)
-        BITPOS = BIW_1[4:0];
-    else if ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && !BIW_0[8])
-        BITPOS = {2'b00, BIW_1[2:0]};
-    else if ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && ADR_MODE == ADR_DN)
-        BITPOS = DR_OUT_1[4:0];
-    else if (OP == BCHG || OP == BCLR || OP == BSET || OP == BTST)
-        BITPOS = {2'b00, DR_OUT_1[2:0]};
-    else if (!BIW_1[11] && ADR_MODE == ADR_DN)
-        BITPOS = BIW_1[10:6];
-    else if (!BIW_1[11])
-        BITPOS = {2'b00, BIW_1[8:6]};
-    else if (ADR_MODE == ADR_DN)
-        BITPOS = DR_OUT_1[4:0];
-    else
-        BITPOS = {2'b00, DR_OUT_1[2:0]};
-end
 
 // ========================================================================
 // Trap and function code signals
