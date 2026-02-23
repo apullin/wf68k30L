@@ -120,7 +120,7 @@ always_ff @(posedge CLK) begin : parameter_buffer
         BIW_0 <= BIW_0_IN;
         BIW_1 <= BIW_1_IN;
         BF_OFFSET <= BF_OFFSET_IN;
-        BITPOS <= {1'b0, BITPOS_IN[3:0]};
+        BITPOS <= BITPOS_IN;
         BF_WIDTH <= BF_WIDTH_IN;
         BF_UPPER_BND <= 6'd39 - {1'b0, BITPOS_IN};
         SHIFT_WIDTH <= SHIFT_WIDTH_IN_sig;
