@@ -146,7 +146,134 @@ exception should occur) work correctly.
 
 ---
 
+### BUG-006: RTE does not return from exception handlers
+
+**Severity:** High
+**Status:** Open (expected failures in tests)
+**Found:** Phase 5 exception testing
+
+**Description:**
+RTE (Return from Exception) does not properly restore PC and SR from the exception
+stack frame. The CPU hangs instead of resuming execution at the return address.
+This means exception handlers cannot return to normal program flow.
+
+**Affected tests:** `test_exceptions.py` — `test_trap_rte_returns`, `test_trap_rte_restores_sr`
+marked with `expect_error`.
+
+**Files involved:**
+- `wf68k30L_control.sv` — RTE state machine
+- `wf68k30L_exception_handler.sv` — Stack frame pop logic
+
+---
+
+### BUG-007: TRAPV does not detect V flag set by MOVE to CCR
+
+**Severity:** Medium
+**Status:** Open (expected failure in tests)
+**Found:** Phase 5 exception testing
+
+**Description:**
+TRAPV instruction only detects the V (overflow) flag when set by ALU operations
+(e.g., ADDI causing overflow). When V is loaded directly via MOVE to CCR, TRAPV
+does not trigger the exception. Likely a pipeline forwarding issue where TRAPV
+reads the pre-MOVE CCR value.
+
+**Affected tests:** `test_exceptions.py` — `test_trapv_v_set_via_ccr` marked with
+`expect_error`.
+
+**Files involved:**
+- `wf68k30L_control.sv` — TRAPV condition evaluation timing
+- `wf68k30L_alu.sv` — CCR forwarding path
+
+---
+
+### BUG-008: ADD.L Dn,Dn does not set V for negative overflow
+
+**Severity:** Medium
+**Status:** Open (expected failure in tests)
+**Found:** Phase 5 exception testing
+
+**Description:**
+Register-form ADD.L (e.g., `ADD.L D0,D1`) does not set the V (overflow) flag
+when two large negative numbers overflow to a positive result. Immediate-form
+ADDI.L correctly sets V for positive overflow.
+
+**Affected tests:** `test_exceptions.py` — `test_trapv_overflow_via_add_negative`
+marked with `expect_error`.
+
+**Files involved:**
+- `wf68k30L_alu.sv` — V flag computation for register-form ADD
+
+---
+
+### BUG-009: Divide-by-zero clobbers destination register
+
+**Severity:** Medium
+**Status:** Open (expected failure in tests)
+**Found:** Phase 5 exception testing
+
+**Description:**
+When DIVU.W or DIVS.W divides by zero, the MC68030 specification says the
+destination register should be preserved (unchanged). Instead, the core overwrites
+the destination register with 0xFFFFFFFF before dispatching the divide-by-zero
+exception.
+
+**Affected tests:** `test_exceptions.py` — `test_divu_divide_by_zero_preserves_dividend`
+marked with `expect_error`.
+
+**Files involved:**
+- `wf68k30L_divider.sv` — Register writeback during divide-by-zero path
+
+---
+
+### BUG-010: Bus interface fails with 2+ wait states
+
+**Severity:** Medium
+**Status:** Open (expected failures in tests)
+**Found:** Phase 6 bus protocol testing
+
+**Description:**
+The CPU produces correct results with 0 or 1 bus wait states, but fails
+(sentinel never reached) when the bus model inserts 2 or more wait states.
+The DSACKn sampling window does not properly accommodate slower slave responses.
+
+**Affected tests:** `test_bus_protocol.py` — tests for 2 and 3 wait states
+marked with `expect_error`.
+
+**Files involved:**
+- `wf68k30L_bus_interface.sv` — DSACKn sampling state machine
+
+---
+
 ## Resolved Bugs
+
+### BUG-R003: Indexed addressing mode ignores index register
+
+**Severity:** Critical
+**Status:** Fixed (commit f1c0044)
+**Found:** Phase 4 addressing mode testing
+
+**Description:**
+All indexed addressing modes `(d8,An,Xn)` and `(d8,PC,Xn)` computed effective addresses
+without the index register contribution, effectively treating the index as zero. This
+affected all scale factors (x1, x2, x4, x8) and both data and address register indexes.
+
+**Root cause:**
+The VHDL used **process variables** (`INDEX` and `INDEX_SCALED`) with immediate `:=`
+assignment, meaning writes were visible to later reads within the same clock edge.
+The SV port incorrectly converted these to **registered signals** (`INDEX_REG` and
+`INDEX_SCALED_REG`) with deferred `<=` assignment, introducing a one-cycle latency.
+
+**Fix:**
+Extracted index computation into combinational `always_comb` blocks:
+- `index_next` feeds `INDEX_REG` combinationally
+- `index_scaled_comb` replaces `INDEX_SCALED_REG` in all effective address calculations
+This matches the VHDL's variable-based same-cycle semantics.
+
+**Files involved:**
+- `wf68k30L_address_registers.sv` — INDEX/INDEX_SCALED computation
+
+---
 
 ### BUG-R002: BITPOS truncation limits bit operations to positions 0-15
 
