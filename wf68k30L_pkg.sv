@@ -158,4 +158,45 @@ typedef enum logic [2:0] {
     T_RTE     = 3'd6
 } TRAPTYPE_OPC;
 
+// ---- Status Register bit positions ----
+
+// Condition Code Register bit positions
+parameter int SR_C = 0;       // Carry
+parameter int SR_V = 1;       // Overflow
+parameter int SR_Z = 2;       // Zero
+parameter int SR_N = 3;       // Negative
+parameter int SR_X = 4;       // Extend
+
+// System byte bit positions
+parameter int SR_IPL_LO = 8;  // Interrupt priority mask low bit
+parameter int SR_IPL_HI = 10; // Interrupt priority mask high bit
+parameter int SR_S = 13;      // Supervisor mode
+parameter int SR_T = 15;      // Trace mode
+
+// ---- Addressing mode constants ----
+parameter logic [2:0] ADR_DN      = 3'b000; // Data register direct
+parameter logic [2:0] ADR_AN      = 3'b001; // Address register direct
+parameter logic [2:0] ADR_AN_IND  = 3'b010; // Address register indirect
+parameter logic [2:0] ADR_AN_POST = 3'b011; // (An)+ post-increment
+parameter logic [2:0] ADR_AN_PRE  = 3'b100; // -(An) pre-decrement
+parameter logic [2:0] ADR_AN_DISP = 3'b101; // (d16,An) displacement
+parameter logic [2:0] ADR_AN_IDX  = 3'b110; // (d8,An,Xn) indexed
+parameter logic [2:0] ADR_SPECIAL = 3'b111; // Abs/PC/Imm (sub-selected by reg field)
+
+// ---- Function code constants ----
+parameter logic [2:0] FC_USER_DATA  = 3'b001;
+parameter logic [2:0] FC_USER_PROG  = 3'b010;
+parameter logic [2:0] FC_SUPER_DATA = 3'b101;
+parameter logic [2:0] FC_SUPER_PROG = 3'b110;
+parameter logic [2:0] FC_CPU_SPACE  = 3'b111;
+
+// ---- Condition code flags struct ----
+typedef struct packed {
+    logic x; // Extend
+    logic n; // Negative
+    logic z; // Zero
+    logic v; // Overflow
+    logic c; // Carry
+} ccr_t;
+
 endpackage

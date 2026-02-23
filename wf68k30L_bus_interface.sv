@@ -125,9 +125,9 @@ always_ff @(negedge CLK) begin
     BGACK_In <= BGACKn;
     AVEC_In <= AVECn;
     //
-    if (BERRn == 1'b0 && HALTn == 1'b0 && BUS_CTRL_STATE == DATA_C1C4 && SIZE_N != 3'b000)
+    if (!BERRn && !HALTn && BUS_CTRL_STATE == DATA_C1C4 && SIZE_N != 3'b000)
         RETRY <= 1'b1;
-    else if (T_SLICE == SLICE_IDLE && (BERRn == 1'b1 || HALTn == 1'b1))
+    else if (T_SLICE == SLICE_IDLE && (BERRn || HALTn))
         RETRY <= 1'b0;
 end
 
@@ -142,17 +142,17 @@ always_ff @(posedge CLK) begin
     end
 end
 
-always_ff @(posedge CLK) begin : ACCESSTYPE
+always_ff @(posedge CLK) begin : access_type
     if (BUS_CTRL_STATE == START_CYCLE) begin
-        if (READ_ACCESS == 1'b1 || WRITE_ACCESS == 1'b1 || OPCODE_ACCESS == 1'b1)
+        if (READ_ACCESS || WRITE_ACCESS || OPCODE_ACCESS)
             ; // Do not start either new cycle.
-        else if (RD_REQ == 1'b1)
+        else if (RD_REQ)
             READ_ACCESS <= 1'b1;
-        else if (WR_REQ == 1'b1)
+        else if (WR_REQ)
             WRITE_ACCESS <= 1'b1;
-        else if (OPCODE_REQ == 1'b1)
+        else if (OPCODE_REQ)
             OPCODE_ACCESS <= 1'b1;
-    end else if (AERR == 1'b1) begin // Reject due to address error.
+    end else if (AERR) begin // Reject due to address error.
         READ_ACCESS <= 1'b0;
         WRITE_ACCESS <= 1'b0;
         OPCODE_ACCESS <= 1'b0;
@@ -163,16 +163,16 @@ always_ff @(posedge CLK) begin : ACCESSTYPE
     end
 end
 
-always_ff @(posedge CLK) begin : P_DF
+always_ff @(posedge CLK) begin : data_fault_info
     logic [1:0] SIZEVAR;
-    if (BUSY_EXH == 1'b0) begin // Do not alter during exception processing.
+    if (!BUSY_EXH) begin // Do not alter during exception processing.
         case (OP_SIZE)
-            LONG: SIZEVAR = 2'b10;
-            WORD: SIZEVAR = 2'b01;
-            BYTE: SIZEVAR = 2'b00;
+            LONG:    SIZEVAR = 2'b10;
+            WORD:    SIZEVAR = 2'b01;
+            BYTE:    SIZEVAR = 2'b00;
             default: SIZEVAR = 2'b00;
         endcase
-        //
+
         if (BUS_CTRL_STATE == START_CYCLE && NEXT_BUS_CTRL_STATE == DATA_C1C4) begin
             SSW_80[8] <= 1'b0;
             SSW_80[7] <= RMC;
@@ -180,7 +180,7 @@ always_ff @(posedge CLK) begin : P_DF
             SSW_80[5:4] <= SIZEVAR;
             SSW_80[3] <= 1'b0;
             SSW_80[2:0] <= FC_IN;
-        end else if (BUS_CTRL_STATE == DATA_C1C4 && (READ_ACCESS == 1'b1 || WRITE_ACCESS == 1'b1) && BUS_FLT == 1'b1) begin
+        end else if (BUS_CTRL_STATE == DATA_C1C4 && (READ_ACCESS || WRITE_ACCESS) && BUS_FLT) begin
             SSW_80[8] <= 1'b1;
         end
 
@@ -189,12 +189,12 @@ always_ff @(posedge CLK) begin : P_DF
     end
 end
 
-always_ff @(posedge CLK) begin : WRITEBACK_INFO
+always_ff @(posedge CLK) begin : writeback_info
     if (BUS_CTRL_STATE == BUS_IDLE && NEXT_BUS_CTRL_STATE == START_CYCLE) // Freeze during a bus cycle.
         WP_BUFFER <= DATA_FROM_CORE;
 end
 
-always_ff @(posedge CLK) begin : P_BUSWIDTH
+always_ff @(posedge CLK) begin : bus_width_latch
     if (DSACK_In == 2'b01)
         DSACK_MEM <= 2'b01;
     else if (DSACK_In == 2'b10)
@@ -207,21 +207,21 @@ assign BUS_WIDTH = (DSACKn == 2'b01 || DSACK_MEM == 2'b01) ? BW_WORD :
                    (DSACKn == 2'b10 || DSACK_MEM == 2'b10) ? BW_BYTE :
                    LONG_32; // Also used during synchronous cycles.
 
-assign BUS_BSY = (BUS_CTRL_STATE != BUS_IDLE) ? 1'b1 : 1'b0;
+assign BUS_BSY = (BUS_CTRL_STATE != BUS_IDLE);
 
-always_ff @(posedge CLK) begin : PARTITIONING
+always_ff @(posedge CLK) begin : partitioning
     logic [2:0] RESTORE_VAR;
 
     if (BUS_CTRL_STATE == DATA_C1C4 && T_SLICE == S1) begin // On positive clock edge.
         RESTORE_VAR = SIZE_N; // We need this initial value for early RETRY.
-    end else if (BUS_CTRL_STATE == DATA_C1C4 && ((T_SLICE == S1 && STERMn == 1'b0) || (T_SLICE == S3 && WAITSTATES == 1'b0))) begin
+    end else if (BUS_CTRL_STATE == DATA_C1C4 && ((T_SLICE == S1 && !STERMn) || (T_SLICE == S3 && !WAITSTATES))) begin
         RESTORE_VAR = SIZE_N; // This is for late RETRY.
     end
-    //
-    if (RESET_CPU_I == 1'b1) begin
+
+    if (RESET_CPU_I) begin
         SIZE_N <= 3'b000;
     end else if (BUS_CTRL_STATE != DATA_C1C4 && NEXT_BUS_CTRL_STATE == DATA_C1C4) begin
-        if (RD_REQ == 1'b1 || WR_REQ == 1'b1) begin
+        if (RD_REQ || WR_REQ) begin
             case (OP_SIZE)
                 LONG:    SIZE_N <= 3'b100;
                 WORD:    SIZE_N <= 3'b010;
@@ -234,9 +234,9 @@ always_ff @(posedge CLK) begin : PARTITIONING
     end
 
     // Decrementing the size information:
-    if (RETRY == 1'b1) begin
+    if (RETRY) begin
         SIZE_N <= RESTORE_VAR;
-    end else if (BUS_CTRL_STATE == DATA_C1C4 && ((T_SLICE == S1 && STERMn == 1'b0) || (T_SLICE == S3 && WAITSTATES == 1'b0))) begin
+    end else if (BUS_CTRL_STATE == DATA_C1C4 && ((T_SLICE == S1 && !STERMn) || (T_SLICE == S3 && !WAITSTATES))) begin
         if (BUS_WIDTH == LONG_32 && SIZE_N > 3'd3 && ADR_OUT_I[1:0] == 2'b01)
             SIZE_N <= SIZE_N - 3'b011;
         else if (BUS_WIDTH == LONG_32 && SIZE_N > 3'd2 && ADR_OUT_I[1:0] == 2'b10)
@@ -259,7 +259,7 @@ always_ff @(posedge CLK) begin : PARTITIONING
             SIZE_N <= SIZE_N - 3'b001;
     end
     //
-    if (BUS_FLT == 1'b1 && HALT_In == 1'b1) begin // Abort bus cycle.
+    if (BUS_FLT && HALT_In) begin // Abort bus cycle.
         SIZE_N <= 3'b000;
         RESTORE_VAR = 3'b000;
     end
@@ -268,50 +268,50 @@ end
 assign SIZE_I = (T_SLICE == S0 || T_SLICE == S1) ? SIZE_N[1:0] : SIZE_D;
 assign SIZE = SIZE_I;
 
-always_ff @(posedge CLK) begin : P_DELAY
+always_ff @(posedge CLK) begin : size_delay
     SIZE_D <= SIZE_N[1:0];
 end
 
-always_ff @(posedge CLK) begin : BUS_STATE_REG
+always_ff @(posedge CLK) begin : bus_state_reg
     BUS_CTRL_STATE <= NEXT_BUS_CTRL_STATE;
 end
 
-always_comb begin : BUS_CTRL_DEC
+always_comb begin : bus_ctrl_dec
     case (BUS_CTRL_STATE)
         BUS_IDLE: begin
-            if (RESET_CPU_I == 1'b1)
+            if (RESET_CPU_I)
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
-            else if (HALT_In == 1'b0)
+            else if (!HALT_In)
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
-            else if ((BR_In == 1'b0 && RMC == 1'b0) || ARB_STATE != ARB_IDLE || BGACK_In == 1'b0)
+            else if ((!BR_In && !RMC) || ARB_STATE != ARB_IDLE || !BGACK_In)
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
-            else if (RD_REQ == 1'b1 && SIZE_N == 3'b000)
+            else if (RD_REQ && SIZE_N == 3'b000)
                 NEXT_BUS_CTRL_STATE = START_CYCLE;
-            else if (WR_REQ == 1'b1 && SIZE_N == 3'b000)
+            else if (WR_REQ && SIZE_N == 3'b000)
                 NEXT_BUS_CTRL_STATE = START_CYCLE;
-            else if (OPCODE_REQ == 1'b1 && SIZE_N == 3'b000)
+            else if (OPCODE_REQ && SIZE_N == 3'b000)
                 NEXT_BUS_CTRL_STATE = START_CYCLE;
-            else if (READ_ACCESS == 1'b1 || WRITE_ACCESS == 1'b1 || OPCODE_ACCESS == 1'b1)
+            else if (READ_ACCESS || WRITE_ACCESS || OPCODE_ACCESS)
                 NEXT_BUS_CTRL_STATE = START_CYCLE;
             else
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
         end
         START_CYCLE: begin
-            if (RD_REQ == 1'b1)
+            if (RD_REQ)
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
-            else if (WR_REQ == 1'b1)
+            else if (WR_REQ)
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
-            else if (OPCODE_REQ == 1'b1 && ADR_IN_P[0] == 1'b1)
+            else if (OPCODE_REQ && ADR_IN_P[0])
                 NEXT_BUS_CTRL_STATE = BUS_IDLE; // Abort due to address error.
-            else if (OPCODE_REQ == 1'b1 && ADR_IN_P[0] == 1'b1)
+            else if (OPCODE_REQ && ADR_IN_P[0])
                 NEXT_BUS_CTRL_STATE = BUS_IDLE; // Abort due to address error.
-            else if (OPCODE_REQ == 1'b1)
+            else if (OPCODE_REQ)
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
             else
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
         end
         DATA_C1C4: begin
-            if (BUS_CYC_RDY == 1'b1 && SIZE_N == 3'b000)
+            if (BUS_CYC_RDY && SIZE_N == 3'b000)
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
             else
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
@@ -321,12 +321,12 @@ always_comb begin : BUS_CTRL_DEC
     endcase
 end
 
-always_ff @(posedge CLK) begin : P_ADR_OFFS
+always_ff @(posedge CLK) begin : adr_offset_calc
     logic [2:0] OFFSET_VAR;
 
-    if (RESET_CPU_I == 1'b1) begin
+    if (RESET_CPU_I) begin
         OFFSET_VAR = 3'b000;
-    end else if ((T_SLICE == S2 && STERMn == 1'b0) || T_SLICE == S3) begin
+    end else if ((T_SLICE == S2 && !STERMn) || T_SLICE == S3) begin
         case (BUS_WIDTH)
             LONG_32: begin
                 case (ADR_OUT_I[1:0])
@@ -349,25 +349,25 @@ always_ff @(posedge CLK) begin : P_ADR_OFFS
         endcase
     end
     //
-    if (RESET_CPU_I == 1'b1)
-        ADR_OFFSET <= 6'b000000;
-    else if (RETRY == 1'b1)
+    if (RESET_CPU_I)
+        ADR_OFFSET <= 6'd0;
+    else if (RETRY)
         ; // Do not update if there is a retry cycle.
     else if (BUS_CTRL_STATE != BUS_IDLE && NEXT_BUS_CTRL_STATE == BUS_IDLE)
-        ADR_OFFSET <= 6'b000000;
-    else if (BUS_CYC_RDY == 1'b1)
+        ADR_OFFSET <= 6'd0;
+    else if (BUS_CYC_RDY)
         ADR_OFFSET <= ADR_OFFSET + {3'b000, OFFSET_VAR};
 end
 
 assign ADR_OUT_I = ADR_IN_P + {26'd0, ADR_OFFSET};
 assign ADR_OUT_P = ADR_OUT_I;
 
-always_ff @(posedge CLK) begin : P_ADR_10
+always_ff @(posedge CLK) begin : adr_10_latch
     ADR_10 <= ADR_OUT_I[1:0];
 end
 
 // Address and bus errors:
-assign AERR_I = (BUS_CTRL_STATE == START_CYCLE && OPCODE_REQ == 1'b1 && RD_REQ == 1'b0 && WR_REQ == 1'b0 && ADR_IN_P[0] == 1'b1) ? 1'b1 : 1'b0;
+assign AERR_I = BUS_CTRL_STATE == START_CYCLE && OPCODE_REQ && !RD_REQ && !WR_REQ && ADR_IN_P[0];
 
 assign FC_OUT = FC_IN;
 
@@ -405,8 +405,8 @@ always_comb begin
         DATA_PORT_OUT = {WP_BUFFER[7:0], WP_BUFFER[7:0], WP_BUFFER[7:0], WP_BUFFER[7:0]};
 end
 
-always_ff @(negedge CLK) begin : IN_MUX
-    if (((T_SLICE == S2 || T_SLICE == S3) && STERMn == 1'b0) || T_SLICE == S4) begin
+always_ff @(negedge CLK) begin : in_mux
+    if (((T_SLICE == S2 || T_SLICE == S3) && !STERMn) || T_SLICE == S4) begin
         case (BUS_WIDTH)
             BW_BYTE: begin
                 case (SIZE_I)
@@ -491,45 +491,47 @@ always_ff @(negedge CLK) begin : IN_MUX
     end
 end
 
-always_ff @(posedge CLK) begin : VALIDATION
-    if (RESET_CPU_I == 1'b1)
+always_ff @(posedge CLK) begin : validation
+    if (RESET_CPU_I)
         OPCODE_VALID <= 1'b1;
-    else if (OPCODE_ACCESS == 1'b1 && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT == 1'b1)
+    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT)
         OPCODE_VALID <= 1'b0;
-    else if (OPCODE_RDY_I == 1'b1)
+    else if (OPCODE_RDY_I)
         OPCODE_VALID <= 1'b1;
-    //
-    if (RESET_CPU_I == 1'b1)
+
+    if (RESET_CPU_I)
         DATA_VALID <= 1'b1;
-    else if (READ_ACCESS == 1'b1 && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT == 1'b1 && HALT_In == 1'b0)
+    else if (READ_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT && !HALT_In)
         ; // This is the RETRY condition, no bus error.
-    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT == 1'b1)
+    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT)
         DATA_VALID <= 1'b0;
-    else if (DATA_RDY_I == 1'b1)
+    else if (DATA_RDY_I)
         DATA_VALID <= 1'b1;
 end
 
-always_ff @(posedge CLK) begin : PREFETCH_BUFFERS
+always_ff @(posedge CLK) begin : prefetch_buffers
     logic RDY_VAR;
-    //
+
     OPCODE_RDY_I <= 1'b0; // This is a strobe.
     DATA_RDY_I <= 1'b0; // This is a strobe.
-    //
-    if (DATA_RDY_I == 1'b1 || OPCODE_RDY_I == 1'b1)
+
+    if (DATA_RDY_I || OPCODE_RDY_I)
         RDY_VAR = 1'b0;
     else if (BUS_CTRL_STATE == START_CYCLE)
         RDY_VAR = 1'b1;
+
     // Opcode cycle:
-    if (AERR_I == 1'b1)
+    if (AERR_I)
         OPCODE_RDY_I <= 1'b1;
-    else if (OPCODE_ACCESS == 1'b1 && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY == 1'b1 && SIZE_N == 3'b000) begin
+    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY && SIZE_N == 3'b000) begin
         OBUFFER <= DATA_INMUX[15:0];
         OPCODE_RDY_I <= RDY_VAR;
     end
+
     // Data cycle:
-    if (WRITE_ACCESS == 1'b1 && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY == 1'b1 && SIZE_N == 3'b000) begin
+    if (WRITE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY && SIZE_N == 3'b000) begin
         DATA_RDY_I <= RDY_VAR;
-    end else if (READ_ACCESS == 1'b1 && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY == 1'b1) begin
+    end else if (READ_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY) begin
         case (OP_SIZE)
             LONG: begin
                 if (SIZE_N == 3'b000) begin
@@ -539,13 +541,13 @@ always_ff @(posedge CLK) begin : PREFETCH_BUFFERS
             end
             WORD: begin
                 if (SIZE_N == 3'b000) begin
-                    DBUFFER <= {16'h0000, DATA_INMUX[15:0]};
+                    DBUFFER <= {16'h0, DATA_INMUX[15:0]};
                     DATA_RDY_I <= RDY_VAR;
                 end
             end
             BYTE: begin // Byte always aligned.
                 DATA_RDY_I <= RDY_VAR;
-                DBUFFER <= {24'h000000, DATA_INMUX[7:0]};
+                DBUFFER <= {24'h0, DATA_INMUX[7:0]};
             end
             default: ;
         endcase
@@ -559,30 +561,30 @@ assign DATA_TO_CORE = DBUFFER;
 assign OPCODE_TO_CORE = OBUFFER;
 
 assign WAITSTATES = (T_SLICE != S3) ? 1'b0 :
-                    (RESET_OUT_I == 1'b1) ? 1'b1 : // No bus fault during RESET instruction.
+                    RESET_OUT_I ? 1'b1 : // No bus fault during RESET instruction.
                     (DSACK_In != 2'b11) ? 1'b0 : // For asynchronous bus cycles.
-                    (STERM_In == 1'b0) ? 1'b0 : // For synchronous bus cycles.
-                    (ADR_IN_P[19:16] == 4'hF && AVEC_In == 1'b0) ? 1'b0 : // Interrupt acknowledge space cycle.
-                    (BUS_FLT == 1'b1) ? 1'b0 : // In case of a bus error.
-                    (RESET_CPU_I == 1'b1) ? 1'b0 : 1'b1; // A CPU reset terminates the current bus cycle.
+                    !STERM_In ? 1'b0 : // For synchronous bus cycles.
+                    (ADR_IN_P[19:16] == 4'hF && !AVEC_In) ? 1'b0 : // Interrupt acknowledge space cycle.
+                    BUS_FLT ? 1'b0 : // In case of a bus error.
+                    RESET_CPU_I ? 1'b0 : 1'b1; // A CPU reset terminates the current bus cycle.
 
 always_ff @(posedge CLK) begin
     if (BUS_CTRL_STATE == BUS_IDLE)
         SLICE_CNT_P <= 3'b111; // Init.
-    else if (RETRY == 1'b1)
+    else if (RETRY)
         SLICE_CNT_P <= 3'b111;
     else if (BUS_CTRL_STATE != BUS_IDLE && NEXT_BUS_CTRL_STATE == BUS_IDLE)
         SLICE_CNT_P <= 3'b111; // Init.
-    else if (SLICE_CNT_P == 3'b001 && STERM_In == 1'b0) // Synchronous cycle.
+    else if (SLICE_CNT_P == 3'b001 && !STERM_In) // Synchronous cycle.
         SLICE_CNT_P <= 3'b111; // Ready.
     else if (SLICE_CNT_P == 3'b010) begin
-        if (RETRY == 1'b1)
+        if (RETRY)
             SLICE_CNT_P <= 3'b111; // Go IDLE.
         else if (BUS_CTRL_STATE == DATA_C1C4 && NEXT_BUS_CTRL_STATE == BUS_IDLE)
             SLICE_CNT_P <= 3'b111; // Ready.
         else
             SLICE_CNT_P <= 3'b000; // Go on.
-    end else if (WAITSTATES == 1'b0)
+    end else if (!WAITSTATES)
         SLICE_CNT_P <= SLICE_CNT_P + 1'b1; // Cycle active.
 end
 
@@ -598,66 +600,66 @@ assign T_SLICE = (SLICE_CNT_P == 3'b000 && SLICE_CNT_N == 3'b111) ? S0 :
                  (SLICE_CNT_P == 3'b010 && SLICE_CNT_N == 3'b010) ? S5 :
                  (SLICE_CNT_P == 3'b000 && SLICE_CNT_N == 3'b010) ? S0 : SLICE_IDLE; // Rollover from state S5 to S0.
 
-always_ff @(posedge CLK) begin : P_OCS
+always_ff @(posedge CLK) begin : ocs_inhibit
     if (BUS_CTRL_STATE == START_CYCLE && NEXT_BUS_CTRL_STATE != BUS_IDLE)
         OCS_INH <= 1'b0;
-    else if (BUS_CYC_RDY == 1'b1 && RETRY == 1'b0) // No inhibit if first portion results in a retry cycle.
+    else if (BUS_CYC_RDY && !RETRY) // No inhibit if first portion results in a retry cycle.
         OCS_INH <= 1'b1;
 end
 
 // Bus control signals:
-assign RWn  = (WRITE_ACCESS == 1'b1 && BUS_CTRL_STATE == DATA_C1C4) ? 1'b0 : 1'b1;
-assign RMCn = (RMC == 1'b1) ? 1'b0 : 1'b1;
-assign ECSn = (T_SLICE == S0) ? 1'b0 : 1'b1;
-assign OCSn = (T_SLICE == S0 && OCS_INH == 1'b0) ? 1'b0 : 1'b1;
-assign ASn  = (T_SLICE == S0 || T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4) ? 1'b0 : 1'b1;
-assign DSn  = ((T_SLICE == S3 || T_SLICE == S4 || T_SLICE == S5) && WRITE_ACCESS == 1'b1) ? 1'b0 : // Write.
+assign RWn  = !(WRITE_ACCESS && BUS_CTRL_STATE == DATA_C1C4);
+assign RMCn = !RMC;
+assign ECSn = !(T_SLICE == S0);
+assign OCSn = !(T_SLICE == S0 && !OCS_INH);
+assign ASn  = !(T_SLICE == S0 || T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4);
+assign DSn  = ((T_SLICE == S3 || T_SLICE == S4 || T_SLICE == S5) && WRITE_ACCESS) ? 1'b0 : // Write.
               (T_SLICE == S0 || T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4) ? 1'b0 : 1'b1; // Read.
 
-assign DBENn = ((T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4 || T_SLICE == S5) && WRITE_ACCESS == 1'b1) ? 1'b0 : // Write.
+assign DBENn = ((T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4 || T_SLICE == S5) && WRITE_ACCESS) ? 1'b0 : // Write.
                (T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4) ? 1'b0 : 1'b1; // Read.
 
 // Bus tri state controls:
-assign BUS_EN       = (ARB_STATE == ARB_IDLE && RESET_CPU_I == 1'b0) ? 1'b1 : 1'b0;
-assign DATA_PORT_EN = (WRITE_ACCESS == 1'b1 && ARB_STATE == ARB_IDLE && RESET_CPU_I == 1'b0) ? 1'b1 : 1'b0;
+assign BUS_EN       = ARB_STATE == ARB_IDLE && !RESET_CPU_I;
+assign DATA_PORT_EN = WRITE_ACCESS && ARB_STATE == ARB_IDLE && !RESET_CPU_I;
 
 // Progress controls:
-assign BUS_CYC_RDY = (RETRY == 1'b1) ? 1'b0 :
-                     (T_SLICE == S3 && STERM_In == 1'b0) ? 1'b1 : // Synchronous cycles.
-                     (T_SLICE == S5) ? 1'b1 : 1'b0; // Asynchronous cycles.
+assign BUS_CYC_RDY = RETRY ? 1'b0 :
+                     (T_SLICE == S3 && !STERM_In) ? 1'b1 : // Synchronous cycles.
+                     (T_SLICE == S5); // Asynchronous cycles.
 
 // Bus arbitration:
-always_ff @(posedge CLK) begin : ARB_REG
-    if (RESET_CPU_I == 1'b1)
+always_ff @(posedge CLK) begin : arb_reg
+    if (RESET_CPU_I)
         ARB_STATE <= ARB_IDLE;
     else
         ARB_STATE <= NEXT_ARB_STATE;
 end
 
-always_comb begin : ARB_DEC
+always_comb begin : arb_dec
     case (ARB_STATE)
         ARB_IDLE: begin
-            if (RMC == 1'b1 && RETRY == 1'b0)
+            if (RMC && !RETRY)
                 NEXT_ARB_STATE = ARB_IDLE;
-            else if (BGACK_In == 1'b0 && BUS_CTRL_STATE == BUS_IDLE)
+            else if (!BGACK_In && BUS_CTRL_STATE == BUS_IDLE)
                 NEXT_ARB_STATE = WAIT_RELEASE_3WIRE;
-            else if (BR_In == 1'b0 && BUS_CTRL_STATE == BUS_IDLE)
+            else if (!BR_In && BUS_CTRL_STATE == BUS_IDLE)
                 NEXT_ARB_STATE = GRANT;
             else
                 NEXT_ARB_STATE = ARB_IDLE;
         end
         GRANT: begin
-            if (BGACK_In == 1'b0)
+            if (!BGACK_In)
                 NEXT_ARB_STATE = WAIT_RELEASE_3WIRE;
-            else if (BR_In == 1'b1)
+            else if (BR_In)
                 NEXT_ARB_STATE = ARB_IDLE;
             else
                 NEXT_ARB_STATE = GRANT;
         end
         WAIT_RELEASE_3WIRE: begin
-            if (BGACK_In == 1'b1 && BR_In == 1'b0)
+            if (BGACK_In && !BR_In)
                 NEXT_ARB_STATE = GRANT;
-            else if (BGACK_In == 1'b1)
+            else if (BGACK_In)
                 NEXT_ARB_STATE = ARB_IDLE;
             else
                 NEXT_ARB_STATE = WAIT_RELEASE_3WIRE;
@@ -670,36 +672,36 @@ end
 assign BGn = (ARB_STATE == GRANT) ? 1'b0 : 1'b1;
 
 // RESET logic:
-always_ff @(posedge CLK) begin : RESET_FILTER
+always_ff @(posedge CLK) begin : reset_filter
     logic STARTUP;
     logic [3:0] TMP;
 
-    if (RESET_IN == 1'b1 && HALT_In == 1'b0 && RESET_OUT_I == 1'b0 && TMP < 4'hF)
+    if (RESET_IN && !HALT_In && !RESET_OUT_I && TMP < 4'hF)
         TMP = TMP + 1'b1;
-    else if (RESET_IN == 1'b0 || HALT_In == 1'b1 || RESET_OUT_I == 1'b1)
+    else if (!RESET_IN || HALT_In || RESET_OUT_I)
         TMP = 4'h0;
 
     if (TMP > 4'hA) begin
         RESET_CPU_I <= 1'b1;
         STARTUP = 1'b1;
-    end else if (STARTUP == 1'b0) begin
+    end else if (!STARTUP) begin
         RESET_CPU_I <= 1'b1;
     end else begin
         RESET_CPU_I <= 1'b0;
     end
 end
 
-always_ff @(posedge CLK) begin : RESET_TIMER
+always_ff @(posedge CLK) begin : reset_timer
     logic [8:0] TMP;
 
-    if (RESET_STRB == 1'b1 || TMP > 9'b000000000)
+    if (RESET_STRB || TMP > 9'd0)
         RESET_OUT_I <= 1'b1;
     else
         RESET_OUT_I <= 1'b0;
 
-    if (RESET_STRB == 1'b1)
-        TMP = 9'b111111111; // 512 initial value.
-    else if (TMP > 9'b000000000)
+    if (RESET_STRB)
+        TMP = 9'd511; // 512 initial value.
+    else if (TMP > 9'd0)
         TMP = TMP - 1'b1;
 end
 

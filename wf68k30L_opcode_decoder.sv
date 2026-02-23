@@ -169,59 +169,57 @@ logic [6:0]  PC_VAR_MEM_S;
 // opcode cycle.
 // Restructured for Yosys: use synchronous logic with priority encoding
 // to emulate the multi-edge VHDL process.
-always_ff @(posedge CLK) begin
-    if (OPCODE_RDY == 1'b1) begin
+always_ff @(posedge CLK) begin : opcode_rd_ctrl
+    if (OPCODE_RDY)
         OPCODE_RD_I <= 1'b0;
-    end else if (BUSY_EXH == 1'b1 && IPIPE_FILL == 1'b0) begin
+    else if (BUSY_EXH && !IPIPE_FILL)
         OPCODE_RD_I <= 1'b0;
-    end else if (IPIPE_FLUSH == 1'b1) begin
+    else if (IPIPE_FLUSH)
         OPCODE_RD_I <= 1'b1;
-    end else if ((LOOP_ATN == 1'b1 && OPCODE_RD_I == 1'b0) || LOOP_BSY_I == 1'b1) begin
+    else if ((LOOP_ATN && !OPCODE_RD_I) || LOOP_BSY_I)
         OPCODE_RD_I <= 1'b0;
-    end else if (IPIPE_PNTR < 2'd3) begin
+    else if (IPIPE_PNTR < 2'd3)
         OPCODE_RD_I <= 1'b1;
-    end
 end
 
 // P_OPCODE_FLUSH
-always_ff @(posedge CLK) begin : P_OPCODE_FLUSH
-    if (IPIPE_FLUSH == 1'b1 && OPCODE_RD_I == 1'b1 && OPCODE_RDY == 1'b0) begin
+always_ff @(posedge CLK) begin : opcode_flush
+    if (IPIPE_FLUSH && OPCODE_RD_I && !OPCODE_RDY)
         OPCODE_FLUSH <= 1'b1;
-    end else if (OPCODE_RDY == 1'b1 || BUSY_EXH == 1'b1) begin
+    else if (OPCODE_RDY || BUSY_EXH)
         OPCODE_FLUSH <= 1'b0;
-    end
 end
 
 assign OPCODE_RD = OPCODE_RD_I;
-assign OPCODE_RDY_I = (OPCODE_FLUSH == 1'b1) ? 1'b0 : OPCODE_RDY; // Dismiss the current read cycle.
-assign BUSY_OPD = (EXH_REQ == 1'b1 && BUSY_MAIN == 1'b0 && IPIPE_PNTR > 2'd0 && OPCODE_RD_I == 1'b0) ? 1'b0 : // Fill one opcode is sufficient here.
-                  (IPIPE_PNTR < 2'd3 || OPCODE_RD_I == 1'b1) ? 1'b1 : 1'b0;
+assign OPCODE_RDY_I = OPCODE_FLUSH ? 1'b0 : OPCODE_RDY; // Dismiss the current read cycle.
+assign BUSY_OPD = (EXH_REQ && !BUSY_MAIN && IPIPE_PNTR > 2'd0 && !OPCODE_RD_I) ? 1'b0 : // Fill one opcode is sufficient here.
+                  (IPIPE_PNTR < 2'd3 || OPCODE_RD_I) ? 1'b1 : 1'b0;
 
 // INSTRUCTION_PIPE
-always_ff @(posedge CLK) begin : INSTRUCTION_PIPE
+always_ff @(posedge CLK) begin : instruction_pipe
     reg [15:0] IPIPE_D_VAR;
-    if (IPIPE_FLUSH == 1'b1) begin
-        IPIPE_D <= 16'h0000;
-        IPIPE_C <= 16'h0000;
-        IPIPE_B <= 16'h0000;
+    if (IPIPE_FLUSH) begin
+        IPIPE_D <= 16'h0;
+        IPIPE_C <= 16'h0;
+        IPIPE_B <= 16'h0;
         IPIPE_PNTR <= 2'd0;
-    end else if (BKPT_INSERT == 1'b1) begin
+    end else if (BKPT_INSERT) begin
         IPIPE_D_VAR = IPIPE_D;
         IPIPE_D <= BKPT_DATA; // Insert the breakpoint data.
         BKPT_REQ <= 1'b1;
-    end else if (OW_REQ == 1'b1 && BKPT_REQ == 1'b1) begin
+    end else if (OW_REQ && BKPT_REQ) begin
         IPIPE_D <= IPIPE_D_VAR; // Restore from breakpoint.
         BKPT_REQ <= 1'b0;
-    end else if (LOOP_ATN == 1'b1 && OPCODE_RD_I == 1'b1) begin
+    end else if (LOOP_ATN && OPCODE_RD_I) begin
         ; // Wait for pending opcodes.
-    end else if (OW_REQ == 1'b1 && PIPE_RDY == 1'b1 && OP_I == DBcc && LOOP_OP == 1'b1 && IPIPE_C == 16'hFFFC) begin // Initialize the loop.
+    end else if (OW_REQ && PIPE_RDY && OP_I == DBcc && LOOP_OP && IPIPE_C == 16'hFFFC) begin // Initialize the loop.
         IPIPE_D <= BIW_0; // This is the LEVEL D operation for the loop.
-    end else if (OW_REQ == 1'b1 && LOOP_BSY_I == 1'b1) begin
+    end else if (OW_REQ && LOOP_BSY_I) begin
         IPIPE_D <= BIW_0; // Recycle the loop operations.
-    end else if (LOOP_BSY_I == 1'b1) begin
+    end else if (LOOP_BSY_I) begin
         ; // Do not change the pipe during the loop.
-    end else if (OW_REQ == 1'b1 && INSTR_LVL == LVL_D && PIPE_RDY == 1'b1 && IPIPE_PNTR == 2'd2) begin
-        if (OPCODE_RDY_I == 1'b1) begin
+    end else if (OW_REQ && INSTR_LVL == LVL_D && PIPE_RDY && IPIPE_PNTR == 2'd2) begin
+        if (OPCODE_RDY_I) begin
             IPIPE_D <= IPIPE_C;
             IPIPE_C <= OPCODE_DATA;
             IPIPE_D_FAULT <= IPIPE_C_FAULT;
@@ -231,8 +229,8 @@ always_ff @(posedge CLK) begin : INSTRUCTION_PIPE
             IPIPE_D_FAULT <= IPIPE_C_FAULT;
             IPIPE_PNTR <= IPIPE_PNTR - 2'd1;
         end
-    end else if (OW_REQ == 1'b1 && INSTR_LVL == LVL_D && PIPE_RDY == 1'b1 && IPIPE_PNTR == 2'd3) begin
-        if (OPCODE_RDY_I == 1'b1) begin
+    end else if (OW_REQ && INSTR_LVL == LVL_D && PIPE_RDY && IPIPE_PNTR == 2'd3) begin
+        if (OPCODE_RDY_I) begin
             IPIPE_D <= IPIPE_C;
             IPIPE_C <= IPIPE_B;
             IPIPE_B <= OPCODE_DATA;
@@ -246,16 +244,16 @@ always_ff @(posedge CLK) begin : INSTRUCTION_PIPE
             IPIPE_C_FAULT <= IPIPE_B_FAULT;
             IPIPE_PNTR <= IPIPE_PNTR - 2'd1;
         end
-    end else if (OW_REQ == 1'b1 && INSTR_LVL == LVL_C && PIPE_RDY == 1'b1 && IPIPE_PNTR == 2'd2) begin
-        if (OPCODE_RDY_I == 1'b1) begin
+    end else if (OW_REQ && INSTR_LVL == LVL_C && PIPE_RDY && IPIPE_PNTR == 2'd2) begin
+        if (OPCODE_RDY_I) begin
             IPIPE_D <= OPCODE_DATA;
             IPIPE_D_FAULT <= ~OPCODE_VALID;
             IPIPE_PNTR <= IPIPE_PNTR - 2'd1;
         end else begin
             IPIPE_PNTR <= 2'd0;
         end
-    end else if (OW_REQ == 1'b1 && INSTR_LVL == LVL_C && PIPE_RDY == 1'b1 && IPIPE_PNTR == 2'd3) begin
-        if (OPCODE_RDY_I == 1'b1) begin
+    end else if (OW_REQ && INSTR_LVL == LVL_C && PIPE_RDY && IPIPE_PNTR == 2'd3) begin
+        if (OPCODE_RDY_I) begin
             IPIPE_D <= IPIPE_B;
             IPIPE_C <= OPCODE_DATA;
             IPIPE_D_FAULT <= IPIPE_B_FAULT;
@@ -266,18 +264,18 @@ always_ff @(posedge CLK) begin : INSTRUCTION_PIPE
             IPIPE_D_FAULT <= IPIPE_B_FAULT;
             IPIPE_PNTR <= IPIPE_PNTR - 2'd2;
         end
-    end else if (OW_REQ == 1'b1 && INSTR_LVL == LVL_B && PIPE_RDY == 1'b1) begin // IPIPE_PNTR = 3.
-        if (OPCODE_RDY_I == 1'b1) begin
+    end else if (OW_REQ && INSTR_LVL == LVL_B && PIPE_RDY) begin // IPIPE_PNTR = 3.
+        if (OPCODE_RDY_I) begin
             IPIPE_D <= OPCODE_DATA;
             IPIPE_D_FAULT <= ~OPCODE_VALID;
             IPIPE_PNTR <= IPIPE_PNTR - 2'd2;
         end else begin
             IPIPE_PNTR <= 2'd0;
         end
-    end else if (EW_REQ == 1'b1 && IPIPE_PNTR >= 2'd1) begin
+    end else if (EW_REQ && IPIPE_PNTR >= 2'd1) begin
         case (IPIPE_PNTR)
             2'd3: begin
-                if (OPCODE_RDY_I == 1'b1) begin
+                if (OPCODE_RDY_I) begin
                     IPIPE_D <= IPIPE_C;
                     IPIPE_C <= IPIPE_B;
                     IPIPE_B <= OPCODE_DATA;
@@ -293,7 +291,7 @@ always_ff @(posedge CLK) begin : INSTRUCTION_PIPE
                 end
             end
             2'd2: begin
-                if (OPCODE_RDY_I == 1'b1) begin
+                if (OPCODE_RDY_I) begin
                     IPIPE_D <= IPIPE_C;
                     IPIPE_C <= OPCODE_DATA;
                     IPIPE_D_FAULT <= IPIPE_C_FAULT;
@@ -305,7 +303,7 @@ always_ff @(posedge CLK) begin : INSTRUCTION_PIPE
                 end
             end
             2'd1: begin
-                if (OPCODE_RDY_I == 1'b1) begin
+                if (OPCODE_RDY_I) begin
                     IPIPE_D <= OPCODE_DATA;
                     IPIPE_D_FAULT <= ~OPCODE_VALID;
                 end else begin
@@ -314,7 +312,7 @@ always_ff @(posedge CLK) begin : INSTRUCTION_PIPE
             end
             default: ;
         endcase
-    end else if (OPCODE_RDY_I == 1'b1) begin
+    end else if (OPCODE_RDY_I) begin
         case (IPIPE_PNTR)
             2'd2: begin
                 IPIPE_B <= OPCODE_DATA;
@@ -337,57 +335,57 @@ always_ff @(posedge CLK) begin : INSTRUCTION_PIPE
 end
 
 // P_FAULT
-always_ff @(posedge CLK) begin : P_FAULT
-    if (IPIPE_FLUSH == 1'b1) begin
+always_ff @(posedge CLK) begin : fault_tracking
+    if (IPIPE_FLUSH) begin
         OW_VALID <= 1'b0;
         FC <= 1'b0;
         FB <= 1'b0;
-    end else if (OW_REQ == 1'b1 && LOOP_BSY_I == 1'b1) begin
+    end else if (OW_REQ && LOOP_BSY_I) begin
         OW_VALID <= 1'b1;
-    end else if (OW_REQ == 1'b1 && PIPE_RDY == 1'b1 && INSTR_LVL == LVL_D) begin
+    end else if (OW_REQ && PIPE_RDY && INSTR_LVL == LVL_D) begin
         OW_VALID <= ~IPIPE_D_FAULT;
         FC <= 1'b0;
         FB <= 1'b0;
-    end else if (OW_REQ == 1'b1 && PIPE_RDY == 1'b1 && INSTR_LVL == LVL_C) begin
+    end else if (OW_REQ && PIPE_RDY && INSTR_LVL == LVL_C) begin
         OW_VALID <= ~(IPIPE_D_FAULT | IPIPE_C_FAULT);
         FC <= IPIPE_C_FAULT;
         FB <= 1'b0;
-    end else if (OW_REQ == 1'b1 && PIPE_RDY == 1'b1 && INSTR_LVL == LVL_B) begin
+    end else if (OW_REQ && PIPE_RDY && INSTR_LVL == LVL_B) begin
         OW_VALID <= ~(IPIPE_D_FAULT | IPIPE_C_FAULT | IPIPE_B_FAULT);
         FC <= IPIPE_C_FAULT;
         FB <= IPIPE_B_FAULT;
-    end else if (EW_REQ == 1'b1 && PIPE_RDY == 1'b1) begin
+    end else if (EW_REQ && PIPE_RDY) begin
         OW_VALID <= ~IPIPE_D_FAULT;
         FC <= 1'b0;
         FB <= 1'b0;
     end
     // The Rerun Flags:
-    if (IPIPE_FLUSH == 1'b1) begin
+    if (IPIPE_FLUSH) begin
         RC <= 1'b0;
         RB <= 1'b0;
-    end else if ((EW_REQ | OW_REQ) == 1'b1 && PIPE_RDY == 1'b1) begin
+    end else if ((EW_REQ | OW_REQ) && PIPE_RDY) begin
         RC <= IPIPE_C_FAULT;
         RB <= IPIPE_B_FAULT;
     end
 end
 
 // OUTBUFFERS
-always_ff @(posedge CLK) begin : OUTBUFFERS
+always_ff @(posedge CLK) begin : outbuffers
     reg OP_STOP;
-    if (OP_STOP == 1'b1 && IPIPE_FLUSH == 1'b1) begin
+    if (OP_STOP && IPIPE_FLUSH) begin
         TRAP_CODE <= NONE;
         OP_STOP = 1'b0;
-    end else if (IPIPE_FLUSH == 1'b1) begin
+    end else if (IPIPE_FLUSH) begin
         TRAP_CODE <= NONE;
-    end else if (OP_STOP == 1'b1) begin
+    end else if (OP_STOP) begin
         ; // Do not update after PC is incremented.
-    end else if (LOOP_ATN == 1'b1 && OPCODE_RD_I == 1'b1) begin
+    end else if (LOOP_ATN && OPCODE_RD_I) begin
         ; // Wait for pending opcodes.
-    end else if (OW_REQ == 1'b1 && LOOP_BSY_I == 1'b1) begin
+    end else if (OW_REQ && LOOP_BSY_I) begin
         OP <= OP_I;
         BIW_0 <= IPIPE_D;
         TRAP_CODE <= TRAP_CODE_I;
-    end else if (OW_REQ == 1'b1 && (PIPE_RDY == 1'b1 || BKPT_REQ == 1'b1)) begin
+    end else if (OW_REQ && (PIPE_RDY || BKPT_REQ)) begin
         // Be aware: all BIW are written unaffected
         // if they are all used.
         OP <= OP_I;
@@ -399,7 +397,7 @@ always_ff @(posedge CLK) begin : OUTBUFFERS
         if (OP_I == STOP) begin
             OP_STOP = 1'b1;
         end
-    end else if (EW_REQ == 1'b1 && IPIPE_PNTR != 2'd0) begin
+    end else if (EW_REQ && IPIPE_PNTR != 2'd0) begin
         EXT_WORD <= IPIPE_D;
     end
 end
@@ -409,76 +407,75 @@ generate
     if (NO_LOOP) begin : GEN_NO_LOOP
         assign LOOP_OP = 1'b0;
     end else begin : GEN_LOOP
-        assign LOOP_OP = (OP == MOVE && BIW_0[8:3] == 6'b010010) ? 1'b1 : // (Ay) to (Ax).
-                         (OP == MOVE && BIW_0[8:3] == 6'b011010) ? 1'b1 : // (Ay) to (Ax)+.
-                         (OP == MOVE && BIW_0[8:3] == 6'b100010) ? 1'b1 : // (Ay) to -(Ax).
-                         (OP == MOVE && BIW_0[8:3] == 6'b010011) ? 1'b1 : // (Ay)+ to (Ax).
-                         (OP == MOVE && BIW_0[8:3] == 6'b011011) ? 1'b1 : // (Ay)+ to (Ax)+.
-                         (OP == MOVE && BIW_0[8:3] == 6'b100011) ? 1'b1 : // (Ay)+ to -(Ax).
-                         (OP == MOVE && BIW_0[8:3] == 6'b010100) ? 1'b1 : // -(Ay) to (Ax).
-                         (OP == MOVE && BIW_0[8:3] == 6'b011100) ? 1'b1 : // -(Ay) to (Ax)+.
-                         (OP == MOVE && BIW_0[8:3] == 6'b100100) ? 1'b1 : // -(Ay) to -(Ax).
-                         (OP == MOVE && BIW_0[8:3] == 6'b010000) ? 1'b1 : // Dy to (Ax).
-                         (OP == MOVE && BIW_0[8:3] == 6'b011000) ? 1'b1 : // Dy to (Ax)+.
-                         (OP == MOVE && BIW_0[8:3] == 6'b010001) ? 1'b1 : // Ay to (Ax).
-                         (OP == MOVE && BIW_0[8:3] == 6'b011001) ? 1'b1 : // Ay to (Ax)+.
-                         ((OP == ADD || OP == AND_B || OP == CMP || OP == EOR || OP == OR_B || OP == SUB) && BIW_0[5:3] == 3'b010) ? 1'b1 : // (Ay) to Dx, Dx to (Ay).
-                         ((OP == ADD || OP == AND_B || OP == CMP || OP == EOR || OP == OR_B || OP == SUB) && BIW_0[5:3] == 3'b011) ? 1'b1 : // (Ay)+ to Dx, Dx to (Ay)+.
-                         ((OP == ADD || OP == AND_B || OP == CMP || OP == EOR || OP == OR_B || OP == SUB) && BIW_0[5:3] == 3'b100) ? 1'b1 : // -(Ay) to Dx, Dx to -(Ay).
-                         ((OP == ADDA || OP == CMPA || OP == SUBA) && BIW_0[5:3] == 3'b010) ? 1'b1 : // (Ay) to Ax.
-                         ((OP == ADDA || OP == CMPA || OP == SUBA) && BIW_0[5:3] == 3'b011) ? 1'b1 : // (Ay)+ to Ax.
-                         ((OP == ADDA || OP == CMPA || OP == SUBA) && BIW_0[5:3] == 3'b100) ? 1'b1 : // -(Ay) to Ax.
-                         (OP == ABCD || OP == SBCD || OP == ADDX || OP == SUBX || OP == CMPM) ? 1'b1 : // -(Ay) to -(Ay), (Ay)+ to (Ay)+ for CMPM.
-                         ((OP == CLR || OP == NEG || OP == NEGX || OP == NOT_B || OP == TST || OP == NBCD) && BIW_0[5:3] == 3'b010) ? 1'b1 : // (Ay).
-                         ((OP == CLR || OP == NEG || OP == NEGX || OP == NOT_B || OP == TST || OP == NBCD) && BIW_0[5:3] == 3'b011) ? 1'b1 : // (Ay)+.
-                         ((OP == CLR || OP == NEG || OP == NEGX || OP == NOT_B || OP == TST || OP == NBCD) && BIW_0[5:3] == 3'b100) ? 1'b1 : // -(Ay).
-                         ((OP == ASL || OP == ASR || OP == LSL || OP == LSR) && BIW_0[7:3] == 5'b11010) ? 1'b1 : // (Ay) by #1.
-                         ((OP == ASL || OP == ASR || OP == LSL || OP == LSR) && BIW_0[7:3] == 5'b11011) ? 1'b1 : // (Ay)+ by #1.
-                         ((OP == ASL || OP == ASR || OP == LSL || OP == LSR) && BIW_0[7:3] == 5'b11100) ? 1'b1 : // -(Ay) by #1.
-                         ((OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR) && BIW_0[7:3] == 5'b11010) ? 1'b1 : // (Ay) by #1.
-                         ((OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR) && BIW_0[7:3] == 5'b11011) ? 1'b1 : // (Ay)+ by #1.
-                         ((OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR) && BIW_0[7:3] == 5'b11100) ? 1'b1 : 1'b0; // -(Ay) by #1.
+        assign LOOP_OP = (OP == MOVE && BIW_0[8:3] == 6'b010010) || // (Ay) to (Ax).
+                         (OP == MOVE && BIW_0[8:3] == 6'b011010) || // (Ay) to (Ax)+.
+                         (OP == MOVE && BIW_0[8:3] == 6'b100010) || // (Ay) to -(Ax).
+                         (OP == MOVE && BIW_0[8:3] == 6'b010011) || // (Ay)+ to (Ax).
+                         (OP == MOVE && BIW_0[8:3] == 6'b011011) || // (Ay)+ to (Ax)+.
+                         (OP == MOVE && BIW_0[8:3] == 6'b100011) || // (Ay)+ to -(Ax).
+                         (OP == MOVE && BIW_0[8:3] == 6'b010100) || // -(Ay) to (Ax).
+                         (OP == MOVE && BIW_0[8:3] == 6'b011100) || // -(Ay) to (Ax)+.
+                         (OP == MOVE && BIW_0[8:3] == 6'b100100) || // -(Ay) to -(Ax).
+                         (OP == MOVE && BIW_0[8:3] == 6'b010000) || // Dy to (Ax).
+                         (OP == MOVE && BIW_0[8:3] == 6'b011000) || // Dy to (Ax)+.
+                         (OP == MOVE && BIW_0[8:3] == 6'b010001) || // Ay to (Ax).
+                         (OP == MOVE && BIW_0[8:3] == 6'b011001) || // Ay to (Ax)+.
+                         ((OP == ADD || OP == AND_B || OP == CMP || OP == EOR || OP == OR_B || OP == SUB) && BIW_0[5:3] == 3'b010) || // (Ay) to Dx, Dx to (Ay).
+                         ((OP == ADD || OP == AND_B || OP == CMP || OP == EOR || OP == OR_B || OP == SUB) && BIW_0[5:3] == 3'b011) || // (Ay)+ to Dx, Dx to (Ay)+.
+                         ((OP == ADD || OP == AND_B || OP == CMP || OP == EOR || OP == OR_B || OP == SUB) && BIW_0[5:3] == 3'b100) || // -(Ay) to Dx, Dx to -(Ay).
+                         ((OP == ADDA || OP == CMPA || OP == SUBA) && BIW_0[5:3] == 3'b010) || // (Ay) to Ax.
+                         ((OP == ADDA || OP == CMPA || OP == SUBA) && BIW_0[5:3] == 3'b011) || // (Ay)+ to Ax.
+                         ((OP == ADDA || OP == CMPA || OP == SUBA) && BIW_0[5:3] == 3'b100) || // -(Ay) to Ax.
+                         (OP == ABCD || OP == SBCD || OP == ADDX || OP == SUBX || OP == CMPM) || // -(Ay) to -(Ay), (Ay)+ to (Ay)+ for CMPM.
+                         ((OP == CLR || OP == NEG || OP == NEGX || OP == NOT_B || OP == TST || OP == NBCD) && BIW_0[5:3] == 3'b010) || // (Ay).
+                         ((OP == CLR || OP == NEG || OP == NEGX || OP == NOT_B || OP == TST || OP == NBCD) && BIW_0[5:3] == 3'b011) || // (Ay)+.
+                         ((OP == CLR || OP == NEG || OP == NEGX || OP == NOT_B || OP == TST || OP == NBCD) && BIW_0[5:3] == 3'b100) || // -(Ay).
+                         ((OP == ASL || OP == ASR || OP == LSL || OP == LSR) && BIW_0[7:3] == 5'b11010) || // (Ay) by #1.
+                         ((OP == ASL || OP == ASR || OP == LSL || OP == LSR) && BIW_0[7:3] == 5'b11011) || // (Ay)+ by #1.
+                         ((OP == ASL || OP == ASR || OP == LSL || OP == LSR) && BIW_0[7:3] == 5'b11100) || // -(Ay) by #1.
+                         ((OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR) && BIW_0[7:3] == 5'b11010) || // (Ay) by #1.
+                         ((OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR) && BIW_0[7:3] == 5'b11011) || // (Ay)+ by #1.
+                         ((OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR) && BIW_0[7:3] == 5'b11100); // -(Ay) by #1.
     end
 endgenerate
 
 // LOOP_ATN
-assign LOOP_ATN = (EXH_REQ == 1'b1) ? 1'b0 :
-                  (LOOP_BSY_I == 1'b0 && LOOP_OP == 1'b1 && OP_I == DBcc && IPIPE_C == 16'hFFFC) ? 1'b1 : 1'b0; // IPIPE_C value must be minus four.
+assign LOOP_ATN = EXH_REQ ? 1'b0 :
+                  (!LOOP_BSY_I && LOOP_OP && OP_I == DBcc && IPIPE_C == 16'hFFFC) ? 1'b1 : 1'b0; // IPIPE_C value must be minus four.
 
 // P_LOOP
-always_ff @(posedge CLK) begin : P_LOOP
-    if (LOOP_ATN == 1'b1 && OW_REQ == 1'b1 && OPCODE_RD_I == 1'b0) begin
+always_ff @(posedge CLK) begin : loop_ctrl
+    if (LOOP_ATN && OW_REQ && !OPCODE_RD_I) begin
         LOOP_BSY <= 1'b1;
         LOOP_BSY_I <= 1'b1;
-    end else if (LOOP_EXIT == 1'b1 || BUSY_EXH == 1'b1) begin
+    end else if (LOOP_EXIT || BUSY_EXH) begin
         LOOP_BSY <= 1'b0;
         LOOP_BSY_I <= 1'b0;
     end
 end
 
-assign OW_REQ = (BUSY_EXH == 1'b1) ? 1'b0 : OW_REQ_MAIN;
+assign OW_REQ = BUSY_EXH ? 1'b0 : OW_REQ_MAIN;
 assign EW_REQ = EW_REQ_MAIN;
 
-assign PIPE_RDY = (OW_REQ == 1'b1 && IPIPE_PNTR == 2'd3 && INSTR_LVL == LVL_B) ? 1'b1 :
-                  (OW_REQ == 1'b1 && IPIPE_PNTR > 2'd1 && INSTR_LVL == LVL_C) ? 1'b1 :
-                  (OW_REQ == 1'b1 && IPIPE_PNTR > 2'd1 && INSTR_LVL == LVL_D) ? 1'b1 : // We need always pipe C and D to determine the INSTR_LVL.
-                  (EW_REQ == 1'b1 && IPIPE_PNTR > 2'd0) ? 1'b1 : 1'b0;
+assign PIPE_RDY = (OW_REQ && IPIPE_PNTR == 2'd3 && INSTR_LVL == LVL_B) ||
+                  (OW_REQ && IPIPE_PNTR > 2'd1 && INSTR_LVL == LVL_C) ||
+                  (OW_REQ && IPIPE_PNTR > 2'd1 && INSTR_LVL == LVL_D) || // We need always pipe C and D to determine the INSTR_LVL.
+                  (EW_REQ && IPIPE_PNTR > 2'd0);
 
 // HANDSHAKING
-always_ff @(posedge CLK) begin : HANDSHAKING
-    if (EW_REQ == 1'b1 && IPIPE_PNTR != 2'd0) begin
+always_ff @(posedge CLK) begin : handshaking
+    if (EW_REQ && IPIPE_PNTR != 2'd0)
         EW_ACK <= 1'b1;
-    end else begin
+    else
         EW_ACK <= 1'b0;
-    end
 
-    if (IPIPE_FLUSH == 1'b1) begin
+    if (IPIPE_FLUSH) begin
         OPD_ACK_MAIN <= 1'b0;
     end else if (TRAP_CODE_I == T_PRIV) begin // No action when privileged.
         OPD_ACK_MAIN <= 1'b0;
-    end else if (OW_REQ == 1'b1 && LOOP_BSY_I == 1'b1) begin
+    end else if (OW_REQ && LOOP_BSY_I) begin
         OPD_ACK_MAIN <= 1'b1;
-    end else if (OW_REQ == 1'b1 && (PIPE_RDY == 1'b1 || BKPT_REQ == 1'b1)) begin
+    end else if (OW_REQ && (PIPE_RDY || BKPT_REQ)) begin
         OPD_ACK_MAIN <= 1'b1;
     end else begin
         OPD_ACK_MAIN <= 1'b0;
@@ -494,50 +491,50 @@ end
 // The PC_EW_OFFSET is also used for the calculation
 // of the correct PC value written to the stack pointer
 // during BSR, JSR and exceptions.
-always_ff @(posedge CLK) begin : P_PC_OFFSET
+always_ff @(posedge CLK) begin : pc_offset
     reg [6:0] ADR_OFFSET;
     reg [6:0] PC_VAR;
     reg [6:0] PC_VAR_MEM;
 
-    if (IPIPE_FLUSH == 1'b1) begin
-        ADR_OFFSET = 7'b0000000;
-    end else if (PC_INC_I == 1'b1 && OPCODE_RDY_I == 1'b1) begin
+    if (IPIPE_FLUSH) begin
+        ADR_OFFSET = 7'd0;
+    end else if (PC_INC_I && OPCODE_RDY_I) begin
         ADR_OFFSET = ADR_OFFSET + 7'd1 - PC_VAR;
-    end else if (OPCODE_RDY_I == 1'b1) begin
+    end else if (OPCODE_RDY_I) begin
         ADR_OFFSET = ADR_OFFSET + 7'd1;
-    end else if (PC_INC_I == 1'b1) begin
+    end else if (PC_INC_I) begin
         ADR_OFFSET = ADR_OFFSET - PC_VAR;
     end
     //
-    if (BUSY_EXH == 1'b0) begin
+    if (!BUSY_EXH) begin
         PC_VAR_MEM = PC_VAR; // Store the old offset to write back on the stack.
     end
 
-    if (BUSY_EXH == 1'b1) begin
+    if (BUSY_EXH) begin
         // New PC is loaded by the exception handler.
         // So PC_VAR must be initialized.
-        PC_VAR = 7'b0000000;
-    end else if (PC_INC_I == 1'b1 || FLUSHED == 1'b1) begin
+        PC_VAR = 7'd0;
+    end else if (PC_INC_I || FLUSHED) begin
         case (INSTR_LVL)
-            LVL_D: PC_VAR = 7'b0000001;
-            LVL_C: PC_VAR = 7'b0000010;
-            LVL_B: PC_VAR = 7'b0000011;
+            LVL_D: PC_VAR = 7'd1;
+            LVL_C: PC_VAR = 7'd2;
+            LVL_B: PC_VAR = 7'd3;
         endcase
-    end else if (EW_REQ == 1'b1 && IPIPE_PNTR != 2'd0) begin
+    end else if (EW_REQ && IPIPE_PNTR != 2'd0) begin
         PC_VAR = PC_VAR + 7'd1;
     end
     //
-    if (OW_REQ == 1'b1 && BKPT_REQ == 1'b1) begin
+    if (OW_REQ && BKPT_REQ) begin
         PC_EW_OFFSET <= 4'b0010; // Always level D operations.
-    end else if (OW_REQ == 1'b1 && PIPE_RDY == 1'b1 && OP_I == JSR) begin // Initialize.
+    end else if (OW_REQ && PIPE_RDY && OP_I == JSR) begin // Initialize.
         PC_EW_OFFSET <= 4'h0;
-    end else if (OW_REQ == 1'b1 && PIPE_RDY == 1'b1) begin // BSR.
+    end else if (OW_REQ && PIPE_RDY) begin // BSR.
         case (INSTR_LVL)
             LVL_D: PC_EW_OFFSET <= 4'b0010;
             LVL_C: PC_EW_OFFSET <= 4'b0100;
             default: PC_EW_OFFSET <= 4'b0110; // LONG displacement.
         endcase
-    end else if (EW_ACK == 1'b1 && OP == JSR) begin // Calculate the required extension words.
+    end else if (EW_ACK && OP == JSR) begin // Calculate the required extension words.
         PC_EW_OFFSET <= PC_EW_OFFSET + 4'b0010;
     end
 
@@ -547,10 +544,10 @@ always_ff @(posedge CLK) begin : P_PC_OFFSET
 end
 
 // P_PC_OFFSET_COMB
-always_comb begin : P_PC_OFFSET_COMB
-    if (BUSY_EXH == 1'b1 && PC_INC_I == 1'b1) begin
+always_comb begin : pc_offset_comb
+    if (BUSY_EXH && PC_INC_I) begin
         PC_OFFSET = {PC_VAR_MEM_S, 1'b0};
-    end else if (OP == DBcc && LOOP_BSY_I == 1'b1 && LOOP_EXIT == 1'b0) begin
+    end else if (OP == DBcc && LOOP_BSY_I && !LOOP_EXIT) begin
         // Suppress to increment after DBcc operation during the loop to
         // handle a correct PC with displacement when looping around.
         PC_OFFSET = 8'h00;
@@ -561,19 +558,18 @@ always_comb begin : P_PC_OFFSET_COMB
 end
 
 // P_FLUSH
-always_ff @(posedge CLK) begin : P_FLUSH
-    if (IPIPE_FLUSH == 1'b1) begin
+always_ff @(posedge CLK) begin : flush_tracker
+    if (IPIPE_FLUSH)
         FLUSHED <= 1'b1;
-    end else if (OW_REQ == 1'b1 && PIPE_RDY == 1'b1) begin
+    else if (OW_REQ && PIPE_RDY)
         FLUSHED <= 1'b0;
-    end
 end
 
 assign PC_INC = PC_INC_I;
-assign PC_INC_I = (FLUSHED == 1'b1) ? 1'b0 : // Avoid double increment after a flushed pipe.
-                  (IPIPE_FLUSH == 1'b1 && BUSY_MAIN == 1'b1) ? 1'b1 : // If the pipe is flushed, we need the new PC value for refilling.
-                  (BKPT_REQ == 1'b1) ? 1'b0 : // Do not update!
-                  (OW_REQ == 1'b1 && PIPE_RDY == 1'b1) ? 1'b1 : PC_INC_EXH;
+assign PC_INC_I = FLUSHED ? 1'b0 : // Avoid double increment after a flushed pipe.
+                  (IPIPE_FLUSH && BUSY_MAIN) ? 1'b1 : // If the pipe is flushed, we need the new PC value for refilling.
+                  BKPT_REQ ? 1'b0 : // Do not update!
+                  (OW_REQ && PIPE_RDY) ? 1'b1 : PC_INC_EXH;
 
 // INSTR_LVL
 assign INSTR_LVL = (TRAP_CODE_I == T_PRIV) ? LVL_D : // Points to the first word. Required for stacking.
@@ -587,7 +583,7 @@ assign INSTR_LVL = (TRAP_CODE_I == T_PRIV) ? LVL_D : // Points to the first word
                    (OP_I == SUBI && IPIPE_D[7:6] == 2'b10) ? LVL_B :
                    (OP_I == TRAPcc && IPIPE_D[2:0] == 3'b011) ? LVL_B :
                    (OP_I == ADDI || OP_I == ANDI || OP_I == ANDI_TO_SR || OP_I == ANDI_TO_CCR) ? LVL_C :
-                   ((OP_I == BCHG || OP_I == BCLR || OP_I == BSET || OP_I == BTST) && IPIPE_D[8] == 1'b0) ? LVL_C :
+                   ((OP_I == BCHG || OP_I == BCLR || OP_I == BSET || OP_I == BTST) && !IPIPE_D[8]) ? LVL_C :
                    ((OP_I == Bcc || OP_I == BRA || OP_I == BSR) && IPIPE_D[7:0] == 8'h00) ? LVL_C :
                    (OP_I == BFCHG || OP_I == BFCLR || OP_I == BFEXTS || OP_I == BFEXTU) ? LVL_C :
                    (OP_I == BFFFO || OP_I == BFINS || OP_I == BFSET || OP_I == BFTST) ? LVL_C :
@@ -606,18 +602,18 @@ assign INSTR_LVL = (TRAP_CODE_I == T_PRIV) ? LVL_D : // Points to the first word
 assign TRAP_CODE_I = (OP_I == UNIMPLEMENTED && IPIPE_D[15:12] == 4'hA) ? T_1010 :
                      (OP_I == UNIMPLEMENTED && IPIPE_D[15:12] == 4'hF) ? T_1111 :
                      (OP_I == ILLEGAL) ? T_ILLEGAL :
-                     (OP_I == RTE && SBIT == 1'b1) ? T_RTE : // Handled like a trap simplifies the code.
+                     (OP_I == RTE && SBIT) ? T_RTE : // Handled like a trap simplifies the code.
                      (OP_I == TRAP) ? T_TRAP :
-                     (OP_I == ANDI_TO_SR && SBIT == 1'b0) ? T_PRIV :
-                     (OP_I == EORI_TO_SR && SBIT == 1'b0) ? T_PRIV :
-                     ((OP_I == MOVE_FROM_SR || OP_I == MOVE_TO_SR) && SBIT == 1'b0) ? T_PRIV :
-                     ((OP_I == MOVE_USP || OP_I == MOVEC || OP_I == MOVES) && SBIT == 1'b0) ? T_PRIV :
-                     (OP_I == ORI_TO_SR && SBIT == 1'b0) ? T_PRIV :
-                     ((OP_I == OP_RESET || OP_I == RTE) && SBIT == 1'b0) ? T_PRIV :
-                     (OP_I == STOP && SBIT == 1'b0) ? T_PRIV : NONE;
+                     (OP_I == ANDI_TO_SR && !SBIT) ? T_PRIV :
+                     (OP_I == EORI_TO_SR && !SBIT) ? T_PRIV :
+                     ((OP_I == MOVE_FROM_SR || OP_I == MOVE_TO_SR) && !SBIT) ? T_PRIV :
+                     ((OP_I == MOVE_USP || OP_I == MOVEC || OP_I == MOVES) && !SBIT) ? T_PRIV :
+                     (OP_I == ORI_TO_SR && !SBIT) ? T_PRIV :
+                     ((OP_I == OP_RESET || OP_I == RTE) && !SBIT) ? T_PRIV :
+                     (OP_I == STOP && !SBIT) ? T_PRIV : NONE;
 
 // OP_DECODE
-always_comb begin : OP_DECODE
+always_comb begin : op_decode
     // The default OPCODE is the ILLEGAL operation, if none of the following conditions are met.
     OP_I = ILLEGAL;
     case (IPIPE_D[15:12]) // Operation code map.
@@ -644,21 +640,21 @@ always_comb begin : OP_DECODE
                 OP_I = MOVES;
             end else if (IPIPE_D[8:6] > 3'b011 && IPIPE_D[5:3] == 3'b001) begin
                 OP_I = MOVEP;
-            end else if (IPIPE_D[11] == 1'b0 && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b010 && IPIPE_C[11] == 1'b1) begin
+            end else if (!IPIPE_D[11] && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b010 && IPIPE_C[11]) begin
                 OP_I = CHK2;
-            end else if (IPIPE_D[11] == 1'b0 && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] > 3'b100 && IPIPE_D[5:3] < 3'b111 && IPIPE_C[11] == 1'b1) begin
+            end else if (!IPIPE_D[11] && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] > 3'b100 && IPIPE_D[5:3] < 3'b111 && IPIPE_C[11]) begin
                 OP_I = CHK2;
-            end else if (IPIPE_D[11] == 1'b0 && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b100 && IPIPE_C[11] == 1'b1) begin
+            end else if (!IPIPE_D[11] && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b100 && IPIPE_C[11]) begin
                 OP_I = CHK2;
-            end else if (IPIPE_D[11] == 1'b0 && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b010 && IPIPE_C[11] == 1'b0) begin
+            end else if (!IPIPE_D[11] && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b010 && !IPIPE_C[11]) begin
                 OP_I = CMP2;
-            end else if (IPIPE_D[11] == 1'b0 && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] > 3'b100 && IPIPE_D[5:3] < 3'b111 && IPIPE_C[11] == 1'b0) begin
+            end else if (!IPIPE_D[11] && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] > 3'b100 && IPIPE_D[5:3] < 3'b111 && !IPIPE_C[11]) begin
                 OP_I = CMP2;
-            end else if (IPIPE_D[11] == 1'b0 && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b100 && IPIPE_C[11] == 1'b0) begin
+            end else if (!IPIPE_D[11] && IPIPE_D[10:9] != 2'b11 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b100 && !IPIPE_C[11]) begin
                 OP_I = CMP2;
-            end else if (IPIPE_D[11] == 1'b1 && IPIPE_D[10:9] != 2'b00 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] > 3'b001 && IPIPE_D[5:3] < 3'b111) begin
+            end else if (IPIPE_D[11] && IPIPE_D[10:9] != 2'b00 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] > 3'b001 && IPIPE_D[5:3] < 3'b111) begin
                 OP_I = CAS;
-            end else if (IPIPE_D[11] == 1'b1 && IPIPE_D[10:9] != 2'b00 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b010) begin
+            end else if (IPIPE_D[11] && IPIPE_D[10:9] != 2'b00 && IPIPE_D[8:6] == 3'b011 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b010) begin
                 OP_I = CAS;
             end else begin
                 case (IPIPE_D[5:3]) // Addressing mode.
@@ -811,7 +807,7 @@ always_comb begin : OP_DECODE
                 case (IPIPE_D[5:3]) // Addressing mode.
                     3'b000, 3'b010, 3'b011, 3'b100, 3'b101, 3'b110: begin
                         if (IPIPE_D[11:6] == 6'b110001) begin
-                            if (IPIPE_C[11] == 1'b1) begin
+                            if (IPIPE_C[11]) begin
                                 OP_I = DIVS; // Long.
                             end else begin
                                 OP_I = DIVU; // Long.
@@ -825,7 +821,7 @@ always_comb begin : OP_DECODE
                         end else if (IPIPE_D[11:6] == 6'b011011) begin
                             OP_I = MOVE_TO_SR;
                         end else if (IPIPE_D[11:6] == 6'b110000) begin
-                            if (IPIPE_C[11] == 1'b1) begin
+                            if (IPIPE_C[11]) begin
                                 OP_I = MULS; // Long.
                             end else begin
                                 OP_I = MULU; // Long.
@@ -838,7 +834,7 @@ always_comb begin : OP_DECODE
                     end
                     3'b111: begin // Not all registers are valid for this mode.
                         if (IPIPE_D[11:6] == 6'b110001 && IPIPE_D[2:0] < 3'b101) begin
-                            if (IPIPE_C[11] == 1'b1) begin
+                            if (IPIPE_C[11]) begin
                                 OP_I = DIVS; // Long.
                             end else begin
                                 OP_I = DIVU; // Long.
@@ -852,7 +848,7 @@ always_comb begin : OP_DECODE
                         end else if (IPIPE_D[11:6] == 6'b011011 && IPIPE_D[2:0] < 3'b101) begin
                             OP_I = MOVE_TO_SR;
                         end else if (IPIPE_D[11:6] == 6'b110000 && IPIPE_D[2:0] < 3'b101) begin
-                            if (IPIPE_C[11] == 1'b1) begin
+                            if (IPIPE_C[11]) begin
                                 OP_I = MULS; // Long.
                             end else begin
                                 OP_I = MULU; // Long.
@@ -950,8 +946,8 @@ always_comb begin : OP_DECODE
                     endcase
                 end
 
-                if (IPIPE_D[11] == 1'b1 && IPIPE_D[9:7] == 3'b001) begin
-                    if (IPIPE_D[10] == 1'b0) begin // Register to memory transfer.
+                if (IPIPE_D[11] && IPIPE_D[9:7] == 3'b001) begin
+                    if (!IPIPE_D[10]) begin // Register to memory transfer.
                         case (IPIPE_D[5:3]) // OPMODES, no postincrement addressing.
                             3'b010, 3'b100, 3'b101, 3'b110:
                                 OP_I = MOVEM;
@@ -992,18 +988,18 @@ always_comb begin : OP_DECODE
             end else if (IPIPE_D[7:6] == 2'b11 && IPIPE_D[5:3] != 3'b001 && IPIPE_D[5:3] != 3'b111) begin
                 OP_I = Scc;
             //
-            end else if (IPIPE_D[8] == 1'b0 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b010) begin
+            end else if (!IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b010) begin
                 OP_I = ADDQ;
-            end else if (IPIPE_D[8] == 1'b0 && (IPIPE_D[7:6] == 2'b01 || IPIPE_D[7:6] == 2'b10) && IPIPE_D[5:3] != 3'b111) begin
+            end else if (!IPIPE_D[8] && (IPIPE_D[7:6] == 2'b01 || IPIPE_D[7:6] == 2'b10) && IPIPE_D[5:3] != 3'b111) begin
                 OP_I = ADDQ;
-            end else if (IPIPE_D[8] == 1'b0 && IPIPE_D[7:6] == 2'b00 && IPIPE_D[5:3] != 3'b001 && IPIPE_D[5:3] != 3'b111) begin
+            end else if (!IPIPE_D[8] && IPIPE_D[7:6] == 2'b00 && IPIPE_D[5:3] != 3'b001 && IPIPE_D[5:3] != 3'b111) begin
                 OP_I = ADDQ;
             //
-            end else if (IPIPE_D[8] == 1'b1 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b010) begin
+            end else if (IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[5:3] == 3'b111 && IPIPE_D[2:0] < 3'b010) begin
                 OP_I = SUBQ;
-            end else if (IPIPE_D[8] == 1'b1 && (IPIPE_D[7:6] == 2'b01 || IPIPE_D[7:6] == 2'b10) && IPIPE_D[5:3] != 3'b111) begin
+            end else if (IPIPE_D[8] && (IPIPE_D[7:6] == 2'b01 || IPIPE_D[7:6] == 2'b10) && IPIPE_D[5:3] != 3'b111) begin
                 OP_I = SUBQ;
-            end else if (IPIPE_D[8] == 1'b1 && IPIPE_D[7:6] == 2'b00 && IPIPE_D[5:3] != 3'b001 && IPIPE_D[5:3] != 3'b111) begin
+            end else if (IPIPE_D[8] && IPIPE_D[7:6] == 2'b00 && IPIPE_D[5:3] != 3'b001 && IPIPE_D[5:3] != 3'b111) begin
                 OP_I = SUBQ;
             //
             end else if (IPIPE_D[7:3] == 5'b11111) begin
@@ -1020,7 +1016,7 @@ always_comb begin : OP_DECODE
             end
         end
         4'h7: begin // MOVEQ.
-            if (IPIPE_D[8] == 1'b0) begin
+            if (!IPIPE_D[8]) begin
                 OP_I = MOVEQ;
             end
         end
@@ -1107,7 +1103,7 @@ always_comb begin : OP_DECODE
             OP_I = UNIMPLEMENTED;
         end
         4'hB: begin // CMP / EOR.
-            if (IPIPE_D[8] == 1'b1 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[5:3] == 3'b001) begin
+            if (IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[5:3] == 3'b001) begin
                 OP_I = CMPM;
             end else begin
                 case (IPIPE_D[8:6]) // OPMODE field.
@@ -1301,21 +1297,21 @@ always_comb begin : OP_DECODE
                 OP_I = ROTL; // Memory shifts.
             end else if (IPIPE_D[11:6] == 6'b011111 && IPIPE_D[5:3] > 3'b001 && IPIPE_D[5:3] != 3'b111) begin
                 OP_I = ROTL; // Memory shifts.
-            end else if (IPIPE_D[8] == 1'b0 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b00) begin
+            end else if (!IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b00) begin
                 OP_I = ASR; // Register shifts.
-            end else if (IPIPE_D[8] == 1'b1 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b00) begin
+            end else if (IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b00) begin
                 OP_I = ASL; // Register shifts.
-            end else if (IPIPE_D[8] == 1'b0 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b01) begin
+            end else if (!IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b01) begin
                 OP_I = LSR; // Register shifts.
-            end else if (IPIPE_D[8] == 1'b1 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b01) begin
+            end else if (IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b01) begin
                 OP_I = LSL; // Register shifts.
-            end else if (IPIPE_D[8] == 1'b0 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b10) begin
+            end else if (!IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b10) begin
                 OP_I = ROXR; // Register shifts.
-            end else if (IPIPE_D[8] == 1'b1 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b10) begin
+            end else if (IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b10) begin
                 OP_I = ROXL; // Register shifts.
-            end else if (IPIPE_D[8] == 1'b0 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b11) begin
+            end else if (!IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b11) begin
                 OP_I = ROTR; // Register shifts.
-            end else if (IPIPE_D[8] == 1'b1 && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b11) begin
+            end else if (IPIPE_D[8] && IPIPE_D[7:6] < 2'b11 && IPIPE_D[4:3] == 2'b11) begin
                 OP_I = ROTL; // Register shifts.
             end
         end

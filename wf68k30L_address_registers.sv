@@ -153,8 +153,8 @@ logic [2:0] SFC_REG_sig; // Special function code registers.
 logic [31:0] USP_REG; // User stack pointer (refers to A7 in the user mode.).
 logic [31:0] ADR_EFF_TMP_REG;
 
-always_ff @(posedge CLK) begin : INBUFFER
-    if (AR_MARK_USED == 1'b1) begin
+always_ff @(posedge CLK) begin : latch_write_sel
+    if (AR_MARK_USED) begin
         AR_PNTR_WB_1 <= AR_SEL_WR_1;
         AR_PNTR_WB_2 <= AR_SEL_WR_2;
     end
@@ -163,46 +163,47 @@ end
 assign AR_PNTR_1 = AR_SEL_RD_1;
 assign AR_PNTR_2 = AR_SEL_RD_2;
 
-always_ff @(posedge CLK) begin : P_IN_USE
+always_ff @(posedge CLK) begin : track_in_use
     logic DELAY;
-    if (RESET == 1'b1 || UNMARK == 1'b1) begin
+    if (RESET || UNMARK) begin
         AR_USED_1[3] <= 1'b0;
         AR_USED_2[3] <= 1'b0;
-    end else if (AR_MARK_USED == 1'b1) begin
+    end else if (AR_MARK_USED) begin
         AR_USED_1 <= {1'b1, AR_SEL_WR_1};
-        if (USE_APAIR == 1'b1) begin
+        if (USE_APAIR)
             AR_USED_2 <= {1'b1, AR_SEL_WR_2};
-        end
         MSBIT <= {MBIT, SBIT};
     end
     //
-    if (RESET == 1'b1 || UNMARK == 1'b1) begin
+    if (RESET || UNMARK) begin
         ADR_WB[32] <= 1'b0;
         DELAY = 1'b0;
-    end else if (ADR_MARK_USED == 1'b1) begin
+    end else if (ADR_MARK_USED) begin
         DELAY = 1'b1; // One clock cycle address calculation delay.
-    end else if (DELAY == 1'b1) begin
+    end else if (DELAY) begin
         ADR_WB <= {1'b1, ADR_EFF_I};
         DELAY = 1'b0;
     end
 end
 
-assign AR_IN_USE = (AR_USED_1[2:0] == 3'b111 && SBIT == 1'b1 && MSBIT[1] != MBIT) ? 1'b0 : // Wrong stack pointer.
-                   (AR_USED_2[2:0] == 3'b111 && SBIT == 1'b1 && MSBIT[1] != MBIT) ? 1'b0 : // Wrong stack pointer.
-                   (AR_USED_1[3] == 1'b1 && AR_USED_1[2:0] == AR_SEL_RD_1) ? 1'b1 :
-                   (AR_USED_1[3] == 1'b1 && AR_USED_1[2:0] == AR_SEL_RD_2) ? 1'b1 :
-                   (AR_USED_2[3] == 1'b1 && AR_USED_2[2:0] == AR_SEL_RD_1) ? 1'b1 :
-                   (AR_USED_2[3] == 1'b1 && AR_USED_2[2:0] == AR_SEL_RD_2) ? 1'b1 : 1'b0;
+assign AR_IN_USE = (AR_USED_1[2:0] == 3'b111 && SBIT && MSBIT[1] != MBIT) ? 1'b0 : // Wrong stack pointer.
+                   (AR_USED_2[2:0] == 3'b111 && SBIT && MSBIT[1] != MBIT) ? 1'b0 : // Wrong stack pointer.
+                   (AR_USED_1[3] && AR_USED_1[2:0] == AR_SEL_RD_1) ||
+                   (AR_USED_1[3] && AR_USED_1[2:0] == AR_SEL_RD_2) ||
+                   (AR_USED_2[3] && AR_USED_2[2:0] == AR_SEL_RD_1) ||
+                   (AR_USED_2[3] && AR_USED_2[2:0] == AR_SEL_RD_2);
 
 assign AR_OUT_1 = AR_OUT_1_I;
 assign AR_OUT_2 = AR_OUT_2_I;
 
-assign ADR_IN_USE = (ADR_WB[32] == 1'b1 && ADR_WB[31:2] == ADR_EFF_I[31:2]) ? 1'b1 :  // Actual long word address.
-                    (ADR_WB[32] == 1'b1 && ADR_WB[31:2] - 1'b1 == ADR_EFF_I[31:2]) ? 1'b1 :  // Lock a misaligned access.
-                    (ADR_WB[32] == 1'b1 && ADR_WB[31:2] + 1'b1 == ADR_EFF_I[31:2]) ? 1'b1 : 1'b0; // Lock a misaligned access.
+assign ADR_IN_USE = ADR_WB[32] && (
+                        ADR_WB[31:2] == ADR_EFF_I[31:2]          ||  // Exact long-word match
+                        ADR_WB[31:2] - 1'b1 == ADR_EFF_I[31:2]   ||  // Lock misaligned access (below)
+                        ADR_WB[31:2] + 1'b1 == ADR_EFF_I[31:2]       // Lock misaligned access (above)
+                    );
 
-always_ff @(posedge CLK) begin : ADR_FORMAT_PROC
-    if (STORE_ADR_FORMAT == 1'b1) begin
+always_ff @(posedge CLK) begin : adr_format_latch
+    if (STORE_ADR_FORMAT) begin
         SCALE <= EXT_WORD[10:9];
         F_E <= EXT_WORD[8];
         B_S <= EXT_WORD[7];
@@ -223,27 +224,27 @@ logic [31:0] BASE_DISPL_REG;
 logic [31:0] OUTER_DISPL_REG;
 logic [31:0] ABS_ADDRESS_REG;
 
-always_ff @(posedge CLK) begin : ADDRESS_MODES_REG
+always_ff @(posedge CLK) begin : address_modes_reg
     // INDEX selection
-    if (STORE_ADR_FORMAT == 1'b1 && EXT_WORD[15] == 1'b0 && EXT_WORD[11] == 1'b1) begin
+    if (STORE_ADR_FORMAT && !EXT_WORD[15] && EXT_WORD[11]) begin
         INDEX_REG <= INDEX_IN; // Long data register.
-    end else if (STORE_ADR_FORMAT == 1'b1 && EXT_WORD[15] == 1'b0) begin
+    end else if (STORE_ADR_FORMAT && !EXT_WORD[15]) begin
         INDEX_REG <= {{16{INDEX_IN[15]}}, INDEX_IN[15:0]}; // Sign extended data register.
-    end else if (STORE_ADR_FORMAT == 1'b1 && EXT_WORD[11] == 1'b1) begin // Long address register.
-        if (EXT_WORD[14:12] == 3'b111 && SBIT == 1'b1 && MBIT == 1'b1)
+    end else if (STORE_ADR_FORMAT && EXT_WORD[11]) begin // Long address register.
+        if (EXT_WORD[14:12] == 3'b111 && SBIT && MBIT)
             INDEX_REG <= MSP_REG;
-        else if (EXT_WORD[14:12] == 3'b111 && SBIT == 1'b1 && MBIT == 1'b0)
+        else if (EXT_WORD[14:12] == 3'b111 && SBIT && !MBIT)
             INDEX_REG <= ISP_REG;
-        else if (EXT_WORD[14:12] == 3'b111 && SBIT == 1'b0)
+        else if (EXT_WORD[14:12] == 3'b111 && !SBIT)
             INDEX_REG <= USP_REG;
         else
             INDEX_REG <= AR[EXT_WORD[14:12]];
-    end else if (STORE_ADR_FORMAT == 1'b1) begin // Sign extended address register.
-        if (EXT_WORD[14:12] == 3'b111 && SBIT == 1'b1 && MBIT == 1'b1)
+    end else if (STORE_ADR_FORMAT) begin // Sign extended address register.
+        if (EXT_WORD[14:12] == 3'b111 && SBIT && MBIT)
             INDEX_REG <= {{16{MSP_REG[15]}}, MSP_REG[15:0]};
-        else if (EXT_WORD[14:12] == 3'b111 && SBIT == 1'b1 && MBIT == 1'b0)
+        else if (EXT_WORD[14:12] == 3'b111 && SBIT && !MBIT)
             INDEX_REG <= {{16{ISP_REG[15]}}, ISP_REG[15:0]};
-        else if (EXT_WORD[14:12] == 3'b111 && SBIT == 1'b0)
+        else if (EXT_WORD[14:12] == 3'b111 && !SBIT)
             INDEX_REG <= {{16{USP_REG[15]}}, USP_REG[15:0]};
         else
             INDEX_REG <= {{16{AR[EXT_WORD[14:12]][15]}}, AR[EXT_WORD[14:12]][15:0]};
@@ -257,58 +258,54 @@ always_ff @(posedge CLK) begin : ADDRESS_MODES_REG
     endcase
     //
     // Register for memory indirect addressing modes.
-    if (STORE_MEM_ADR == 1'b1) begin
+    if (STORE_MEM_ADR)
         MEM_ADR_REG <= AR_IN_1;
-    end
-    //
+
     // Base displacement
-    if (RESET == 1'b1) begin
-        BASE_DISPL_REG <= 32'h00000000; // Null base displacement.
-    end else if (STORE_ADR_FORMAT == 1'b1 && EXT_WORD[8] == 1'b1 && EXT_WORD[5:4] == 2'b01) begin
-        BASE_DISPL_REG <= 32'h00000000; // Null base displacement.
-    end else if (STORE_ADR_FORMAT == 1'b1 && EXT_WORD[8] == 1'b0) begin
+    if (RESET) begin
+        BASE_DISPL_REG <= 32'h0;
+    end else if (STORE_ADR_FORMAT && EXT_WORD[8] && EXT_WORD[5:4] == 2'b01) begin
+        BASE_DISPL_REG <= 32'h0; // Null base displacement.
+    end else if (STORE_ADR_FORMAT && !EXT_WORD[8]) begin
         BASE_DISPL_REG <= {{24{EXT_WORD[7]}}, EXT_WORD[7:0]};
-    end else if (STORE_D16 == 1'b1) begin
+    end else if (STORE_D16) begin
         BASE_DISPL_REG <= {{16{EXT_WORD[15]}}, EXT_WORD};
-    end else if (STORE_D32_LO == 1'b1) begin
-        if (BD_SIZE == 2'b10) begin // Word displacement.
+    end else if (STORE_D32_LO) begin
+        if (BD_SIZE == 2'b10) // Word displacement.
             BASE_DISPL_REG[31:16] <= {16{EXT_WORD[15]}};
-        end
         BASE_DISPL_REG[15:0] <= EXT_WORD;
-    end else if (STORE_D32_HI == 1'b1) begin
+    end else if (STORE_D32_HI) begin
         BASE_DISPL_REG[31:16] <= EXT_WORD;
-    end else if (STORE_DISPL == 1'b1) begin
+    end else if (STORE_DISPL) begin
         BASE_DISPL_REG <= DISPLACEMENT;
     end
-    //
+
     // Outer displacement
-    if (STORE_ADR_FORMAT == 1'b1 && EXT_WORD[8] == 1'b1 && EXT_WORD[1:0] == 2'b01) begin
-        OUTER_DISPL_REG <= 32'h00000000; // Null outer displacement.
-    end else if (STORE_OD_LO == 1'b1) begin
-        if (I_IS[1:0] == 2'b10) begin
+    if (STORE_ADR_FORMAT && EXT_WORD[8] && EXT_WORD[1:0] == 2'b01) begin
+        OUTER_DISPL_REG <= 32'h0; // Null outer displacement.
+    end else if (STORE_OD_LO) begin
+        if (I_IS[1:0] == 2'b10)
             OUTER_DISPL_REG[31:16] <= {16{EXT_WORD[15]}};
-        end
         OUTER_DISPL_REG[15:0] <= EXT_WORD;
-    end else if (STORE_OD_HI == 1'b1) begin
+    end else if (STORE_OD_HI) begin
         OUTER_DISPL_REG[31:16] <= EXT_WORD;
     end
-    //
+
     // Absolute address
-    if (STORE_ABS_LO == 1'b1) begin
-        if (AMODE_SEL == 3'b000) begin
+    if (STORE_ABS_LO) begin
+        if (AMODE_SEL == 3'b000)
             ABS_ADDRESS_REG[31:16] <= {16{EXT_WORD[15]}};
-        end
         ABS_ADDRESS_REG[15:0] <= EXT_WORD;
-    end else if (STORE_ABS_HI == 1'b1) begin
+    end else if (STORE_ABS_HI) begin
         ABS_ADDRESS_REG[31:16] <= EXT_WORD;
     end
-    //
+
     // Effective address register
-    if (RESTORE_ISP_PC == 1'b1) begin
+    if (RESTORE_ISP_PC) begin
         ADR_EFF_I <= ADR_OFFSET; // During system initialization.
         ADR_EFF_TMP_REG <= ADR_EFF_VAR_comb;
-    end else if (STORE_AEFF == 1'b1) begin // Used for MOVEM.
-        ADR_EFF_I <= ADR_EFF_TMP_REG + ADR_OFFSET; // Keep the effective address. See also CONTROL section.
+    end else if (STORE_AEFF) begin // Used for MOVEM.
+        ADR_EFF_I <= ADR_EFF_TMP_REG + ADR_OFFSET;
     end else begin // Normal operation:
         ADR_EFF_I <= ADR_EFF_VAR_comb + ADR_OFFSET;
         ADR_EFF_TMP_REG <= ADR_EFF_VAR_comb;
@@ -321,26 +318,23 @@ logic [31:0] ADR_EFF_VAR_comb;
 logic [31:0] PCVAR_comb;
 logic [3:0] I_S_IS_comb;
 
-always_comb begin
+always_comb begin : adr_eff_calc
     I_S_IS_comb = {I_S, I_IS};
-    PCVAR_comb = PC_I + {28'd0, PC_EW_OFFSET}; // This is the address of the extension word.
+    PCVAR_comb = PC_I + {28'd0, PC_EW_OFFSET}; // Address of the extension word.
 
-    // Address mux
-    if (ADR_MODE == 3'b110 && FETCH_MEM_ADR == 1'b1 && F_E == 1'b1 && B_S == 1'b1)
-        ADR_MUX_comb = 32'h00000000; // Base register suppress.
-    else if (ADR_MODE == 3'b111 && FETCH_MEM_ADR == 1'b1 && AMODE_SEL == 3'b011 && F_E == 1'b1 && B_S == 1'b1)
-        ADR_MUX_comb = 32'h00000000; // Base register suppress.
-    else if (USE_DREG == 1'b1)
+    // Address mux: select base register
+    if (ADR_MODE == ADR_AN_IDX && FETCH_MEM_ADR && F_E && B_S)
+        ADR_MUX_comb = 32'h0; // Base register suppress.
+    else if (ADR_MODE == ADR_SPECIAL && FETCH_MEM_ADR && AMODE_SEL == 3'b011 && F_E && B_S)
+        ADR_MUX_comb = 32'h0; // Base register suppress.
+    else if (USE_DREG)
         ADR_MUX_comb = AR_IN_1;
     else begin
         case (AR_PNTR_1)
             7: begin
-                if (SBIT == 1'b1 && MBIT == 1'b0)
-                    ADR_MUX_comb = ISP_REG;
-                else if (SBIT == 1'b1)
-                    ADR_MUX_comb = MSP_REG;
-                else
-                    ADR_MUX_comb = USP_REG;
+                if (SBIT && !MBIT)       ADR_MUX_comb = ISP_REG;
+                else if (SBIT)            ADR_MUX_comb = MSP_REG;
+                else                      ADR_MUX_comb = USP_REG;
             end
             default: ADR_MUX_comb = AR[AR_PNTR_1];
         endcase
@@ -348,83 +342,74 @@ always_comb begin
 
     // Effective address computation
     case (ADR_MODE)
-        // "000" | "001" => Direct address modes: no effective address required.
-        3'b010, 3'b011, 3'b100:
-            ADR_EFF_VAR_comb = ADR_MUX_comb; // (An), (An)+, -(An).
-        3'b101: // Address register indirect with offset. Assembler syntax: (d16,An).
-            ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG; // (d16,An).
-        3'b110: begin
-            if (F_E == 1'b0) begin // Brief extension word.
-                ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG; // (d8, An, Xn, SIZE*SCALE).
-            end else begin // Full extension word.
+        ADR_AN_IND, ADR_AN_POST, ADR_AN_PRE:  // (An), (An)+, -(An)
+            ADR_EFF_VAR_comb = ADR_MUX_comb;
+
+        ADR_AN_DISP:  // (d16,An)
+            ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG;
+
+        ADR_AN_IDX: begin  // (d8,An,Xn) or full extension word
+            if (!F_E) begin // Brief extension word
+                ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
+            end else begin // Full extension word
                 case (I_S_IS_comb)
-                    4'b0000, 4'b1000: // No memory indirect action.
-                        ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG; // (bd, An, Xn, SIZE*SCALE).
-                    4'b0001, 4'b0010, 4'b0011: begin // Memory indirect preindexed.
-                        if (FETCH_MEM_ADR == 1'b1)
-                            ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
-                        else
-                            ADR_EFF_VAR_comb = MEM_ADR_REG + OUTER_DISPL_REG;
-                    end
-                    4'b0101, 4'b0110, 4'b0111: begin // Memory indirect postindexed.
-                        if (FETCH_MEM_ADR == 1'b1)
-                            ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG;
-                        else
-                            ADR_EFF_VAR_comb = MEM_ADR_REG + INDEX_SCALED_REG + OUTER_DISPL_REG;
-                    end
-                    4'b1001, 4'b1010, 4'b1011: begin // Memory indirect.
-                        if (FETCH_MEM_ADR == 1'b1)
-                            ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG;
-                        else
-                            ADR_EFF_VAR_comb = MEM_ADR_REG + OUTER_DISPL_REG;
-                    end
+                    4'b0000, 4'b1000: // No memory indirect
+                        ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
+                    4'b0001, 4'b0010, 4'b0011: // Preindexed
+                        ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
+                            (ADR_MUX_comb + BASE_DISPL_REG + INDEX_SCALED_REG) :
+                            (MEM_ADR_REG + OUTER_DISPL_REG);
+                    4'b0101, 4'b0110, 4'b0111: // Postindexed
+                        ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
+                            (ADR_MUX_comb + BASE_DISPL_REG) :
+                            (MEM_ADR_REG + INDEX_SCALED_REG + OUTER_DISPL_REG);
+                    4'b1001, 4'b1010, 4'b1011: // Memory indirect
+                        ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
+                            (ADR_MUX_comb + BASE_DISPL_REG) :
+                            (MEM_ADR_REG + OUTER_DISPL_REG);
                     default:
-                        ADR_EFF_VAR_comb = 32'hxxxxxxxx; // Reserved, don't care.
+                        ADR_EFF_VAR_comb = 32'hxxxxxxxx; // Reserved
                 endcase
             end
         end
-        3'b111: begin
+
+        ADR_SPECIAL: begin  // Abs/PC/Imm
             case (AMODE_SEL)
                 3'b000, 3'b001:
                     ADR_EFF_VAR_comb = ABS_ADDRESS_REG;
-                3'b010: // (d16, PC).
+                3'b010: // (d16, PC)
                     ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG;
-                3'b011: begin
-                    if (F_E == 1'b0) begin // Brief extension word.
-                        ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG; // (d8, PC, Xn, SIZE*SCALE).
-                    end else begin // Full extension word.
+                3'b011: begin // (d8, PC, Xn) or full extension
+                    if (!F_E) begin
+                        ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
+                    end else begin
                         case (I_S_IS_comb)
-                            4'b0000, 4'b1000: // No memory indirect action.
-                                ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG; // (bd, PC, Xn, SIZE*SCALE).
-                            4'b0001, 4'b0010, 4'b0011: begin // Memory indirect preindexed.
-                                if (FETCH_MEM_ADR == 1'b1)
-                                    ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
-                                else
-                                    ADR_EFF_VAR_comb = MEM_ADR_REG + OUTER_DISPL_REG;
-                            end
-                            4'b0101, 4'b0110, 4'b0111: begin // Memory indirect postindexed.
-                                if (FETCH_MEM_ADR == 1'b1)
-                                    ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG;
-                                else
-                                    ADR_EFF_VAR_comb = MEM_ADR_REG + INDEX_SCALED_REG + OUTER_DISPL_REG;
-                            end
-                            4'b1001, 4'b1010, 4'b1011: begin // Memory indirect.
-                                if (FETCH_MEM_ADR == 1'b1)
-                                    ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG;
-                                else
-                                    ADR_EFF_VAR_comb = MEM_ADR_REG + OUTER_DISPL_REG;
-                            end
+                            4'b0000, 4'b1000:
+                                ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG;
+                            4'b0001, 4'b0010, 4'b0011:
+                                ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
+                                    (PCVAR_comb + BASE_DISPL_REG + INDEX_SCALED_REG) :
+                                    (MEM_ADR_REG + OUTER_DISPL_REG);
+                            4'b0101, 4'b0110, 4'b0111:
+                                ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
+                                    (PCVAR_comb + BASE_DISPL_REG) :
+                                    (MEM_ADR_REG + INDEX_SCALED_REG + OUTER_DISPL_REG);
+                            4'b1001, 4'b1010, 4'b1011:
+                                ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
+                                    (PCVAR_comb + BASE_DISPL_REG) :
+                                    (MEM_ADR_REG + OUTER_DISPL_REG);
                             default:
-                                ADR_EFF_VAR_comb = 32'hxxxxxxxx; // Reserved, don't care.
+                                ADR_EFF_VAR_comb = 32'hxxxxxxxx; // Reserved
                         endcase
                     end
                 end
                 default:
-                    ADR_EFF_VAR_comb = 32'hxxxxxxxx; // Don't care, while not used.
+                    ADR_EFF_VAR_comb = 32'hxxxxxxxx;
             endcase
         end
+
         default:
-            ADR_EFF_VAR_comb = 32'hxxxxxxxx; // Result not required.
+            ADR_EFF_VAR_comb = 32'hxxxxxxxx; // Direct modes: no effective address
     endcase
 end
 
@@ -432,158 +417,150 @@ assign ADR_EFF = ADR_EFF_I;
 assign ADR_EFF_WB = ADR_WB[31:0];
 
 // Data outputs:
-assign AR_OUT_1_I = (ISP_RD == 1'b1) ? ISP_REG :
-                    (MSP_RD == 1'b1) ? MSP_REG :
-                    (USP_RD == 1'b1) ? USP_REG :
+assign AR_OUT_1_I = ISP_RD           ? ISP_REG :
+                    MSP_RD           ? MSP_REG :
+                    USP_RD           ? USP_REG :
                     (AR_PNTR_1 < 7)  ? AR[AR_PNTR_1] :
-                    (SBIT == 1'b1 && MBIT == 1'b1) ? MSP_REG :
-                    (SBIT == 1'b1 && MBIT == 1'b0) ? ISP_REG : USP_REG;
+                    (SBIT &&  MBIT)  ? MSP_REG :
+                    (SBIT && !MBIT)  ? ISP_REG : USP_REG;
 
 assign AR_OUT_2_I = (AR_PNTR_2 < 7)  ? AR[AR_PNTR_2] :
-                    (SBIT == 1'b1 && MBIT == 1'b1) ? MSP_REG :
-                    (SBIT == 1'b1 && MBIT == 1'b0) ? ISP_REG : USP_REG;
+                    (SBIT &&  MBIT)  ? MSP_REG :
+                    (SBIT && !MBIT)  ? ISP_REG : USP_REG;
 
 assign PC = PC_I;
 
-always_ff @(posedge CLK) begin : PROGRAM_COUNTER
+always_ff @(posedge CLK) begin : program_counter
     // Note: PC_LOAD and PC_ADD_DISPL must be highest
     // prioritized. The reason is that in case of jumps
     // or branches the Ipipe is flushed in connection
     // with PC_INC. In such cases PC_LOAD or PC_ADD_DISPL
     // are asserted simultaneously with PC_INC.
-    if (RESET == 1'b1)
-        PC_I <= 32'h00000000;
-    else if (PC_LOAD == 1'b1)
+    if (RESET)
+        PC_I <= 32'h0;
+    else if (PC_LOAD)
         PC_I <= AR_IN_1;
-    else if (PC_ADD_DISPL == 1'b1)
+    else if (PC_ADD_DISPL)
         PC_I <= PC_I + DISPLACEMENT;
-    else if (PC_RESTORE == 1'b1)
+    else if (PC_RESTORE)
         PC_I <= AR_IN_1; // Keep prioritization!
-    else if (PC_INC == 1'b1)
+    else if (PC_INC)
         PC_I <= PC_I + {24'd0, PC_OFFSET};
 end
 
-always_ff @(posedge CLK) begin : STACK_POINTERS
-    // The registers are modeled in a way
-    // that write and simultaneously increment
-    // decrement and others are possible for
-    // different registers.
+always_ff @(posedge CLK) begin : stack_pointers
+    // The registers are modeled in a way that write and simultaneously
+    // increment, decrement and others are possible for different registers.
 
     // ---------------------------------------- MSP section ----------------------------------------
-    if (RESET == 1'b1)
-        MSP_REG <= 32'h00000000;
-    else if (AR_WR_1 == 1'b1 && AR_PNTR_WB_1 == 7 && MSBIT == 2'b11)
+    if (RESET)
+        MSP_REG <= 32'h0;
+    else if (AR_WR_1 && AR_PNTR_WB_1 == 7 && MSBIT == 2'b11)
         MSP_REG <= AR_IN_1; // Always written long.
 
-    if (AR_INC == 1'b1 && AR_PNTR_1 == 7 && SBIT == 1'b1 && MBIT == 1'b1) begin
+    if (AR_INC && AR_PNTR_1 == 7 && SBIT && MBIT) begin
         case (OP_SIZE)
-            BYTE:    MSP_REG <= MSP_REG + 32'd2; // Increment by two!
-            WORD:    MSP_REG <= MSP_REG + 32'd2; // Increment by two.
-            default: MSP_REG <= MSP_REG + 32'd4; // Increment by four, (LONG).
+            BYTE:    MSP_REG <= MSP_REG + 32'd2; // Stack: byte increments by two.
+            WORD:    MSP_REG <= MSP_REG + 32'd2;
+            default: MSP_REG <= MSP_REG + 32'd4; // LONG
         endcase
     end
 
-    if (AR_DEC == 1'b1 && AR_PNTR_1 == 7 && SBIT == 1'b1 && MBIT == 1'b1) begin
+    if (AR_DEC && AR_PNTR_1 == 7 && SBIT && MBIT) begin
         case (OP_SIZE)
-            BYTE:    MSP_REG <= MSP_REG - 32'd2; // Decrement by two!
-            WORD:    MSP_REG <= MSP_REG - 32'd2; // Decrement by two.
-            default: MSP_REG <= MSP_REG - 32'd4; // Decrement by four, (LONG).
+            BYTE:    MSP_REG <= MSP_REG - 32'd2; // Stack: byte decrements by two.
+            WORD:    MSP_REG <= MSP_REG - 32'd2;
+            default: MSP_REG <= MSP_REG - 32'd4; // LONG
         endcase
     end
 
-    if (MSP_WR == 1'b1)
+    if (MSP_WR)
         MSP_REG <= AR_IN_1;
-    else if (SP_ADD_DISPL == 1'b1 && AR_INC == 1'b1 && SBIT == 1'b1 && MBIT == 1'b1)
+    else if (SP_ADD_DISPL && AR_INC && SBIT && MBIT)
         MSP_REG <= MSP_REG + DISPLACEMENT + 32'd4; // Used for RTD.
-    else if (SP_ADD_DISPL == 1'b1 && SBIT == 1'b1 && MBIT == 1'b1)
+    else if (SP_ADD_DISPL && SBIT && MBIT)
         MSP_REG <= MSP_REG + DISPLACEMENT;
 
     // ---------------------------------------- ISP section ----------------------------------------
-    if (RESET == 1'b1)
-        ISP_REG <= 32'h00000000;
-    else if (AR_WR_1 == 1'b1 && AR_PNTR_WB_1 == 7 && MSBIT == 2'b01)
+    if (RESET)
+        ISP_REG <= 32'h0;
+    else if (AR_WR_1 && AR_PNTR_WB_1 == 7 && MSBIT == 2'b01)
         ISP_REG <= AR_IN_1; // Always written long.
 
-    if (AR_INC == 1'b1 && AR_PNTR_1 == 7 && SBIT == 1'b1 && MBIT == 1'b0) begin
+    if (AR_INC && AR_PNTR_1 == 7 && SBIT && !MBIT) begin
         case (OP_SIZE)
-            BYTE:    ISP_REG <= ISP_REG + 32'd2; // Increment by two!
-            WORD:    ISP_REG <= ISP_REG + 32'd2; // Increment by two.
-            default: ISP_REG <= ISP_REG + 32'd4; // Increment by four, (LONG).
+            BYTE:    ISP_REG <= ISP_REG + 32'd2; // Stack: byte increments by two.
+            WORD:    ISP_REG <= ISP_REG + 32'd2;
+            default: ISP_REG <= ISP_REG + 32'd4; // LONG
         endcase
     end
 
-    if (ISP_DEC == 1'b1 || (AR_DEC == 1'b1 && AR_PNTR_1 == 7 && SBIT == 1'b1 && MBIT == 1'b0)) begin
+    if (ISP_DEC || (AR_DEC && AR_PNTR_1 == 7 && SBIT && !MBIT)) begin
         case (OP_SIZE)
-            BYTE:    ISP_REG <= ISP_REG - 32'd2; // Decrement by two!
-            WORD:    ISP_REG <= ISP_REG - 32'd2; // Decrement by two.
-            default: ISP_REG <= ISP_REG - 32'd4; // Decrement by four, (LONG).
+            BYTE:    ISP_REG <= ISP_REG - 32'd2; // Stack: byte decrements by two.
+            WORD:    ISP_REG <= ISP_REG - 32'd2;
+            default: ISP_REG <= ISP_REG - 32'd4; // LONG
         endcase
     end
 
-    if (ISP_WR == 1'b1)
+    if (ISP_WR)
         ISP_REG <= AR_IN_1;
-    else if (SP_ADD_DISPL == 1'b1 && AR_INC == 1'b1 && SBIT == 1'b1 && MBIT == 1'b0)
+    else if (SP_ADD_DISPL && AR_INC && SBIT && !MBIT)
         ISP_REG <= ISP_REG + DISPLACEMENT + 32'd4; // Used for RTD.
-    else if (SP_ADD_DISPL == 1'b1 && SBIT == 1'b1 && MBIT == 1'b0)
+    else if (SP_ADD_DISPL && SBIT && !MBIT)
         ISP_REG <= ISP_REG + DISPLACEMENT;
 
     // ---------------------------------------- USP section ----------------------------------------
-    if (RESET == 1'b1)
-        USP_REG <= 32'h00000000;
-    else if (AR_WR_1 == 1'b1 && AR_PNTR_WB_1 == 7 && MSBIT[0] == 1'b0)
+    if (RESET)
+        USP_REG <= 32'h0;
+    else if (AR_WR_1 && AR_PNTR_WB_1 == 7 && !MSBIT[0])
         USP_REG <= AR_IN_1; // Always written long.
 
-    if (AR_INC == 1'b1 && AR_PNTR_1 == 7 && SBIT == 1'b0) begin
+    if (AR_INC && AR_PNTR_1 == 7 && !SBIT) begin
         case (OP_SIZE)
-            BYTE:    USP_REG <= USP_REG + 32'd2; // Increment by two!
-            WORD:    USP_REG <= USP_REG + 32'd2; // Increment by two.
-            default: USP_REG <= USP_REG + 32'd4; // Increment by four, (LONG).
+            BYTE:    USP_REG <= USP_REG + 32'd2; // Stack: byte increments by two.
+            WORD:    USP_REG <= USP_REG + 32'd2;
+            default: USP_REG <= USP_REG + 32'd4; // LONG
         endcase
     end
 
-    if (AR_DEC == 1'b1 && AR_PNTR_1 == 7 && SBIT == 1'b0) begin
+    if (AR_DEC && AR_PNTR_1 == 7 && !SBIT) begin
         case (OP_SIZE)
-            BYTE:    USP_REG <= USP_REG - 32'd2; // Decrement by two!
-            WORD:    USP_REG <= USP_REG - 32'd2; // Decrement by two.
-            default: USP_REG <= USP_REG - 32'd4; // Decrement by four, (LONG).
+            BYTE:    USP_REG <= USP_REG - 32'd2; // Stack: byte decrements by two.
+            WORD:    USP_REG <= USP_REG - 32'd2;
+            default: USP_REG <= USP_REG - 32'd4; // LONG
         endcase
     end
 
-    if (USP_WR == 1'b1)
+    if (USP_WR)
         USP_REG <= AR_IN_1;
-    else if (SP_ADD_DISPL == 1'b1 && AR_INC == 1'b1 && SBIT == 1'b0)
+    else if (SP_ADD_DISPL && AR_INC && !SBIT)
         USP_REG <= USP_REG + DISPLACEMENT + 32'd4; // Used for RTD.
-    else if (SP_ADD_DISPL == 1'b1 && SBIT == 1'b0)
+    else if (SP_ADD_DISPL && !SBIT)
         USP_REG <= USP_REG + DISPLACEMENT;
 
-    if (AR_WR_2 == 1'b1 && AR_PNTR_WB_2 == 7 && MSBIT == 2'b11)
-        MSP_REG <= AR_IN_2; // Used for EXG and UNLK.
-    else if (AR_WR_2 == 1'b1 && AR_PNTR_WB_2 == 7 && MSBIT == 2'b01)
-        ISP_REG <= AR_IN_2; // Used for EXG and UNLK.
-    else if (AR_WR_2 == 1'b1 && AR_PNTR_WB_2 == 7)
-        USP_REG <= AR_IN_2; // Used for EXG and UNLK.
+    // Write port 2: used for EXG and UNLK.
+    if (AR_WR_2 && AR_PNTR_WB_2 == 7 && MSBIT == 2'b11)
+        MSP_REG <= AR_IN_2;
+    else if (AR_WR_2 && AR_PNTR_WB_2 == 7 && MSBIT == 2'b01)
+        ISP_REG <= AR_IN_2;
+    else if (AR_WR_2 && AR_PNTR_WB_2 == 7)
+        USP_REG <= AR_IN_2;
 end
 
-always_ff @(posedge CLK) begin : ADDRESS_REGISTERS_PROC
-    // The registers are modeled in a way
-    // that write and simultaneously increment
-    // decrement and others are possible for
-    // different registers.
+always_ff @(posedge CLK) begin : address_registers_proc
+    // Write and simultaneously increment/decrement are possible
+    // for different registers.
 
-    if (RESET == 1'b1) begin
-        AR[0] <= 32'h00000000;
-        AR[1] <= 32'h00000000;
-        AR[2] <= 32'h00000000;
-        AR[3] <= 32'h00000000;
-        AR[4] <= 32'h00000000;
-        AR[5] <= 32'h00000000;
-        AR[6] <= 32'h00000000;
+    if (RESET) begin
+        for (int i = 0; i < 7; i++)
+            AR[i] <= 32'h0;
     end
 
-    if (AR_WR_1 == 1'b1 && AR_PNTR_WB_1 < 7)
+    if (AR_WR_1 && AR_PNTR_WB_1 < 7)
         AR[AR_PNTR_WB_1] <= AR_IN_1; // Always written long.
 
-    if (AR_INC == 1'b1 && AR_PNTR_1 < 7) begin
+    if (AR_INC && AR_PNTR_1 < 7) begin
         case (OP_SIZE)
             BYTE:    AR[AR_PNTR_1] <= AR[AR_PNTR_1] + 32'd1;
             WORD:    AR[AR_PNTR_1] <= AR[AR_PNTR_1] + 32'd2;
@@ -591,7 +568,7 @@ always_ff @(posedge CLK) begin : ADDRESS_REGISTERS_PROC
         endcase
     end
 
-    if (AR_DEC == 1'b1 && AR_PNTR_1 < 7) begin
+    if (AR_DEC && AR_PNTR_1 < 7) begin
         case (OP_SIZE)
             BYTE:    AR[AR_PNTR_1] <= AR[AR_PNTR_1] - 32'd1;
             WORD:    AR[AR_PNTR_1] <= AR[AR_PNTR_1] - 32'd2;
@@ -599,21 +576,18 @@ always_ff @(posedge CLK) begin : ADDRESS_REGISTERS_PROC
         endcase
     end
 
-    if (AR_WR_2 == 1'b1 && AR_PNTR_WB_2 < 7)
+    if (AR_WR_2 && AR_PNTR_WB_2 < 7)
         AR[AR_PNTR_WB_2] <= AR_IN_2; // Used for EXG and UNLK.
 end
 
-always_ff @(posedge CLK) begin : FCODES
-    // These flip flops provide the alternate function
-    // code registers.
-    if (DFC_WR == 1'b1) begin
+always_ff @(posedge CLK) begin : fcodes
+    // Alternate function code registers.
+    if (DFC_WR)
         DFC_REG_sig <= AR_IN_1[2:0];
-    end
-    //
-    if (SFC_WR == 1'b1) begin
+
+    if (SFC_WR)
         SFC_REG_sig <= AR_IN_1[2:0];
-    end
-    //
+
     DFC <= DFC_REG_sig;
     SFC <= SFC_REG_sig;
 end

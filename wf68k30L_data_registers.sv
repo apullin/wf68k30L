@@ -1,35 +1,17 @@
 // ------------------------------------------------------------------------
-// --                                                                    --
-// -- WF68K30L IP Core: Data register logic.                             --
-// --                                                                    --
-// -- Description:                                                       --
-// -- These are the eight data registers. The logic provides two         --
-// -- read and two write ports providing simultaneous access. For        --
-// -- more information refer to the MC68030 User Manual.                 --
-// --                                                                    --
-// -- Author(s):                                                         --
-// -- - Wolfgang Foerster, wf@experiment-s.de; wf@inventronik.de         --
-// --                                                                    --
+// WF68K30L IP Core: Data register logic.
+//
+// Description:
+// These are the eight data registers. The logic provides two
+// read and two write ports providing simultaneous access. For
+// more information refer to the MC68030 User Manual.
+//
+// Author(s):
+// - Wolfgang Foerster, wf@experiment-s.de; wf@inventronik.de
+//
+// Copyright (c) 2014-2019 Wolfgang Foerster Inventronik GmbH.
+// CERN OHL v. 1.2
 // ------------------------------------------------------------------------
-// --                                                                    --
-// -- Copyright (c) 2014-2019 Wolfgang Foerster Inventronik GmbH.        --
-// --                                                                    --
-// -- This documentation describes Open Hardware and is licensed          --
-// -- under the CERN OHL v. 1.2. You may redistribute and modify         --
-// -- this documentation under the terms of the CERN OHL v.1.2.          --
-// -- (http://ohwr.org/cernohl). This documentation is distributed       --
-// -- WITHOUT ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING OF               --
-// -- MERCHANTABILITY, SATISFACTORY QUALITY AND FITNESS FOR A             --
-// -- PARTICULAR PURPOSE. Please see the CERN OHL v.1.2 for              --
-// -- applicable conditions                                              --
-// --                                                                    --
-// ------------------------------------------------------------------------
-//
-// Revision History
-//
-// Revision 2K14B 20141201 WF
-//   Initial Release.
-//
 
 module WF68K30L_DATA_REGISTERS (
     input  logic        CLK,
@@ -41,7 +23,7 @@ module WF68K30L_DATA_REGISTERS (
     output logic [31:0] DR_OUT_1,
     output logic [31:0] DR_OUT_2,
 
-    // Registers controls:
+    // Register controls:
     input  logic [2:0]  DR_SEL_WR_1,
     input  logic [2:0]  DR_SEL_WR_2,
     input  logic [2:0]  DR_SEL_RD_1,
@@ -58,72 +40,73 @@ module WF68K30L_DATA_REGISTERS (
 
 `include "wf68k30L_pkg.svh"
 
-logic [31:0] DR [0:7]; // Data registers D0 to D7.
-integer DR_PNTR_WR_1;
-integer DR_PNTR_WR_2;
-integer DR_PNTR_RD_1;
-integer DR_PNTR_RD_2;
-logic [2:0] DR_SEL_WR_I1;
-logic [2:0] DR_SEL_WR_I2;
-logic [3:0] DR_USED_1;
-logic [3:0] DR_USED_2;
+// ---- Internal signals ----
 
-always_ff @(posedge CLK) begin : INBUFFER
-    if (DR_MARK_USED == 1'b1) begin
-        DR_SEL_WR_I1 <= DR_SEL_WR_1;
-        DR_SEL_WR_I2 <= DR_SEL_WR_2;
+logic [31:0] DR [0:7];          // Data registers D0-D7
+logic [2:0]  dr_sel_wr_lat1;    // Latched write select port 1
+logic [2:0]  dr_sel_wr_lat2;    // Latched write select port 2
+logic [3:0]  dr_used_1;         // {valid, reg_num} for hazard tracking port 1
+logic [3:0]  dr_used_2;         // {valid, reg_num} for hazard tracking port 2
+
+// ---- Write select latch ----
+// Captures write register selection when DR_MARK_USED is asserted.
+
+always_ff @(posedge CLK) begin : latch_write_sel
+    if (DR_MARK_USED) begin
+        dr_sel_wr_lat1 <= DR_SEL_WR_1;
+        dr_sel_wr_lat2 <= DR_SEL_WR_2;
     end
 end
 
-assign DR_PNTR_WR_1 = DR_SEL_WR_I1;
-assign DR_PNTR_WR_2 = DR_SEL_WR_I2;
-assign DR_PNTR_RD_1 = DR_SEL_RD_1;
-assign DR_PNTR_RD_2 = DR_SEL_RD_2;
+// ---- Hazard detection ----
+// Tracks which registers are "in use" (pending writeback) and flags
+// a hazard if a read port selects a register that is still in flight.
 
-always_ff @(posedge CLK) begin : P_IN_USE
-    if (RESET == 1'b1 || UNMARK == 1'b1) begin
-        DR_USED_1[3] <= 1'b0;
-        DR_USED_2[3] <= 1'b0;
-    end else if (DR_MARK_USED == 1'b1) begin
-        DR_USED_1 <= {1'b1, DR_SEL_WR_1};
-        if (USE_DPAIR == 1'b1) begin
-            DR_USED_2 <= {1'b1, DR_SEL_WR_2};
-        end
+always_ff @(posedge CLK) begin : track_in_use
+    if (RESET || UNMARK) begin
+        dr_used_1[3] <= 1'b0;
+        dr_used_2[3] <= 1'b0;
+    end else if (DR_MARK_USED) begin
+        dr_used_1 <= {1'b1, DR_SEL_WR_1};
+        if (USE_DPAIR)
+            dr_used_2 <= {1'b1, DR_SEL_WR_2};
     end
 end
 
-assign DR_IN_USE = (DR_USED_1[3] == 1'b1 && DR_USED_1[2:0] == DR_SEL_RD_1) ? 1'b1 :
-                   (DR_USED_1[3] == 1'b1 && DR_USED_1[2:0] == DR_SEL_RD_2) ? 1'b1 :
-                   (DR_USED_2[3] == 1'b1 && DR_USED_2[2:0] == DR_SEL_RD_1) ? 1'b1 :
-                   (DR_USED_2[3] == 1'b1 && DR_USED_2[2:0] == DR_SEL_RD_2) ? 1'b1 : 1'b0;
+assign DR_IN_USE = (dr_used_1[3] && dr_used_1[2:0] == DR_SEL_RD_1) ||
+                   (dr_used_1[3] && dr_used_1[2:0] == DR_SEL_RD_2) ||
+                   (dr_used_2[3] && dr_used_2[2:0] == DR_SEL_RD_1) ||
+                   (dr_used_2[3] && dr_used_2[2:0] == DR_SEL_RD_2);
 
-assign DR_OUT_1 = DR[DR_PNTR_RD_1];
-assign DR_OUT_2 = DR[DR_PNTR_RD_2];
+// ---- Read ports (combinational) ----
 
-always_ff @(posedge CLK) begin : REGISTERS
-    if (RESET == 1'b1) begin
-        DR[0] <= 32'h00000000;
-        DR[1] <= 32'h00000000;
-        DR[2] <= 32'h00000000;
-        DR[3] <= 32'h00000000;
-        DR[4] <= 32'h00000000;
-        DR[5] <= 32'h00000000;
-        DR[6] <= 32'h00000000;
-        DR[7] <= 32'h00000000;
+assign DR_OUT_1 = DR[DR_SEL_RD_1];
+assign DR_OUT_2 = DR[DR_SEL_RD_2];
+
+// ---- Register file ----
+// Supports LONG (32-bit), WORD (lower 16-bit), and BYTE (lower 8-bit) writes.
+// Partial writes preserve the upper bits.
+
+always_ff @(posedge CLK) begin : reg_file
+    if (RESET) begin
+        for (int i = 0; i < 8; i++)
+            DR[i] <= 32'h0;
     end
-    if (DR_WR_1 == 1'b1) begin
+
+    if (DR_WR_1) begin
         case (OP_SIZE)
-            LONG: DR[DR_PNTR_WR_1] <= DR_IN_1;
-            WORD: DR[DR_PNTR_WR_1][15:0] <= DR_IN_1[15:0];
-            BYTE: DR[DR_PNTR_WR_1][7:0] <= DR_IN_1[7:0];
+            LONG:    DR[dr_sel_wr_lat1]       <= DR_IN_1;
+            WORD:    DR[dr_sel_wr_lat1][15:0]  <= DR_IN_1[15:0];
+            BYTE:    DR[dr_sel_wr_lat1][7:0]   <= DR_IN_1[7:0];
             default: ;
         endcase
     end
-    if (DR_WR_2 == 1'b1) begin
+
+    if (DR_WR_2) begin
         case (OP_SIZE)
-            LONG: DR[DR_PNTR_WR_2] <= DR_IN_2;
-            WORD: DR[DR_PNTR_WR_2][15:0] <= DR_IN_2[15:0];
-            BYTE: DR[DR_PNTR_WR_2][7:0] <= DR_IN_2[7:0];
+            LONG:    DR[dr_sel_wr_lat2]       <= DR_IN_2;
+            WORD:    DR[dr_sel_wr_lat2][15:0]  <= DR_IN_2[15:0];
+            BYTE:    DR[dr_sel_wr_lat2][7:0]   <= DR_IN_2[7:0];
             default: ;
         endcase
     end

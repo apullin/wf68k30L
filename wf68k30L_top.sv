@@ -431,9 +431,9 @@ logic        WR_REQ_I;
 // IDATA_BUFFER:
 // This register stores the immediate data.
 always_ff @(posedge CLK) begin
-    if (STORE_IDATA_B2 == 1'b1) begin
+    if (STORE_IDATA_B2) begin
         IBUFFER[31:16] <= EXT_WORD;
-    end else if (STORE_IDATA_B1 == 1'b1) begin
+    end else if (STORE_IDATA_B1) begin
         IBUFFER[15:0] <= EXT_WORD;
     end
 end
@@ -444,31 +444,31 @@ assign DATA_IMMEDIATE = (OP == ADDI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
                          (OP == EORI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
                          (OP == SUBI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
                          (OP == ORI && OP_SIZE == LONG) ? {BIW_1, BIW_2} :
-                         (OP == ANDI_TO_SR) ? {16'h0000, BIW_1} :
-                         (OP == EORI_TO_SR) ? {16'h0000, BIW_1} :
-                         (OP == ORI_TO_SR) ? {16'h0000, BIW_1} :
-                         (OP == STOP) ? {16'h0000, BIW_1} :
-                         (OP == ADDI && OP_SIZE == WORD) ? {16'h0000, BIW_1} :
-                         (OP == ANDI && OP_SIZE == WORD) ? {16'h0000, BIW_1} :
-                         (OP == CMPI && OP_SIZE == WORD) ? {16'h0000, BIW_1} :
-                         (OP == EORI && OP_SIZE == WORD) ? {16'h0000, BIW_1} :
-                         (OP == SUBI && OP_SIZE == WORD) ? {16'h0000, BIW_1} :
-                         (OP == ORI && OP_SIZE == WORD) ? {16'h0000, BIW_1} :
-                         (OP == ANDI_TO_CCR) ? {24'h000000, BIW_1[7:0]} :
-                         (OP == EORI_TO_CCR) ? {24'h000000, BIW_1[7:0]} :
-                         (OP == ORI_TO_CCR) ? {24'h000000, BIW_1[7:0]} :
-                         (OP == ADDI && OP_SIZE == BYTE) ? {24'h000000, BIW_1[7:0]} :
-                         (OP == ANDI && OP_SIZE == BYTE) ? {24'h000000, BIW_1[7:0]} :
-                         (OP == CMPI && OP_SIZE == BYTE) ? {24'h000000, BIW_1[7:0]} :
-                         (OP == EORI && OP_SIZE == BYTE) ? {24'h000000, BIW_1[7:0]} :
-                         (OP == SUBI && OP_SIZE == BYTE) ? {24'h000000, BIW_1[7:0]} :
-                         (OP == ORI && OP_SIZE == BYTE) ? {24'h000000, BIW_1[7:0]} :
-                         ((OP == ADDQ || OP == SUBQ) && BIW_0[11:9] == 3'b000) ? 32'h00000008 :
-                         (OP == ADDQ || OP == SUBQ) ? {24'h000000, 5'b00000, BIW_0[11:9]} :
-                         (OP == MOVEQ) ? {24'h000000, BIW_0[7:0]} :
-                         (OP == DBcc) ? 32'h00000001 :
-                         (OP == PACK || OP == UNPK) ? {16'h0000, BIW_1[15:0]} :
-                         (OP_SIZE == LONG) ? IBUFFER : {16'h0000, IBUFFER[15:0]};
+                         (OP == ANDI_TO_SR) ? {16'h0, BIW_1} :
+                         (OP == EORI_TO_SR) ? {16'h0, BIW_1} :
+                         (OP == ORI_TO_SR) ? {16'h0, BIW_1} :
+                         (OP == STOP) ? {16'h0, BIW_1} :
+                         (OP == ADDI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
+                         (OP == ANDI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
+                         (OP == CMPI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
+                         (OP == EORI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
+                         (OP == SUBI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
+                         (OP == ORI && OP_SIZE == WORD) ? {16'h0, BIW_1} :
+                         (OP == ANDI_TO_CCR) ? {24'h0, BIW_1[7:0]} :
+                         (OP == EORI_TO_CCR) ? {24'h0, BIW_1[7:0]} :
+                         (OP == ORI_TO_CCR) ? {24'h0, BIW_1[7:0]} :
+                         (OP == ADDI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
+                         (OP == ANDI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
+                         (OP == CMPI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
+                         (OP == EORI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
+                         (OP == SUBI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
+                         (OP == ORI && OP_SIZE == BYTE) ? {24'h0, BIW_1[7:0]} :
+                         ((OP == ADDQ || OP == SUBQ) && BIW_0[11:9] == 3'b000) ? 32'h8 :
+                         (OP == ADDQ || OP == SUBQ) ? {24'h0, 5'b00000, BIW_0[11:9]} :
+                         (OP == MOVEQ) ? {24'h0, BIW_0[7:0]} :
+                         (OP == DBcc) ? 32'h1 :
+                         (OP == PACK || OP == UNPK) ? {16'h0, BIW_1[15:0]} :
+                         (OP_SIZE == LONG) ? IBUFFER : {16'h0, IBUFFER[15:0]};
 
 // Internal registers are place holders written as zeros.
 // Exception handler multiplexing:
@@ -483,40 +483,40 @@ assign DATA_EXH = (STACK_POS == 2) ? {SR_CPY, PC[31:16]} :
                    (STACK_POS == 14) ? OUTBUFFER :
                    (STACK_POS == 20) ? PC + 32'd4 : // STAGE B address.
                    (STACK_POS == 24) ? INBUFFER :
-                   (STACK_POS == 28) ? {16'h0000, VERSION} : 32'h00000000;
+                   (STACK_POS == 28) ? {16'h0, VERSION} : 32'h0;
 
-assign DATA_IN_EXH = (BUSY_MAIN == 1'b1) ? ALU_RESULT[31:0] : DATA_TO_CORE; // MOVEC handles the VBR.
+assign DATA_IN_EXH = (BUSY_MAIN) ? ALU_RESULT[31:0] : DATA_TO_CORE; // MOVEC handles the VBR.
 
-assign DATA_FROM_CORE = (BUSY_EXH == 1'b1) ? DATA_EXH :
+assign DATA_FROM_CORE = (BUSY_EXH) ? DATA_EXH :
                          (OP_WB == CAS || OP_WB == CAS2) ? DR_OUT_2 : // Update operands.
                          ALU_RESULT[31:0];
 
 assign SP_ADD_DISPL = SP_ADD_DISPL_MAIN || SP_ADD_DISPL_EXH;
 
-assign AR_SEL_RD_1 = (BUSY_EXH == 1'b1) ? 3'b111 : AR_SEL_RD_1_MAIN; // ISP during exception.
+assign AR_SEL_RD_1 = (BUSY_EXH) ? 3'b111 : AR_SEL_RD_1_MAIN; // ISP during exception.
 
-assign AR_IN_1 = (BUSY_EXH == 1'b1) ? DATA_TO_CORE :
-                  (ALU_BSY == 1'b1 && AR_WR_1 == 1'b1) ? ALU_RESULT[31:0] :
-                  (ALU_BSY == 1'b1 && (DFC_WR == 1'b1 || SFC_WR == 1'b1 || ISP_WR == 1'b1 || MSP_WR == 1'b1 || USP_WR == 1'b1)) ? ALU_RESULT[31:0] :
+assign AR_IN_1 = (BUSY_EXH) ? DATA_TO_CORE :
+                  (ALU_BSY && AR_WR_1) ? ALU_RESULT[31:0] :
+                  (ALU_BSY && (DFC_WR || SFC_WR || ISP_WR || MSP_WR || USP_WR)) ? ALU_RESULT[31:0] :
                   (OP == JMP || OP == JSR) ? ADR_EFF :
-                  (FETCH_MEM_ADR == 1'b1) ? DATA_TO_CORE :
-                  (USE_DREG == 1'b1) ? DR_OUT_1 : // CAS2: Address register from data register.
+                  (FETCH_MEM_ADR) ? DATA_TO_CORE :
+                  (USE_DREG) ? DR_OUT_1 : // CAS2: Address register from data register.
                   (OP == LINK || OP == UNLK) ? AR_OUT_1 : DATA_TO_CORE; // Default used for RTD, RTR, RTS.
 
 assign AR_IN_2 = (OP_WB == EXG) ? ALU_RESULT[63:32] : ALU_RESULT[31:0]; // Default is for UNLK.
 
-assign DR_IN_1 = (OP_WB == EXG && ALU_BSY == 1'b1 && DR_WR_1 == 1'b1 && BIW_0_WB_73 == 5'b10001) ? ALU_RESULT[63:32] : // Address and data registers.
+assign DR_IN_1 = (OP_WB == EXG && ALU_BSY && DR_WR_1 && BIW_0_WB_73 == 5'b10001) ? ALU_RESULT[63:32] : // Address and data registers.
                   ALU_RESULT[31:0];
 
 assign DR_IN_2 = ALU_RESULT[63:32];
 
-assign ALU_OP1_IN = (SR_WR_EXH == 1'b1) ? DATA_TO_CORE :
+assign ALU_OP1_IN = (SR_WR_EXH) ? DATA_TO_CORE :
                      (OP == DBcc || OP == PACK || OP == UNPK) ? DATA_IMMEDIATE :
-                     ((OP == ABCD || OP == SBCD) && BIW_0[3] == 1'b0) ? DR_OUT_1 :
+                     ((OP == ABCD || OP == SBCD) && !BIW_0[3]) ? DR_OUT_1 :
                      (OP == ABCD || OP == SBCD) ? DATA_TO_CORE :
-                     ((OP == ADD || OP == SUB) && BIW_0[8] == 1'b1) ? DR_OUT_1 :
-                     ((OP == AND_B || OP == EOR || OP == OR_B) && BIW_0[8] == 1'b1) ? DR_OUT_1 :
-                     ((OP == ADDX || OP == SUBX) && BIW_0[3] == 1'b0) ? DR_OUT_1 :
+                     ((OP == ADD || OP == SUB) && BIW_0[8]) ? DR_OUT_1 :
+                     ((OP == AND_B || OP == EOR || OP == OR_B) && BIW_0[8]) ? DR_OUT_1 :
+                     ((OP == ADDX || OP == SUBX) && !BIW_0[3]) ? DR_OUT_1 :
                      (OP == ADDX || OP == SUBX) ? DATA_TO_CORE :
                      (OP == ASL || OP == ASR || OP == LSL || OP == LSR) ? DR_OUT_1 :
                      (OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR) ? DR_OUT_1 :
@@ -529,35 +529,35 @@ assign ALU_OP1_IN = (SR_WR_EXH == 1'b1) ? DATA_TO_CORE :
                      (OP == MOVE_USP) ? AR_OUT_1 :
                      (OP == EXG && BIW_0[7:3] == 5'b01001) ? AR_OUT_1 : // Two address registers.
                      (OP == EXG) ? DR_OUT_1 : // Two data registers.
-                     (OP == MOVEC && VBR_RD == 1'b1) ? VBR :
-                     (OP == MOVEC && SFC_RD == 1'b1) ? {28'h0000000, 1'b0, SFC} :
-                     (OP == MOVEC && DFC_RD == 1'b1) ? {28'h0000000, 1'b0, DFC} :
-                     (OP == MOVEC && (ISP_RD == 1'b1 || MSP_RD == 1'b1 || USP_RD == 1'b1)) ? AR_OUT_1 :
-                     (OP == MOVEC && BIW_1[15] == 1'b1) ? AR_OUT_1 :
+                     (OP == MOVEC && VBR_RD) ? VBR :
+                     (OP == MOVEC && SFC_RD) ? {28'h0, 1'b0, SFC} :
+                     (OP == MOVEC && DFC_RD) ? {28'h0, 1'b0, DFC} :
+                     (OP == MOVEC && (ISP_RD || MSP_RD || USP_RD)) ? AR_OUT_1 :
+                     (OP == MOVEC && BIW_1[15]) ? AR_OUT_1 :
                      (OP == MOVEC) ? DR_OUT_1 :
-                     (OP == MOVEM && BIW_0[10] == 1'b0 && ADn == 1'b0) ? DR_OUT_1 : // Register to memory.
-                     (OP == MOVEM && BIW_0[10] == 1'b0) ? AR_OUT_2 : // Register to memory.
-                     (OP == MOVES && BIW_1[11] == 1'b1 && BIW_1[15] == 1'b0) ? DR_OUT_1 : // Register to memory.
-                     (OP == MOVES && BIW_1[11] == 1'b1) ? AR_OUT_2 : // Register to memory.
-                     (OP == MOVEP && MOVEP_PNTR == 3 && BIW_0[7:6] > 2'b01) ? {24'h000000, DR_OUT_1[31:24]} :
-                     (OP == MOVEP && MOVEP_PNTR == 2 && BIW_0[7:6] > 2'b01) ? {24'h000000, DR_OUT_1[23:16]} :
-                     (OP == MOVEP && MOVEP_PNTR == 1 && BIW_0[7:6] > 2'b01) ? {24'h000000, DR_OUT_1[15:8]} :
-                     (OP == MOVEP && BIW_0[7:6] > 2'b01) ? {24'h000000, DR_OUT_1[7:0]} :
+                     (OP == MOVEM && !BIW_0[10] && !ADn) ? DR_OUT_1 : // Register to memory.
+                     (OP == MOVEM && !BIW_0[10]) ? AR_OUT_2 : // Register to memory.
+                     (OP == MOVES && BIW_1[11] && !BIW_1[15]) ? DR_OUT_1 : // Register to memory.
+                     (OP == MOVES && BIW_1[11]) ? AR_OUT_2 : // Register to memory.
+                     (OP == MOVEP && MOVEP_PNTR == 3 && BIW_0[7:6] > 2'b01) ? {24'h0, DR_OUT_1[31:24]} :
+                     (OP == MOVEP && MOVEP_PNTR == 2 && BIW_0[7:6] > 2'b01) ? {24'h0, DR_OUT_1[23:16]} :
+                     (OP == MOVEP && MOVEP_PNTR == 1 && BIW_0[7:6] > 2'b01) ? {24'h0, DR_OUT_1[15:8]} :
+                     (OP == MOVEP && BIW_0[7:6] > 2'b01) ? {24'h0, DR_OUT_1[7:0]} :
                      (OP == MOVEP && MOVEP_PNTR == 3) ? {DATA_TO_CORE[7:0], DR_OUT_1[23:0]} :
                      (OP == MOVEP && MOVEP_PNTR == 2) ? {DR_OUT_1[31:24], DATA_TO_CORE[7:0], DR_OUT_1[15:0]} :
                      (OP == MOVEP && MOVEP_PNTR == 1) ? {DR_OUT_1[31:16], DATA_TO_CORE[7:0], DR_OUT_1[7:0]} :
                      (OP == MOVEP) ? {DR_OUT_1[31:8], DATA_TO_CORE[7:0]} :
-                     (OP == MOVE_TO_CCR && BIW_0[5:3] == 3'b000) ? {16'h0000, STATUS_REG[15:8], DR_OUT_1[7:0]} :
-                     (OP == MOVE_TO_CCR && BIW_0[5:0] == 6'b111100) ? {16'h0000, STATUS_REG[15:8], DATA_IMMEDIATE[7:0]} :
-                     (OP == MOVE_TO_CCR) ? {16'h0000, STATUS_REG[15:8], DATA_TO_CORE[7:0]} :
-                     (OP == MOVE_TO_SR && BIW_0[5:3] == 3'b000) ? {16'h0000, DR_OUT_1[15:0]} :
-                     (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100) ? {16'h0000, DATA_IMMEDIATE[15:0]} :
-                     (OP == MOVE_TO_SR) ? {16'h0000, DATA_TO_CORE[15:0]} :
-                     (OP == MOVE_FROM_CCR) ? {24'h000000, 3'b000, STATUS_REG[4:0]} :
-                     (OP == MOVE_FROM_SR) ? {16'h0000, STATUS_REG} :
+                     (OP == MOVE_TO_CCR && BIW_0[5:3] == 3'b000) ? {16'h0, STATUS_REG[15:8], DR_OUT_1[7:0]} :
+                     (OP == MOVE_TO_CCR && BIW_0[5:0] == 6'b111100) ? {16'h0, STATUS_REG[15:8], DATA_IMMEDIATE[7:0]} :
+                     (OP == MOVE_TO_CCR) ? {16'h0, STATUS_REG[15:8], DATA_TO_CORE[7:0]} :
+                     (OP == MOVE_TO_SR && BIW_0[5:3] == 3'b000) ? {16'h0, DR_OUT_1[15:0]} :
+                     (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100) ? {16'h0, DATA_IMMEDIATE[15:0]} :
+                     (OP == MOVE_TO_SR) ? {16'h0, DATA_TO_CORE[15:0]} :
+                     (OP == MOVE_FROM_CCR) ? {24'h0, 3'b000, STATUS_REG[4:0]} :
+                     (OP == MOVE_FROM_SR) ? {16'h0, STATUS_REG} :
                      (OP == STOP) ? DATA_IMMEDIATE : // Status register information.
                      (OP == MOVEQ) ? DATA_IMMEDIATE :
-                     (OP == NEG || OP == NEGX || OP == NBCD) ? 32'h00000000 :
+                     (OP == NEG || OP == NEGX || OP == NBCD) ? 32'h0 :
                      (OP == ADDI || OP == CMPI || OP == SUBI || OP == ANDI || OP == EORI || OP == ORI) ? DATA_IMMEDIATE :
                      (OP == ADDQ || OP == SUBQ) ? DATA_IMMEDIATE :
                      (OP == ANDI_TO_CCR || OP == ANDI_TO_SR) ? DATA_IMMEDIATE :
@@ -567,12 +567,12 @@ assign ALU_OP1_IN = (SR_WR_EXH == 1'b1) ? DATA_TO_CORE :
                      (BIW_0[5:3] == 3'b001) ? AR_OUT_1 :
                      (BIW_0[5:0] == 6'b111100) ? DATA_IMMEDIATE : DATA_TO_CORE;
 
-assign ALU_OP2_IN = ((OP == ABCD || OP == SBCD) && BIW_0[3] == 1'b0) ? DR_OUT_2 :
+assign ALU_OP2_IN = ((OP == ABCD || OP == SBCD) && !BIW_0[3]) ? DR_OUT_2 :
                      (OP == ABCD || OP == SBCD) ? DATA_TO_CORE :
-                     ((OP == ADDX || OP == SUBX) && BIW_0[3] == 1'b0) ? DR_OUT_2 :
+                     ((OP == ADDX || OP == SUBX) && !BIW_0[3]) ? DR_OUT_2 :
                      (OP == ADDX || OP == SUBX) ? DATA_TO_CORE :
-                     ((OP == ADD || OP == CMP || OP == SUB) && BIW_0[8] == 1'b0) ? DR_OUT_2 :
-                     ((OP == AND_B || OP == OR_B) && BIW_0[8] == 1'b0) ? DR_OUT_2 :
+                     ((OP == ADD || OP == CMP || OP == SUB) && !BIW_0[8]) ? DR_OUT_2 :
+                     ((OP == AND_B || OP == OR_B) && !BIW_0[8]) ? DR_OUT_2 :
                      (OP == ADDA || OP == CMPA || OP == SUBA) ? AR_OUT_2 :
                      (OP == EXG && BIW_0[7:3] == 5'b01000) ? DR_OUT_2 : // Two data registers.
                      (OP == EXG) ? AR_OUT_2 :
@@ -580,17 +580,17 @@ assign ALU_OP2_IN = ((OP == ABCD || OP == SBCD) && BIW_0[3] == 1'b0) ? DR_OUT_2 
                      ((OP == LSL || OP == LSR) && BIW_0[7:6] != 2'b11) ? DR_OUT_2 : // Register shifts.
                      ((OP == ROTL || OP == ROTR) && BIW_0[7:6] != 2'b11) ? DR_OUT_2 : // Register shifts.
                      ((OP == ROXL || OP == ROXR) && BIW_0[7:6] != 2'b11) ? DR_OUT_2 : // Register shifts.
-                     (OP == ANDI_TO_CCR || OP == ANDI_TO_SR) ? {16'h0000, STATUS_REG} :
-                     (OP == EORI_TO_CCR || OP == EORI_TO_SR) ? {16'h0000, STATUS_REG} :
-                     (OP == ORI_TO_CCR || OP == ORI_TO_SR) ? {16'h0000, STATUS_REG} :
+                     (OP == ANDI_TO_CCR || OP == ANDI_TO_SR) ? {16'h0, STATUS_REG} :
+                     (OP == EORI_TO_CCR || OP == EORI_TO_SR) ? {16'h0, STATUS_REG} :
+                     (OP == ORI_TO_CCR || OP == ORI_TO_SR) ? {16'h0, STATUS_REG} :
                      (OP == CAS || OP == CAS2) ? DATA_TO_CORE : // Destination operand.
-                     ((OP == CHK2 || OP == CMP2) && USE_DREG == 1'b1) ? DR_OUT_2 :
+                     ((OP == CHK2 || OP == CMP2) && USE_DREG) ? DR_OUT_2 :
                      (OP == CHK || OP == CHK2 || OP == CMP2) ? AR_OUT_2 :
                      (OP == CMPM) ? DATA_TO_CORE :
                      (OP == DBcc || OP == SWAP) ? DR_OUT_2 :
                      (OP == DIVS || OP == DIVU) ? DR_OUT_2 :
                      (OP == MULS || OP == MULU) ? DR_OUT_2 :
-                     ((OP == PACK || OP == UNPK) && BIW_0[3] == 1'b0) ? DR_OUT_1 : // Register direct.
+                     ((OP == PACK || OP == UNPK) && !BIW_0[3]) ? DR_OUT_1 : // Register direct.
                      (OP == PACK || OP == UNPK) ? DATA_TO_CORE :
                      (OP == LINK) ? AR_OUT_1 :
                      (BIW_0[5:3] == 3'b000) ? DR_OUT_2 :
@@ -600,35 +600,35 @@ assign ALU_OP3_IN = ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU
                      ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && BIW_0[5:3] != 3'b000) ? DATA_TO_CORE :
                      (OP == CAS2 || OP == CHK2 || OP == CMP2) ? DATA_TO_CORE : DR_OUT_1;
 
-assign OP_SIZE = (BUSY_EXH == 1'b1) ? OP_SIZE_EXH : OP_SIZE_MAIN;
-assign OP_SIZE_BUS = (DATA_WR_MAIN == 1'b1) ? OP_SIZE_WB : OP_SIZE;
+assign OP_SIZE = (BUSY_EXH) ? OP_SIZE_EXH : OP_SIZE_MAIN;
+assign OP_SIZE_BUS = (DATA_WR_MAIN) ? OP_SIZE_WB : OP_SIZE;
 
 
 assign PC_OFFSET = PC_OFFSET_OPD;
 assign PC_L = PC + PC_ADR_OFFSET;
 
-assign PC_INC_EXH_I = (LOOP_SPLIT == 1'b0) ? PC_INC_EXH : 1'b0; // Suppress for a split loop.
+assign PC_INC_EXH_I = (!LOOP_SPLIT) ? PC_INC_EXH : 1'b0; // Suppress for a split loop.
 
-assign ADR_MODE = (BUSY_EXH == 1'b1) ? 3'b010 : ADR_MODE_MAIN; // (ISP)
+assign ADR_MODE = (BUSY_EXH) ? 3'b010 : ADR_MODE_MAIN; // (ISP)
 
 // The bit field offset is byte aligned
-assign ADR_OFFSET = (FETCH_MEM_ADR == 1'b1) ? 32'h00000000 :
-                     (BUSY_EXH == 1'b1) ? ADR_OFFSET_EXH :
-                     ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) && BF_OFFSET[31] == 1'b0) ? {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
+assign ADR_OFFSET = (FETCH_MEM_ADR) ? 32'h0 :
+                     (BUSY_EXH) ? ADR_OFFSET_EXH :
+                     ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) && !BF_OFFSET[31]) ? {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
                      (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? {3'b111, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
-                     ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && BF_OFFSET[31] == 1'b0) ? {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
+                     ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && !BF_OFFSET[31]) ? {3'b000, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
                      (OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) ? {3'b111, BF_OFFSET[31:3]} + ADR_OFFSET_MAIN :
-                     {24'h000000, 2'b00, ADR_OFFSET_MAIN};
+                     {24'h0, 2'b00, ADR_OFFSET_MAIN};
 
 assign DBcc_COND = (OP_WB == DBcc && ALU_RESULT[15:0] == 16'hFFFF) ? 1'b1 : 1'b0;
 
 // Take a branch if the CPU space will change:
-assign BRANCH_ATN = (OP == ANDI_TO_SR && DATA_IMMEDIATE[13] == 1'b0 && STATUS_REG[13] == 1'b1) ? 1'b1 :
-                     (OP == ANDI_TO_SR && DATA_IMMEDIATE[12] == 1'b0 && STATUS_REG[12] == 1'b1) ? 1'b1 :
-                     (OP == EORI_TO_SR && DATA_IMMEDIATE[13] == 1'b1) ? 1'b1 :
-                     (OP == EORI_TO_SR && DATA_IMMEDIATE[12] == 1'b1) ? 1'b1 :
-                     (OP == ORI_TO_SR && DATA_IMMEDIATE[13] == 1'b1 && STATUS_REG[13] == 1'b0) ? 1'b1 :
-                     (OP == ORI_TO_SR && DATA_IMMEDIATE[12] == 1'b1 && STATUS_REG[12] == 1'b0) ? 1'b1 :
+assign BRANCH_ATN = (OP == ANDI_TO_SR && !DATA_IMMEDIATE[13] && STATUS_REG[13]) ? 1'b1 :
+                     (OP == ANDI_TO_SR && !DATA_IMMEDIATE[12] && STATUS_REG[12]) ? 1'b1 :
+                     (OP == EORI_TO_SR && DATA_IMMEDIATE[13]) ? 1'b1 :
+                     (OP == EORI_TO_SR && DATA_IMMEDIATE[12]) ? 1'b1 :
+                     (OP == ORI_TO_SR && DATA_IMMEDIATE[13] && !STATUS_REG[13]) ? 1'b1 :
+                     (OP == ORI_TO_SR && DATA_IMMEDIATE[12] && !STATUS_REG[12]) ? 1'b1 :
                      (OP == MOVE_TO_SR && BIW_0[5:3] == 3'b000 && DR_OUT_1[13:12] != STATUS_REG[13:12]) ? 1'b1 :
                      (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100 && DATA_IMMEDIATE[13:12] != STATUS_REG[13:12]) ? 1'b1 :
                      (OP == MOVE_TO_SR && DATA_TO_CORE[13:12] != STATUS_REG[13:12]) ? 1'b1 : 1'b0;
@@ -643,22 +643,22 @@ always_ff @(posedge CLK) begin
     // its START_CYCLE bus phase and asserts there the BUS_BSY.
     // After the bus controller enters the bus access state,
     // the requests are withdrawn.
-    if (BUS_BSY == 1'b0) begin
+    if (!BUS_BSY) begin
         RD_REQ_I <= DATA_RD;
         WR_REQ_I <= DATA_WR;
         OPCODE_REQ_I <= OPCODE_RD;
-    end else if (BUS_BSY == 1'b1) begin
+    end else if (BUS_BSY) begin
         RD_REQ_I <= 1'b0;
         WR_REQ_I <= 1'b0;
         OPCODE_REQ_I <= 1'b0;
     end
 end
 
-assign RD_REQ = (BUS_BSY == 1'b0) ? DATA_RD : RD_REQ_I;
-assign WR_REQ = (BUS_BSY == 1'b0) ? DATA_WR : WR_REQ_I;
-assign OPCODE_REQ = (BUS_BSY == 1'b0) ? OPCODE_RD : OPCODE_REQ_I;
+assign RD_REQ = (!BUS_BSY) ? DATA_RD : RD_REQ_I;
+assign WR_REQ = (!BUS_BSY) ? DATA_WR : WR_REQ_I;
+assign OPCODE_REQ = (!BUS_BSY) ? OPCODE_RD : OPCODE_REQ_I;
 
-assign DISPLACEMENT = (BUSY_MAIN == 1'b1) ? DISPLACEMENT_MAIN : {24'h000000, DISPLACEMENT_EXH};
+assign DISPLACEMENT = (BUSY_MAIN) ? DISPLACEMENT_MAIN : {24'h0, DISPLACEMENT_EXH};
 
 assign SR_WR = SR_WR_EXH || SR_WR_MAIN;
 
@@ -666,33 +666,33 @@ assign IPIPE_FLUSH = IPIPE_FLUSH_EXH || IPIPE_FLUSH_MAIN;
 
 assign ISP_WR = ISP_WR_MAIN || ISP_LOAD_EXH;
 
-assign AVECn_BUSIF = (BUSY_EXH == 1'b1) ? AVECn : 1'b1;
+assign AVECn_BUSIF = (BUSY_EXH) ? AVECn : 1'b1;
 
-assign CPU_SPACE = (OP == BKPT && DATA_RD_MAIN == 1'b1) ? 1'b1 :
-                    (BUSY_EXH == 1'b1) ? CPU_SPACE_EXH : 1'b0;
+assign CPU_SPACE = (OP == BKPT && DATA_RD_MAIN) ? 1'b1 :
+                    (BUSY_EXH) ? CPU_SPACE_EXH : 1'b0;
 
 // The bit field offset is bit wise.
-assign BF_OFFSET = (BIW_1[11] == 1'b0) ? {24'h000000, 3'b000, BIW_1[10:6]} : DR_OUT_1;
-assign BF_WIDTH = (BIW_1[4:0] != 5'b00000 && BIW_1[5] == 1'b0) ? {1'b0, BIW_1[4:0]} :
-                   (DR_OUT_1[4:0] != 5'b00000 && BIW_1[5] == 1'b1) ? {1'b0, DR_OUT_1[4:0]} : 6'b100000;
+assign BF_OFFSET = (!BIW_1[11]) ? {24'h0, 3'b000, BIW_1[10:6]} : DR_OUT_1;
+assign BF_WIDTH = (BIW_1[4:0] != 5'b00000 && !BIW_1[5]) ? {1'b0, BIW_1[4:0]} :
+                   (DR_OUT_1[4:0] != 5'b00000 && BIW_1[5]) ? {1'b0, DR_OUT_1[4:0]} : 6'b100000;
 
 // The BITPOS is valid for bit operations and bit field operations. For BCHG, BCLR, BSET and BTST
 // the BITPOS spans 0 to 31 bytes, when it is in register direct mode. It is modulo 8 in memory
 // manipulation mode. For the bit field operations in register direct mode it also in the
 // range 0 to 31. For bit fields in memory the value is byte wide (0 to 7) because the bit
 // field from a memory location are loaded from byte boundaries.
-assign BITPOS = ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && BIW_0[8] == 1'b0 && ADR_MODE == 3'b000) ? BIW_1[4:0] :
-                 ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && BIW_0[8] == 1'b0) ? {2'b00, BIW_1[2:0]} :
+assign BITPOS = ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && !BIW_0[8] && ADR_MODE == 3'b000) ? BIW_1[4:0] :
+                 ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && !BIW_0[8]) ? {2'b00, BIW_1[2:0]} :
                  ((OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) && ADR_MODE == 3'b000) ? DR_OUT_1[4:0] :
                  (OP == BCHG || OP == BCLR || OP == BSET || OP == BTST) ? {2'b00, DR_OUT_1[2:0]} :
-                 (BIW_1[11] == 1'b0 && ADR_MODE == 3'b000) ? BIW_1[10:6] :
-                 (BIW_1[11] == 1'b0) ? {2'b00, BIW_1[8:6]} :
+                 (!BIW_1[11] && ADR_MODE == 3'b000) ? BIW_1[10:6] :
+                 (!BIW_1[11]) ? {2'b00, BIW_1[8:6]} :
                  (ADR_MODE == 3'b000) ? DR_OUT_1[4:0] : {2'b00, DR_OUT_1[2:0]};
 
-assign TRAP_AERR = (BUSY_EXH == 1'b0) ? AERR : 1'b0; // No address error from the system during exception processing.
+assign TRAP_AERR = (!BUSY_EXH) ? AERR : 1'b0; // No address error from the system during exception processing.
 
-assign USE_DFC = (OP_WB == MOVES && DATA_WR_MAIN == 1'b1) ? 1'b1 : 1'b0;
-assign USE_SFC = (OP_WB == MOVES && DATA_RD_MAIN == 1'b1) ? 1'b1 : 1'b0;
+assign USE_DFC = (OP_WB == MOVES && DATA_WR_MAIN) ? 1'b1 : 1'b0;
+assign USE_SFC = (OP_WB == MOVES && DATA_RD_MAIN) ? 1'b1 : 1'b0;
 
 assign PC_LOAD = PC_LOAD_EXH || PC_LOAD_MAIN;
 
@@ -703,7 +703,7 @@ assign IPL = ~IPLn;
 // This tiny logic provides signal transition on the negative
 // clock edge.
 always_ff @(negedge CLK) begin
-    if ((STATUSn_EXH && STATUSn_MAIN) == 1'b1) begin
+    if (STATUSn_EXH && STATUSn_MAIN) begin
         STATUSn <= 1'b1;
     end else begin
         STATUSn <= 1'b0;
@@ -713,12 +713,12 @@ end
 
 assign SBIT = STATUS_REG[13];
 
-assign ADR_L = (BKPT_CYCLE == 1'b1) ? {24'h000000, 3'b000, BIW_0[2:0], 2'b00} :
-                (CPU_SPACE_EXH == 1'b1) ? {28'hFFFFFFF, IRQ_PEND, 1'b1} :
-                (DATA_WR_MAIN == 1'b1) ? ADR_EFF_WB : ADR_EFF; // Exception handler uses ADR_EFF for read and write access.
+assign ADR_L = BKPT_CYCLE ? {24'h0, 3'b000, BIW_0[2:0], 2'b00} :
+                CPU_SPACE_EXH ? {28'hFFFFFFF, IRQ_PEND, 1'b1} :
+                (DATA_WR_MAIN) ? ADR_EFF_WB : ADR_EFF; // Exception handler uses ADR_EFF for read and write access.
 
-assign ADR_P = (BUS_BSY == 1'b1) ? ADR_LATCH :
-                (DATA_RD == 1'b1 || DATA_WR == 1'b1) ? ADR_L : PC_L;
+assign ADR_P = (BUS_BSY) ? ADR_LATCH :
+                (DATA_RD || DATA_WR) ? ADR_L : PC_L;
 
 // P_ADR_LATCHES:
 // This register stores the address during a running bus cycle.
@@ -729,21 +729,21 @@ assign ADR_P = (BUS_BSY == 1'b1) ? ADR_LATCH :
 // The FC_LATCH register stores the function code during a running
 // bus cycle.
 always_ff @(posedge CLK) begin
-    if (BUS_BSY == 1'b0) begin
+    if (!BUS_BSY) begin
         ADR_LATCH <= ADR_P;
         FC_LATCH <= FC_I;
-    end else if (BERRn == 1'b0) begin
+    end else if (!BERRn) begin
         FAULT_ADR <= ADR_LATCH;
     end
 end
 
-assign FC_I = (BUS_BSY == 1'b1) ? FC_LATCH :
-               (USE_SFC == 1'b1) ? SFC :
-               (USE_DFC == 1'b1) ? DFC :
-               ((DATA_RD == 1'b1 || DATA_WR == 1'b1) && CPU_SPACE == 1'b1) ? 3'b111 :
-               ((DATA_RD == 1'b1 || DATA_WR == 1'b1) && SBIT == 1'b1) ? 3'b101 :
-               (DATA_RD == 1'b1 || DATA_WR == 1'b1) ? 3'b001 :
-               (OPCODE_RD == 1'b1 && SBIT == 1'b1) ? 3'b110 : 3'b010; // Default is OPCODE_RD and SBIT = '0'.
+assign FC_I = (BUS_BSY) ? FC_LATCH :
+               USE_SFC ? SFC :
+               USE_DFC ? DFC :
+               ((DATA_RD || DATA_WR) && CPU_SPACE) ? 3'b111 :
+               ((DATA_RD || DATA_WR) && SBIT) ? 3'b101 :
+               (DATA_RD || DATA_WR) ? 3'b001 :
+               (OPCODE_RD && SBIT) ? 3'b110 : 3'b010; // Default is OPCODE_RD and SBIT = '0'.
 
     WF68K30L_ADDRESS_REGISTERS I_ADDRESSREGISTERS (
         .CLK                    (CLK),
