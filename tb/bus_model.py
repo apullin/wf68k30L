@@ -101,17 +101,19 @@ class BusModel:
                 if rw_n == 1:
                     # READ cycle: drive DATA_IN with data from memory
                     data = self.memory.read(addr, num_bytes)
-                    # For the 68030 bus, data is always aligned to the MSB
-                    # of the 32-bit data bus. The bus interface handles
-                    # alignment internally, so we provide the full 32-bit
-                    # value.
+                    # For a 32-bit port, data must be placed at the byte
+                    # lane corresponding to the address alignment.  The
+                    # MC68030 bus interface expects bytes at their natural
+                    # position on the 32-bit data bus:
+                    #   addr[1:0]=00 -> D[31:24], 01 -> D[23:16],
+                    #   10 -> D[15:8], 11 -> D[7:0]
+                    byte_lane = addr & 3
+                    shift = (3 - byte_lane) * 8  # MSB-first lane mapping
                     if num_bytes == 1:
-                        # Byte on bits 31:24
-                        data = (data & 0xFF) << 24
+                        data = (data & 0xFF) << shift
                     elif num_bytes == 2:
-                        # Word on bits 31:16
-                        data = (data & 0xFFFF) << 16
-                    # Long: already 32-bit aligned
+                        data = (data & 0xFFFF) << (shift - 8)
+                    # Long (4 bytes): addr[1:0] is 00, data fills D[31:0]
 
                     self.dut.DATA_IN.value = data
                     self.dut.DSACKn.value = 0b00  # 32-bit port ack
@@ -123,13 +125,15 @@ class BusModel:
                     except ValueError:
                         data = 0
 
+                    # Extract written bytes from correct bus lane based
+                    # on address alignment (same lane mapping as reads).
+                    byte_lane = addr & 3
+                    shift = (3 - byte_lane) * 8
                     if num_bytes == 1:
-                        # Byte from bits 31:24
-                        byte_val = (data >> 24) & 0xFF
+                        byte_val = (data >> shift) & 0xFF
                         self.memory.write(addr, 1, byte_val)
                     elif num_bytes == 2:
-                        # Word from bits 31:16
-                        word_val = (data >> 16) & 0xFFFF
+                        word_val = (data >> (shift - 8)) & 0xFFFF
                         self.memory.write(addr, 2, word_val)
                     else:
                         self.memory.write(addr, 4, data)

@@ -544,7 +544,13 @@ always_ff @(posedge CLK) begin : pc_offset
 end
 
 // P_PC_OFFSET_COMB
+// PC_ADR_OFFSET uses a combinatorial bypass of ADR_OFFSET_S so that the
+// updated fetch address is visible in the same cycle that OPCODE_RDY_I
+// fires.  Without this bypass the bus controller latches a stale PC
+// address (one word behind) because ADR_OFFSET_S is registered and only
+// updates on the following clock edge.
 always_comb begin : pc_offset_comb
+    reg [6:0] adr_offset_fwd;
     if (BUSY_EXH && PC_INC_I) begin
         PC_OFFSET = {PC_VAR_MEM_S, 1'b0};
     end else if (OP == DBcc && LOOP_BSY_I && !LOOP_EXIT) begin
@@ -554,7 +560,19 @@ always_comb begin : pc_offset_comb
     end else begin
         PC_OFFSET = {PC_VAR_S, 1'b0};
     end
-    PC_ADR_OFFSET = {ADR_OFFSET_S, 1'b0};
+    // Combinatorial forward of the ADR_OFFSET update that would otherwise
+    // only appear in ADR_OFFSET_S one cycle later.  This mirrors the
+    // blocking-assignment logic inside the pc_offset always_ff block.
+    adr_offset_fwd = ADR_OFFSET_S;
+    if (IPIPE_FLUSH)
+        adr_offset_fwd = 7'd0;
+    else if (PC_INC_I && OPCODE_RDY_I)
+        adr_offset_fwd = ADR_OFFSET_S + 7'd1 - PC_VAR_S;
+    else if (OPCODE_RDY_I)
+        adr_offset_fwd = ADR_OFFSET_S + 7'd1;
+    else if (PC_INC_I)
+        adr_offset_fwd = ADR_OFFSET_S - PC_VAR_S;
+    PC_ADR_OFFSET = {adr_offset_fwd, 1'b0};
 end
 
 // P_FLUSH
