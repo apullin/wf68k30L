@@ -58,12 +58,12 @@ typedef enum logic {SHIFT_IDLE, SHIFT_RUN} SHIFT_STATES;
 
 logic        ALU_COND_I;
 logic [2:0]  ADR_MODE;
-integer      BITPOS;
+logic [4:0]  BITPOS;
 logic [39:0] BF_DATA_IN;
-integer      BF_LOWER_BND;
+logic [5:0]  BF_LOWER_BND;
 logic [31:0] BF_OFFSET;
-integer      BF_UPPER_BND;
-integer      BF_WIDTH;
+logic [5:0]  BF_UPPER_BND;
+logic [5:0]  BF_WIDTH;
 logic [11:0] BIW_0;
 logic [15:0] BIW_1;
 logic        CAS2_COND;
@@ -72,7 +72,7 @@ logic        CHK_CMP_COND;
 logic        CHK2CMP2_DR;
 logic        DIV_RDY;
 DIV_STATES   DIV_STATE;
-integer      MSB;
+logic [4:0]  MSB;
 OP_68K       OP;
 logic [31:0] OP1;
 logic [31:0] OP2;
@@ -111,15 +111,15 @@ always_ff @(posedge CLK) begin : PARAMETER_BUFFER
         BIW_0 <= BIW_0_IN;
         BIW_1 <= BIW_1_IN;
         BF_OFFSET <= BF_OFFSET_IN;
-        BITPOS <= BITPOS_IN;
+        BITPOS <= {1'b0, BITPOS_IN[3:0]};
         BF_WIDTH <= BF_WIDTH_IN;
-        BF_UPPER_BND <= 39 - BITPOS_IN;
+        BF_UPPER_BND <= 6'd39 - {1'b0, BITPOS_IN};
         SHIFT_WIDTH <= SHIFT_WIDTH_IN_sig;
         //
         if ((BITPOS_IN + BF_WIDTH_IN) > 40)
-            BF_LOWER_BND <= 0;
+            BF_LOWER_BND <= 6'd0;
         else
-            BF_LOWER_BND <= 40 - (BITPOS_IN + BF_WIDTH_IN);
+            BF_LOWER_BND <= 6'd40 - ({1'b0, BITPOS_IN} + BF_WIDTH_IN);
     end
 end
 
@@ -172,10 +172,10 @@ end
 
 always_comb begin
     case (OP_SIZE)
-        LONG:    MSB = 31;
-        WORD:    MSB = 15;
-        BYTE:    MSB = 7;
-        default: MSB = 31;
+        LONG:    MSB = 5'd31;
+        WORD:    MSB = 5'd15;
+        BYTE:    MSB = 5'd7;
+        default: MSB = 5'd31;
     endcase
 end
 
@@ -274,48 +274,37 @@ assign BF_DATA_IN = {OP3, OP2[7:0]};
 always_comb begin : P_BITFIELD_OP
     logic BF_NZ;
     logic [5:0] BFFFO_CNT;
+    logic [39:0] bf_mask;
+    logic [39:0] shifted_data;
+    logic [31:0] width_mask;
     integer i;
 
     i = 0;
+    bf_mask = ((40'd1 << (BF_UPPER_BND - BF_LOWER_BND + 6'd1)) - 40'd1) << BF_LOWER_BND;
+    width_mask = (BF_WIDTH == 6'd32) ? 32'hFFFFFFFF : ((32'd1 << BF_WIDTH) - 32'd1);
+    shifted_data = BF_DATA_IN >> BF_LOWER_BND;
+
     RESULT_BITFIELD = BF_DATA_IN; // Default.
+    BF_NZ = 1'b0;
+    BFFFO_CNT = 6'b000000;
     case (OP)
         BFCHG: begin
-            for (i = 0; i < 40; i = i + 1) begin
-                if (i >= BF_LOWER_BND && i <= BF_UPPER_BND)
-                    RESULT_BITFIELD[i] = ~BF_DATA_IN[i];
-            end
+            RESULT_BITFIELD = BF_DATA_IN ^ bf_mask;
         end
         BFCLR: begin
-            for (i = 0; i < 40; i = i + 1) begin
-                if (i >= BF_LOWER_BND && i <= BF_UPPER_BND)
-                    RESULT_BITFIELD[i] = 1'b0;
-            end
+            RESULT_BITFIELD = BF_DATA_IN & ~bf_mask;
         end
         BFEXTS: begin // Result is in (39 downto 8).
-            for (i = 31; i >= 0; i = i - 1) begin
-                if (i <= BF_WIDTH - 1 && BF_LOWER_BND + i <= 39)
-                    RESULT_BITFIELD[i + 8] = BF_DATA_IN[BF_LOWER_BND + i];
-            end
-            //
-            for (i = 0; i < 40; i = i + 1) begin
-                if (i >= 8 + BF_WIDTH)
-                    RESULT_BITFIELD[i] = BF_DATA_IN[BF_UPPER_BND];
-            end
+            RESULT_BITFIELD[7:0] = BF_DATA_IN[7:0];
+            RESULT_BITFIELD[39:8] = (shifted_data[31:0] & width_mask) |
+                                    ({32{BF_DATA_IN[BF_UPPER_BND]}} & ~width_mask);
         end
         BFEXTU: begin // Result is in (39 downto 8).
-            for (i = 31; i >= 0; i = i - 1) begin
-                if (i <= BF_WIDTH - 1 && BF_LOWER_BND + i <= 39)
-                    RESULT_BITFIELD[i + 8] = BF_DATA_IN[BF_LOWER_BND + i];
-            end
-            //
-            for (i = 0; i < 40; i = i + 1) begin
-                if (i >= 8 + BF_WIDTH)
-                    RESULT_BITFIELD[i] = 1'b0;
-            end
+            RESULT_BITFIELD[7:0] = BF_DATA_IN[7:0];
+            RESULT_BITFIELD[39:8] = shifted_data[31:0] & width_mask;
         end
         BFFFO: begin // Result is in (39 downto 8).
-            BF_NZ = 1'b0;
-            BFFFO_CNT = 6'b000000;
+            // Count consecutive zeros from LSB of field upward
             for (i = 0; i < 40; i = i + 1) begin
                 if (i <= BF_UPPER_BND && i >= BF_LOWER_BND) begin
                     if (BF_DATA_IN[i] == 1'b0 && BF_NZ == 1'b0)
@@ -324,20 +313,13 @@ always_comb begin : P_BITFIELD_OP
                         BF_NZ = 1'b1;
                 end
             end
-            //
             RESULT_BITFIELD = {(BF_OFFSET[31:0] + {26'd0, BFFFO_CNT}), 8'h00};
         end
         BFINS: begin
-            for (i = 0; i < 40; i = i + 1) begin
-                if (i <= BF_WIDTH - 1 && (BF_UPPER_BND - i) >= 0)
-                    RESULT_BITFIELD[BF_UPPER_BND - i] = OP1[BF_WIDTH - i - 1];
-            end
+            RESULT_BITFIELD = (BF_DATA_IN & ~bf_mask) | (({8'h00, OP1} << BF_LOWER_BND) & bf_mask);
         end
         BFSET: begin
-            for (i = 0; i < 40; i = i + 1) begin
-                if (i >= BF_LOWER_BND && i <= BF_UPPER_BND)
-                    RESULT_BITFIELD[i] = 1'b1;
-            end
+            RESULT_BITFIELD = BF_DATA_IN | bf_mask;
         end
         default: ; // BFTST. no calculation required for BFTST.
     endcase
@@ -356,7 +338,7 @@ always_comb begin : P_BITOP
 end
 
 always_ff @(posedge CLK) begin : DIVISION
-    integer BITCNT;
+    logic [6:0] BITCNT;
     logic [63:0] DIVIDEND;
     logic [31:0] DIVISOR;
     logic [31:0] QUOTIENT_REST;
@@ -403,9 +385,9 @@ always_ff @(posedge CLK) begin : DIVISION
             endcase
 
             if (OP_SIZE == LONG && BIW_1[10] == 1'b1)
-                BITCNT = 64;
+                BITCNT = 7'd64;
             else
-                BITCNT = 32;
+                BITCNT = 7'd32;
 
             if (DIVISOR == 32'h00000000) begin // Division by zero.
                 QUOTIENT <= 32'hFFFFFFFF;
@@ -446,7 +428,7 @@ always_ff @(posedge CLK) begin : DIVISION
                 QUOTIENT_VAR[BITCNT] = 1'b1;
             end
             //
-            if (BITCNT == 0) begin
+            if (BITCNT == 7'd0) begin
                 // Adjust signs:
                 if (OP == DIVS && OP_SIZE == LONG && BIW_1[10] == 1'b1 && (OP3[31] ^ OP1[31]) == 1'b1)
                     QUOTIENT <= ~QUOTIENT_VAR + 1'b1; // Negative, change sign.
@@ -808,17 +790,14 @@ end
 
 // Combinational XNZVC calculation
 always_comb begin : COND_CODES_COMB
-    logic TMP;
     logic Z, RM_sig, SM_sig, DM_sig;
     logic NFLAG_DIV_sig;
     logic NFLAG_MUL_sig;
     logic VFLAG_MUL_sig;
     logic [2:0] RM_SM_DM;
-    integer i;
+    logic [39:0] bf_mask;
 
-    i = 0;
-
-    // DIVISION:
+    bf_mask = 40'd0;
     if (OP_SIZE == LONG && QUOTIENT[31] == 1'b1)
         NFLAG_DIV_sig = 1'b1;
     else if (OP_SIZE == WORD && QUOTIENT[15] == 1'b1)
@@ -829,9 +808,23 @@ always_comb begin : COND_CODES_COMB
     // Integer operations:
     case (OP)
         ADD, ADDI, ADDQ, ADDX, CMP, CMPA, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX: begin
-            RM_sig = RESULT_INTOP[MSB];
-            SM_sig = OP1_SIGNEXT[MSB];
-            DM_sig = OP2_SIGNEXT[MSB];
+            case (OP_SIZE)
+                BYTE: begin
+                    RM_sig = RESULT_INTOP[7];
+                    SM_sig = OP1_SIGNEXT[7];
+                    DM_sig = OP2_SIGNEXT[7];
+                end
+                WORD: begin
+                    RM_sig = RESULT_INTOP[15];
+                    SM_sig = OP1_SIGNEXT[15];
+                    DM_sig = OP2_SIGNEXT[15];
+                end
+                default: begin
+                    RM_sig = RESULT_INTOP[31];
+                    SM_sig = OP1_SIGNEXT[31];
+                    DM_sig = OP2_SIGNEXT[31];
+                end
+            endcase
         end
         default: begin
             RM_sig = 1'b0; SM_sig = 1'b0; DM_sig = 1'b0;
@@ -858,36 +851,33 @@ always_comb begin : COND_CODES_COMB
         VFLAG_MUL_sig = 1'b0;
 
     // The Z Flag:
-    TMP = 1'b0;
     Z = 1'b0;
     case (OP)
         ADD, ADDI, ADDQ, ADDX, CAS, CAS2, CMP, CMPA, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX: begin
-            for (i = 0; i < 32; i = i + 1) begin
-                if (i <= MSB)
-                    TMP = TMP | RESULT_INTOP[i]; // Detect '1'.
-            end
-            Z = ~TMP; // Invert for Z flag.
+            case (OP_SIZE)
+                BYTE:    Z = (RESULT_INTOP[7:0]  == 8'd0);
+                WORD:    Z = (RESULT_INTOP[15:0] == 16'd0);
+                default: Z = (RESULT_INTOP[31:0] == 32'd0);
+            endcase
         end
         AND_B, ANDI, EOR, EORI, OR_B, ORI, NOT_B: begin
-            for (i = 0; i < 32; i = i + 1) begin
-                if (i <= MSB)
-                    TMP = TMP | RESULT_LOGOP[i];
-            end
-            Z = ~TMP;
+            case (OP_SIZE)
+                BYTE:    Z = (RESULT_LOGOP[7:0]  == 8'd0);
+                WORD:    Z = (RESULT_LOGOP[15:0] == 16'd0);
+                default: Z = (RESULT_LOGOP[31:0] == 32'd0);
+            endcase
         end
         ASL, ASR, LSL, LSR, ROTL, ROTR, ROXL, ROXR: begin
-            for (i = 0; i < 32; i = i + 1) begin
-                if (i <= MSB)
-                    TMP = TMP | RESULT_SHIFTOP[i];
-            end
-            Z = ~TMP;
+            case (OP_SIZE)
+                BYTE:    Z = (RESULT_SHIFTOP[7:0]  == 8'd0);
+                WORD:    Z = (RESULT_SHIFTOP[15:0] == 16'd0);
+                default: Z = (RESULT_SHIFTOP[31:0] == 32'd0);
+            endcase
         end
         BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFINS, BFSET, BFTST: begin
-            for (i = 0; i < 40; i = i + 1) begin
-                if (i >= BF_LOWER_BND && i <= BF_UPPER_BND)
-                    TMP = TMP | BF_DATA_IN[i];
-            end
-            Z = ~TMP;
+            // Test if any bit in [BF_LOWER_BND:BF_UPPER_BND] is set
+            bf_mask = ((40'd1 << (BF_UPPER_BND - BF_LOWER_BND + 6'd1)) - 40'd1) << BF_LOWER_BND;
+            Z = ~|(BF_DATA_IN & bf_mask);
         end
         CHK2, CMP2: begin
             if (USE_DREG == 1'b1 && OP_SIZE == LONG && OP2 == OP1)
@@ -914,11 +904,11 @@ always_comb begin : COND_CODES_COMB
         DIVS, DIVU:
             Z = (QUOTIENT == 32'h00000000) ? 1'b1 : 1'b0;
         EXT, EXTB, MOVE, SWAP, TST: begin
-            for (i = 0; i < 32; i = i + 1) begin
-                if (i <= MSB)
-                    TMP = TMP | RESULT_OTHERS[i];
-            end
-            Z = ~TMP;
+            case (OP_SIZE)
+                BYTE:    Z = (RESULT_OTHERS[7:0]  == 8'd0);
+                WORD:    Z = (RESULT_OTHERS[15:0] == 16'd0);
+                default: Z = (RESULT_OTHERS[31:0] == 32'd0);
+            endcase
         end
         MULS, MULU: begin
             if (OP_SIZE == LONG && BIW_1[10] == 1'b1 && RESULT_MUL == 64'h0000000000000000) // 64 bit result.
@@ -929,11 +919,11 @@ always_comb begin : COND_CODES_COMB
                 Z = 1'b0;
         end
         TAS: begin
-            for (i = 0; i < 32; i = i + 1) begin
-                if (i <= MSB)
-                    TMP = TMP | OP2_SIGNEXT[i];
-            end
-            Z = ~TMP;
+            case (OP_SIZE)
+                BYTE:    Z = (OP2_SIGNEXT[7:0]  == 8'd0);
+                WORD:    Z = (OP2_SIGNEXT[15:0] == 16'd0);
+                default: Z = (OP2_SIGNEXT[31:0] == 32'd0);
+            endcase
         end
         default:
             Z = 1'b0;

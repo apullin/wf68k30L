@@ -167,20 +167,19 @@ logic [6:0]  PC_VAR_MEM_S;
 // opcode is inhibited during a pipe flush. For the main controller unit
 // and the coprocessor interface the pipe is flushed after a running
 // opcode cycle.
-always @(posedge CLK or posedge OPCODE_RDY or posedge BUSY_EXH or negedge IPIPE_FILL) begin
+// Restructured for Yosys: use synchronous logic with priority encoding
+// to emulate the multi-edge VHDL process.
+always_ff @(posedge CLK) begin
     if (OPCODE_RDY == 1'b1) begin
         OPCODE_RD_I <= 1'b0;
     end else if (BUSY_EXH == 1'b1 && IPIPE_FILL == 1'b0) begin
         OPCODE_RD_I <= 1'b0;
-    end else begin
-        // posedge CLK path
-        if (IPIPE_FLUSH == 1'b1) begin
-            OPCODE_RD_I <= 1'b1;
-        end else if ((LOOP_ATN == 1'b1 && OPCODE_RD_I == 1'b0) || LOOP_BSY_I == 1'b1) begin
-            OPCODE_RD_I <= 1'b0;
-        end else if (IPIPE_PNTR < 2'd3) begin
-            OPCODE_RD_I <= 1'b1;
-        end
+    end else if (IPIPE_FLUSH == 1'b1) begin
+        OPCODE_RD_I <= 1'b1;
+    end else if ((LOOP_ATN == 1'b1 && OPCODE_RD_I == 1'b0) || LOOP_BSY_I == 1'b1) begin
+        OPCODE_RD_I <= 1'b0;
+    end else if (IPIPE_PNTR < 2'd3) begin
+        OPCODE_RD_I <= 1'b1;
     end
 end
 
