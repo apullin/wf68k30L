@@ -23,7 +23,7 @@ from cpu_harness import CPUTestHarness
 from m68k_encode import (
     BYTE, WORD, LONG,
     DN, AN, AN_IND, AN_POSTINC, AN_PREDEC, SPECIAL, ABS_L, IMMEDIATE,
-    moveq, move, move_to_abs_long, nop, addq, subq, addi, subi,
+    moveq, move, movea, move_to_abs_long, nop, addq, subq, addi, subi,
     clr, neg, not_op, swap, and_op, or_op, eor, cmpi,
     bcc, CC_EQ, CC_NE,
     imm_long,
@@ -129,9 +129,11 @@ async def test_addq_long(dut):
     h = CPUTestHarness(dut)
 
     program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),              # MOVEA.L #RESULT_BASE,A0
+        *imm_long(h.RESULT_BASE),
         *moveq(10, 0),                                    # MOVEQ #10,D0
         *addq(LONG, 5, DN, 0),                            # ADDQ.L #5,D0
-        *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),    # MOVE.L D0,(RESULT_BASE).L
+        *move(LONG, DN, 0, AN_IND, 0),                    # MOVE.L D0,(A0)
         *h.sentinel_program(),
     ]
     await h.setup(program)
@@ -152,9 +154,11 @@ async def test_subq_long(dut):
     h = CPUTestHarness(dut)
 
     program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),              # MOVEA.L #RESULT_BASE,A0
+        *imm_long(h.RESULT_BASE),
         *moveq(20, 0),                                    # MOVEQ #20,D0
         *subq(LONG, 3, DN, 0),                            # SUBQ.L #3,D0
-        *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),    # MOVE.L D0,(RESULT_BASE).L
+        *move(LONG, DN, 0, AN_IND, 0),                    # MOVE.L D0,(A0)
         *h.sentinel_program(),
     ]
     await h.setup(program)
@@ -225,9 +229,11 @@ async def test_not_long(dut):
     h = CPUTestHarness(dut)
 
     program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),              # MOVEA.L #RESULT_BASE,A0
+        *imm_long(h.RESULT_BASE),
         *moveq(0, 0),                                     # MOVEQ #0,D0
         *not_op(LONG, DN, 0),                              # NOT.L D0
-        *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),    # MOVE.L D0,(RESULT_BASE).L
+        *move(LONG, DN, 0, AN_IND, 0),                    # MOVE.L D0,(A0)
         *h.sentinel_program(),
     ]
     await h.setup(program)
@@ -248,9 +254,11 @@ async def test_neg_long(dut):
     h = CPUTestHarness(dut)
 
     program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),              # MOVEA.L #RESULT_BASE,A0
+        *imm_long(h.RESULT_BASE),
         *moveq(1, 0),                                     # MOVEQ #1,D0
         *neg(LONG, DN, 0),                                 # NEG.L D0
-        *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),    # MOVE.L D0,(RESULT_BASE).L
+        *move(LONG, DN, 0, AN_IND, 0),                    # MOVE.L D0,(A0)
         *h.sentinel_program(),
     ]
     await h.setup(program)
@@ -271,9 +279,11 @@ async def test_move_between_regs(dut):
     h = CPUTestHarness(dut)
 
     program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),              # MOVEA.L #RESULT_BASE,A0
+        *imm_long(h.RESULT_BASE),
         *moveq(77, 0),                                    # MOVEQ #77,D0
         *move(LONG, DN, 0, DN, 3),                         # MOVE.L D0,D3
-        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE),    # MOVE.L D3,(RESULT_BASE).L
+        *move(LONG, DN, 3, AN_IND, 0),                    # MOVE.L D3,(A0)
         *h.sentinel_program(),
     ]
     await h.setup(program)
