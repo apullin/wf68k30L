@@ -1327,20 +1327,11 @@ async def test_line_f_vector_offset_in_frame(dut):
 
 # =========================================================================
 # TRAP with RTE: verify we can return from a trap handler
-#
-# CORE BUG: RTE does not properly return from exception handlers in the
-# WF68K30L. The CPU appears to hang or not restore PC correctly.
-# These tests are marked expect_error.
 # =========================================================================
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_trap_rte_returns(dut):
-    """TRAP #0 with RTE: handler returns, execution continues after TRAP.
-
-    CORE BUG: RTE does not properly return from exception handlers.
-    The CPU hangs instead of continuing execution after the TRAP.
-    Marked expect_error.
-    """
+    """TRAP #0 with RTE: handler returns, execution continues after TRAP."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x800
     trap_vector_addr = 32 * 4
@@ -1377,13 +1368,9 @@ async def test_trap_rte_returns(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_trap_rte_restores_sr(dut):
-    """TRAP with RTE: verify SR is restored from the stack frame.
-
-    CORE BUG: RTE does not properly return from exception handlers.
-    Marked expect_error.
-    """
+    """TRAP with RTE: verify SR is restored from the stack frame."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x800
     trap_vector_addr = 32 * 4

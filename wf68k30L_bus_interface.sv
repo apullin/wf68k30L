@@ -509,9 +509,9 @@ always_ff @(negedge CLK) begin : data_in_alignment
                     default: begin // LONG.
                         case (ADR_10)
                             2'b00:   DATA_INMUX[31:0]  <= DATA_PORT_IN[31:0];
-                            2'b01:   DATA_INMUX[31:8]  <= DATA_PORT_IN[23:0];
-                            2'b10:   DATA_INMUX[31:16] <= DATA_PORT_IN[15:0];
-                            default: DATA_INMUX[31:24] <= DATA_PORT_IN[7:0];
+                            2'b01:   DATA_INMUX[31:8]  <= DATA_PORT_IN[31:8];
+                            2'b10:   DATA_INMUX[31:16] <= DATA_PORT_IN[31:16];
+                            default: DATA_INMUX[31:24] <= DATA_PORT_IN[31:24];
                         endcase
                     end
                 endcase
