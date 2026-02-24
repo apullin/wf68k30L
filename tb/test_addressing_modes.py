@@ -20,7 +20,7 @@ Addressing modes tested:
   Mode 111/011 (d8,PC,Xn)  - PC-relative indexed
   Mode 111/100 #imm        - immediate
 
-Each test uses the prefetch pipeline hazard workaround:
+Each test uses a consistent result-store pattern:
   - Load RESULT_BASE into A0 early with MOVEA.L #addr, A0
   - Store results via MOVE.L Dn, (A0) (single-word, no extension)
   - Advance A0 via ADDQ.L #4, A0

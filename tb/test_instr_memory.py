@@ -4,7 +4,7 @@ Memory-oriented instruction compliance tests for WF68K30L.
 Tests LEA, PEA, LINK/UNLK, MOVEM, TAS, and MOVEA against the MC68030
 specification.
 
-Each test uses the prefetch pipeline hazard workaround:
+Each test uses a consistent result-store pattern:
   - Load RESULT_BASE into A0 early
   - Store results via MOVE.L Dn,(A0) (single-word, no extension words)
   - Advance A0 with ADDQ.L #4,A0

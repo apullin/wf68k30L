@@ -4,7 +4,7 @@ Move, swap, exchange, and extend instruction compliance tests for WF68K30L.
 Tests: MOVEQ, MOVE (reg-to-reg, all sizes), MOVEA (long/word+sign-ext),
        EXG (data-data, addr-addr, data-addr), SWAP, EXT.W, EXT.L, EXTB.L.
 
-Each test uses the prefetch pipeline hazard workaround:
+Each test uses a consistent result-store pattern:
   - Load RESULT_BASE into A0 early with MOVEA.L #addr, A0
   - Store results via MOVE.L Dn, (A0) (single-word, no extension)
   - Advance A0 via ADDQ.L #4, A0

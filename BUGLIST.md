@@ -9,50 +9,35 @@ tests where appropriate.
 
 ## Open Bugs
 
-### BUG-001: Prefetch pipeline hazard with multi-word instructions
-
-**Severity:** High
-**Status:** Open (core reproduction fixed in RTL; broader refill edge cases pending)
-**Found:** Phase 1 smoke testing
-
-**Description:**
-After executing 2+ single-word instructions (e.g., MOVEQ, SWAP, CLR), a multi-word
-instruction's extension words are fetched from the wrong address. The first extension
-word address is fetched twice instead of advancing to the second extension word.
-
-**Root cause (suspected):**
-The registered `ADR_OFFSET_S` in the opcode decoder lags by one cycle when the bus
-controller latches the fetch address. A combinatorial bypass (`adr_offset_fwd`) was
-added to fix part of the problem, but the prefetch pipeline still missequences when
-the pipeline is fully populated with single-word instructions.
-
-**Reproduction:**
-```asm
-    MOVEQ  #1, D0          ; single-word
-    MOVEQ  #2, D1          ; single-word
-    MOVE.L D0, ($020000).L ; multi-word (3 words) — extension words garbled
-```
-
-**Workaround:**
-Use register-indirect addressing instead of absolute long for store operations:
-```asm
-    MOVEA.L #$020000, A0   ; load address into A register
-    MOVE.L  D0, (A0)       ; register-indirect store (single extension word)
-```
-
-**Affected tests:**
-- Regression added: `test_instr_basic.py::test_prefetch_after_two_single_word_ops`
-  (passes with current RTL fix).
-- Existing tests still commonly use the register-indirect workaround pattern.
-
-**Files involved:**
-- `wf68k30L_opcode_decoder.sv` — PC offset bypass logic
-- `wf68k30L_control.sv` — fetch pipeline state machine
-- `wf68k30L_bus_interface.sv` — address latch timing
+None currently.
 
 ---
 
 ## Resolved Bugs
+
+### BUG-R013: Prefetch pipeline hazard with multi-word instructions (was BUG-001)
+
+**Severity:** High
+**Status:** Fixed
+**Found:** Phase 1 smoke testing
+
+**Description:**
+After chains of single-word instructions, a following multi-word instruction could
+misfetch extension words (for example duplicate fetch of the first extension word).
+
+**Fix:**
+- In `wf68k30L_opcode_decoder.sv`, prefetch address advancement is now gated by
+  accepted opcode responses (`OPCODE_ACCEPT`) and uses combinational forward
+  compensation (`pc_offset_comb`) so bus fetch addresses track same-cycle PC updates.
+
+**Validation:**
+- `test_instr_basic.py::test_prefetch_after_two_single_word_ops` passes.
+- Added `test_instr_basic.py::test_prefetch_single_word_prefix_sweep`, which
+  sweeps longer single-word prefixes and verifies opcode/extension fetch sequencing
+  and result correctness; this passes.
+- Full basic regression passes: `test_instr_basic` 12/12.
+
+---
 
 ### BUG-R012: Yosys ABC9 combinational loop assertion (was BUG-002)
 
@@ -227,12 +212,13 @@ is set via `MOVE to CCR`.
 
 **Description:**
 The ALU V-flag computation is correct and matches the VHDL. The test was
-triggering **BUG-001** (prefetch pipeline hazard): `MOVEQ #-1,D3` (single-word)
-followed by `ADD.L D2,D3` (single-word) caused the ADD to be misdecoded entirely.
+triggering the then-open prefetch hazard (now **BUG-R013**):
+`MOVEQ #-1,D3` (single-word) followed by `ADD.L D2,D3` (single-word)
+caused the ADD to be misdecoded entirely.
 The ALU never received an ADD operation.
 
 **Fix:** Rewrote the test to use multi-word `MOVE.L #imm` instead of `MOVEQ`,
-avoiding the prefetch hazard. Direct ALU unit tests confirm V=1 for negative
+avoiding that hazard. Direct ALU unit tests confirm V=1 for negative
 overflow (0x80000001 + 0x80000001 = 0x00000002).
 
 ---

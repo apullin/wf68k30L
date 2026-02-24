@@ -635,10 +635,6 @@ async def test_trapv_overflow_via_add_negative(dut):
 
     -1 (0xFFFFFFFF) + 0x80000000 = 0x7FFFFFFF, which is positive from
     two negative operands -> V=1.
-
-    Uses multi-word MOVE.L to load both operands, avoiding the prefetch
-    pipeline hazard (BUG-001) that occurs when single-word instructions
-    precede register-form ADD.
     """
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x400
@@ -647,7 +643,6 @@ async def test_trapv_overflow_via_add_negative(dut):
     program = [
         *moveq(0, 1),
         # D2 = 0x80000000 (most negative), D3 = -1 (0xFFFFFFFF)
-        # Use multi-word MOVE.L for both to avoid prefetch pipeline hazard
         *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
         *imm_long(0x80000000),
         *move(LONG, SPECIAL, IMMEDIATE, DN, 3),

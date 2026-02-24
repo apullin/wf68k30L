@@ -43,11 +43,10 @@ from m68k_encode import (
 def _arithmetic_program(h):
     """Return a program that computes 10+5+3=18 and stores to RESULT_BASE.
 
-    Uses the BUG-001 workaround: pre-load A0 with RESULT_BASE via
-    MOVEA.L and store via (A0) instead of absolute long addressing.
+    Uses register-indirect result stores for a stable bus-cycle pattern.
     """
     return [
-        # Load result address into A0 (workaround for BUG-001)
+        # Load result address into A0.
         *movea(LONG, SPECIAL, IMMEDIATE, 0),      # MOVEA.L #RESULT_BASE,A0
         *imm_long(h.RESULT_BASE),
         # Arithmetic: D0 = 10, D1 = 5, D2 = 3

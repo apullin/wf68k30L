@@ -15,7 +15,7 @@ Divide (DIVS/DIVU):
   - X is not affected
   - Division by zero is NOT tested here (exception test for Phase 5)
 
-Each test uses the pipeline hazard workaround:
+Each test uses a consistent result-store pattern:
   - Load RESULT_BASE into A0 early
   - Store results via MOVE.L Dn,(A0) (single-word, no extension words)
   - Advance A0 with ADDQ.L #4,A0

@@ -9,7 +9,7 @@ Tests: ASL, ASR, LSL, LSR, ROL, ROR, ROXL, ROXR with:
   - X/C flag behavior from last bit shifted out
   - Byte, word, and long operand sizes
 
-Prefetch pipeline hazard workaround applied in every test:
+A consistent result-store pattern is applied in every test:
   - MOVEA.L #RESULT_BASE, A0 early
   - MOVE.L Dn, (A0) for stores
   - ADDQ.L #4, A0 to advance

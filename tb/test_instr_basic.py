@@ -345,3 +345,81 @@ async def test_prefetch_after_two_single_word_ops(dut):
     assert result == 1, f"Expected RESULT_BASE=1, got 0x{result:08X}"
 
     h.cleanup()
+
+
+@cocotb.test()
+async def test_prefetch_single_word_prefix_sweep(dut):
+    """BUG-001 closure regression: sweep longer single-word prefixes."""
+    # All of these are single-word register operations.
+    prefix_ops = [
+        moveq(2, 1),
+        swap(1),
+        moveq(3, 2),
+        clr(LONG, DN, 2),
+        moveq(4, 3),
+        not_op(LONG, DN, 3),
+        moveq(5, 4),
+        neg(LONG, DN, 4),
+    ]
+
+    for extra_words in range(1, len(prefix_ops) + 1):
+        h = CPUTestHarness(dut)
+        prefix_words = 1 + extra_words  # initial D0 load + selected single-word ops
+
+        program = [
+            *moveq(0x11, 0),                              # D0 payload value
+        ]
+        for op_words in prefix_ops[:extra_words]:
+            program += [*op_words]
+        program += [
+            *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),  # 3-word target op
+            *h.sentinel_program(),
+        ]
+
+        await h.setup(program)
+
+        fetched_prog = []
+        prev_as_n = 1
+        for _ in range(1200):
+            await RisingEdge(dut.CLK)
+            try:
+                as_n = int(dut.ASn.value)
+                rw_n = int(dut.RWn.value)
+                if prev_as_n == 1 and as_n == 0 and rw_n == 1:
+                    addr = int(dut.ADR_OUT.value)
+                    if 0x000100 <= addr < 0x000200:
+                        fetched_prog.append(addr)
+                prev_as_n = as_n
+            except ValueError:
+                pass
+
+        found = await h.run_until_sentinel(max_cycles=5000)
+        assert found, f"Sentinel not reached (prefix_words={prefix_words})"
+
+        opcode_addr = 0x000100 + (2 * prefix_words)
+        ext_high = opcode_addr + 2
+        ext_low = opcode_addr + 4
+
+        assert opcode_addr in fetched_prog, (
+            f"Missing opcode fetch at 0x{opcode_addr:06X} (prefix_words={prefix_words})"
+        )
+        assert ext_high in fetched_prog, (
+            f"Missing extension-high fetch at 0x{ext_high:06X} (prefix_words={prefix_words})"
+        )
+        assert ext_low in fetched_prog, (
+            f"Missing extension-low fetch at 0x{ext_low:06X} (prefix_words={prefix_words})"
+        )
+
+        for i in range(len(fetched_prog) - 1):
+            if fetched_prog[i] == ext_high and fetched_prog[i + 1] == ext_high:
+                raise AssertionError(
+                    f"Duplicate extension-high fetch at 0x{ext_high:06X} "
+                    f"(prefix_words={prefix_words})"
+                )
+
+        result = h.read_result_long(0)
+        assert result == 0x11, (
+            f"Expected RESULT_BASE=0x00000011, got 0x{result:08X} "
+            f"(prefix_words={prefix_words})"
+        )
+        h.cleanup()

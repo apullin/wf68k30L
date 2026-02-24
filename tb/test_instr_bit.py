@@ -13,7 +13,7 @@ Condition codes for all bit operations:
   - Z = 1 if bit was 0, Z = 0 if bit was 1
   - All other flags (X, N, V, C) are NOT affected
 
-Each test uses the pipeline hazard workaround:
+Each test uses a consistent result-store pattern:
   - Load RESULT_BASE into A0 early
   - Store results via MOVE.L Dn,(A0) (single-word, no extension words)
   - Advance A0 with ADDQ.L #4,A0
