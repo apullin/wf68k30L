@@ -68,8 +68,17 @@ class BusModel:
             return 4  # Fallback
 
     async def _responder(self):
-        """Main bus responder loop -- runs as a cocotb coroutine."""
+        """Main bus responder loop -- runs as a cocotb coroutine.
+
+        Implements proper bus cycle tracking: once a bus cycle is detected
+        (ASn goes low), the responder handles it completely (including wait
+        states and DSACKn assertion), then waits for ASn to go high before
+        accepting a new bus cycle. This prevents double-responding to the
+        same bus cycle when wait states cause the response to extend beyond
+        the S4/S5 bus phases where ASn is still asserted.
+        """
         while self._running:
+            # Wait for bus cycle start: ASn goes low
             await RisingEdge(self.dut.CLK)
 
             try:
@@ -80,7 +89,7 @@ class BusModel:
                 continue
 
             if as_n == 0:
-                # Bus cycle active
+                # Bus cycle active -- handle it completely
                 try:
                     rw_n = int(self.dut.RWn.value)
                 except ValueError:
@@ -101,19 +110,12 @@ class BusModel:
                 if rw_n == 1:
                     # READ cycle: drive DATA_IN with data from memory
                     data = self.memory.read(addr, num_bytes)
-                    # For a 32-bit port, data must be placed at the byte
-                    # lane corresponding to the address alignment.  The
-                    # MC68030 bus interface expects bytes at their natural
-                    # position on the 32-bit data bus:
-                    #   addr[1:0]=00 -> D[31:24], 01 -> D[23:16],
-                    #   10 -> D[15:8], 11 -> D[7:0]
                     byte_lane = addr & 3
                     shift = (3 - byte_lane) * 8  # MSB-first lane mapping
                     if num_bytes == 1:
                         data = (data & 0xFF) << shift
                     elif num_bytes == 2:
                         data = (data & 0xFFFF) << (shift - 8)
-                    # Long (4 bytes): addr[1:0] is 00, data fills D[31:0]
 
                     self.dut.DATA_IN.value = data
                     self.dut.DSACKn.value = 0b00  # 32-bit port ack
@@ -125,8 +127,6 @@ class BusModel:
                     except ValueError:
                         data = 0
 
-                    # Extract written bytes from correct bus lane based
-                    # on address alignment (same lane mapping as reads).
                     byte_lane = addr & 3
                     shift = (3 - byte_lane) * 8
                     if num_bytes == 1:
@@ -139,6 +139,21 @@ class BusModel:
                         self.memory.write(addr, 4, data)
 
                     self.dut.DSACKn.value = 0b00  # 32-bit port ack
+
+                # Wait for bus cycle to complete: ASn goes high
+                # This prevents responding to the same cycle twice when
+                # the bus master keeps ASn asserted through S4/S5.
+                while self._running:
+                    await RisingEdge(self.dut.CLK)
+                    try:
+                        as_n = int(self.dut.ASn.value)
+                    except ValueError:
+                        break
+                    if as_n == 1:
+                        break
+
+                # Deassert DSACKn after the bus cycle completes
+                self.dut.DSACKn.value = 0b11
 
             else:
                 # No bus cycle active -- deassert DSACKn

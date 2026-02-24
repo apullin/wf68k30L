@@ -4,7 +4,7 @@ Tracking bugs discovered during MC68030 compliance testing of the SV port.
 VHDL baseline results are in [VHDL_BASELINE.md](VHDL_BASELINE.md).
 
 **Test suite:** 537 tests across 12 modules (cocotb 2.0.1 + Verilator 5.044).
-All 537 pass, with 12 known bugs masked by `expect_error` markers.
+All 537 pass, with 9 known bugs masked by `expect_error` markers.
 
 ## Open Bugs
 
@@ -192,26 +192,6 @@ reads the pre-MOVE CCR value.
 
 ---
 
-### BUG-008: ADD.L Dn,Dn does not set V for negative overflow
-
-**Severity:** Medium
-**Status:** Open (expected failure in tests)
-**Found:** Phase 5 exception testing
-**Note:** Inherited from original VHDL — not a port regression.
-
-**Description:**
-Register-form ADD.L (e.g., `ADD.L D0,D1`) does not set the V (overflow) flag
-when two large negative numbers overflow to a positive result. Immediate-form
-ADDI.L correctly sets V for positive overflow.
-
-**Affected tests:** `test_exceptions.py` — `test_trapv_overflow_via_add_negative`
-marked with `expect_error`.
-
-**Files involved:**
-- `wf68k30L_alu.sv` — V flag computation for register-form ADD
-
----
-
 ### BUG-009: Divide-by-zero clobbers destination register
 
 **Severity:** Medium
@@ -220,38 +200,60 @@ marked with `expect_error`.
 
 **Description:**
 When DIVU.W or DIVS.W divides by zero, the MC68030 specification says the
-destination register should be preserved (unchanged). Instead, the core overwrites
-the destination register with 0xFFFFFFFF before dispatching the divide-by-zero
-exception.
+destination register should be preserved (unchanged). The divider wrote
+0xFFFFFFFF to QUOTIENT/REMAINDER; that was removed but the register still reads
+back as 0x00000000 instead of the original value. The writeback path in the ALU
+or control unit may still be zeroing the destination before the exception fires.
 
 **Affected tests:** `test_exceptions.py` — `test_divu_divide_by_zero_preserves_dividend`
 marked with `expect_error`.
 
 **Files involved:**
 - `wf68k30L_divider.sv` — Register writeback during divide-by-zero path
-
----
-
-### BUG-010: Bus interface fails with 2+ wait states
-
-**Severity:** Medium
-**Status:** Open (expected failures in tests)
-**Found:** Phase 6 bus protocol testing
-
-**Description:**
-The CPU produces correct results with 0 or 1 bus wait states, but fails
-(sentinel never reached) when the bus model inserts 2 or more wait states.
-The DSACKn sampling window does not properly accommodate slower slave responses.
-
-**Affected tests:** `test_bus_protocol.py` — tests for 2 and 3 wait states
-marked with `expect_error`.
-
-**Files involved:**
-- `wf68k30L_bus_interface.sv` — DSACKn sampling state machine
+- `wf68k30L_alu.sv` — Result mux / writeback gating
 
 ---
 
 ## Resolved Bugs
+
+### BUG-R005: ADD.L Dn,Dn does not set V for negative overflow (was BUG-008)
+
+**Severity:** Medium
+**Status:** Closed — not a bug
+**Found:** Phase 5 exception testing
+
+**Description:**
+The ALU V-flag computation is correct and matches the VHDL. The test was
+triggering **BUG-001** (prefetch pipeline hazard): `MOVEQ #-1,D3` (single-word)
+followed by `ADD.L D2,D3` (single-word) caused the ADD to be misdecoded entirely.
+The ALU never received an ADD operation.
+
+**Fix:** Rewrote the test to use multi-word `MOVE.L #imm` instead of `MOVEQ`,
+avoiding the prefetch hazard. Direct ALU unit tests confirm V=1 for negative
+overflow (0x80000001 + 0x80000001 = 0x00000002).
+
+---
+
+### BUG-R004: Bus interface fails with 2+ wait states (was BUG-010)
+
+**Severity:** Medium
+**Status:** Fixed
+**Found:** Phase 6 bus protocol testing
+
+**Description:**
+The RTL bus interface is correct and matches the VHDL. The bug was in the
+cocotb **bus model** (`bus_model.py`): after responding to a bus cycle, the model
+checked `ASn` on the next rising edge and saw it still low (ASn stays asserted
+through S4 per MC68030 protocol). This caused the model to respond to the same
+cycle a second time, overwriting correct data with stale values.
+
+With 0-1 wait states the second response was fast enough that data hadn't changed,
+masking the bug. With 2+ wait states the delay caused data corruption.
+
+**Fix:** Added bus cycle boundary tracking: after driving DSACKn, the model waits
+for ASn to deassert before accepting a new cycle.
+
+---
 
 ### BUG-R003: Indexed addressing mode ignores index register
 

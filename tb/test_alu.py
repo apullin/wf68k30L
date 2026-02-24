@@ -368,3 +368,50 @@ async def test_clr(dut):
     assert flags["V"] == 0, "V should be 0"
     assert flags["C"] == 0, "C should be 0"
     dut._log.info("PASS: CLR")
+
+
+@cocotb.test()
+async def test_add_negative_overflow(dut):
+    """ADD: 0x80000001 + 0x80000001 = 0x00000002 -- negative overflow, V=1."""
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    init_signals(dut)
+    await RisingEdge(dut.CLK)
+    await do_reset(dut)
+
+    # Both operands are negative (MSB=1), result wraps to positive (MSB=0)
+    # SM=1, DM=1, RM=0 -> V should be 1
+    result, status = await alu_op(dut, ADD, LONG, 0x80000001, 0x80000001)
+    flags = get_flags(status)
+
+    dut._log.info(f"ADD 0x80000001+0x80000001: result=0x{result:08X}, flags={flags}")
+    assert result == 0x00000002, f"Expected 0x00000002, got 0x{result:08X}"
+    assert flags["V"] == 1, f"V should be 1 (negative overflow), got {flags['V']}"
+    assert flags["N"] == 0, f"N should be 0 (result positive), got {flags['N']}"
+    assert flags["C"] == 1, f"C should be 1 (unsigned carry), got {flags['C']}"
+    assert flags["X"] == 1, f"X should be 1 (same as C), got {flags['X']}"
+    dut._log.info("PASS: ADD negative overflow V=1")
+
+
+@cocotb.test()
+async def test_add_negative_overflow_exact(dut):
+    """ADD: 0x80000000 + 0xFFFFFFFF = 0x7FFFFFFF -- negative overflow, V=1.
+    
+    Reproduces the exact values from the TRAPV test.
+    """
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    init_signals(dut)
+    await RisingEdge(dut.CLK)
+    await do_reset(dut)
+
+    # OP1=source=0x80000000, OP2=dest=0xFFFFFFFF
+    result, status = await alu_op(dut, ADD, LONG, 0x80000000, 0xFFFFFFFF)
+    flags = get_flags(status)
+
+    dut._log.info(f"ADD 0xFFFFFFFF+0x80000000: result=0x{result:08X}, flags={flags}")
+    assert result == 0x7FFFFFFF, f"Expected 0x7FFFFFFF, got 0x{result:08X}"
+    assert flags["V"] == 1, f"V should be 1 (negative overflow), got {flags['V']}"
+    assert flags["N"] == 0, f"N should be 0 (result positive), got {flags['N']}"
+    assert flags["C"] == 1, f"C should be 1 (unsigned carry), got {flags['C']}"
+    dut._log.info("PASS: ADD negative overflow (exact test values) V=1")

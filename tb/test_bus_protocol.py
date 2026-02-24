@@ -116,17 +116,9 @@ async def test_one_wait_state(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_two_wait_states(dut):
-    """Run same arithmetic program with 2 wait states -- results must match.
-
-    KNOWN ISSUE: With 2+ wait states, the bus model's DSACKn timing causes
-    the CPU to produce incorrect results. The bus responder correctly
-    delays DSACKn assertion, but the core's bus interface does not properly
-    latch data when DSACKn is delayed by 2+ cycles. This appears to be a
-    core bus interface timing bug (BUG-002) where the data sampling window
-    does not extend to accommodate slower slave responses.
-    """
+    """Run same arithmetic program with 2 wait states -- results must match."""
     h = CPUTestHarness(dut, wait_states=2)
     program = _arithmetic_program(h)
     await h.setup(program)
@@ -144,15 +136,9 @@ async def test_two_wait_states(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_three_wait_states(dut):
-    """Run same arithmetic program with 3 wait states -- results must match.
-
-    KNOWN ISSUE: Same as test_two_wait_states -- with 3 wait states the
-    core bus interface fails to correctly complete bus cycles (BUG-002).
-    The sentinel is never reached because the CPU hangs or produces
-    incorrect instruction fetches when DSACKn is delayed 3 cycles.
-    """
+    """Run same arithmetic program with 3 wait states -- results must match."""
     h = CPUTestHarness(dut, wait_states=3)
     program = _arithmetic_program(h)
     await h.setup(program)

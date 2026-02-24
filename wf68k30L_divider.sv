@@ -4,6 +4,9 @@
 // -- Author(s): Wolfgang Foerster, wf@experiment-s.de                   --
 // -- Copyright (c) 2014-2019 Wolfgang Foerster Inventronik GmbH.        --
 // -- CERN OHL v. 1.2                                                    --
+// --                                                                    --
+// -- BUG-009 fix: On divide-by-zero, preserve QUOTIENT/REMAINDER        --
+// -- unchanged per MC68030 spec (trap handler signals the exception).   --
 // ------------------------------------------------------------------------
 
 module WF68K30L_DIVIDER (
@@ -73,11 +76,9 @@ always_ff @(posedge CLK) begin : division
                 DIVISOR = {16'h0, OP1[15:0]}; // 16-bit positive or unsigned divisor
 
             VFLAG_DIV <= 1'b0;
-            QUOTIENT <= 32'h0;
             QUOTIENT_VAR = 32'h0;
             QUOTIENT_REST = OP2;
 
-            REMAINDER <= 32'h0;
             REMAINDER_VAR = 32'h0;
 
             case (OP_SIZE)
@@ -91,22 +92,26 @@ always_ff @(posedge CLK) begin : division
                 BITCNT = 7'd32;
 
             if (DIVISOR == 32'h0) begin
-                // Division by zero
-                QUOTIENT <= 32'hFFFFFFFF;
-                REMAINDER <= 32'hFFFFFFFF;
+                // Division by zero -- BUG-009 fix: do NOT clobber QUOTIENT/REMAINDER.
+                // MC68030 spec: destination register preserved on divide-by-zero.
+                // TRAP_DIVZERO (in the ALU) signals the exception to the CPU.
                 DIV_STATE <= DIV_IDLE;
                 DIV_RDY <= 1'b1;
             end else if ({32'h0, DIVISOR} > DIVIDEND) begin
-                // Divisor > dividend
+                // Divisor > dividend: quotient=0, remainder=dividend
+                QUOTIENT <= 32'h0;
                 REMAINDER <= DIVIDEND[31:0];
                 DIV_STATE <= DIV_IDLE;
                 DIV_RDY <= 1'b1;
             end else if ({32'h0, DIVISOR} == DIVIDEND) begin
                 // Result is 1
                 QUOTIENT <= 32'h1;
+                REMAINDER <= 32'h0;
                 DIV_STATE <= DIV_IDLE;
                 DIV_RDY <= 1'b1;
             end else begin
+                QUOTIENT <= 32'h0;
+                REMAINDER <= 32'h0;
                 DIV_STATE <= DIV_CALC;
             end
         end
