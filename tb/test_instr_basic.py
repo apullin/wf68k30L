@@ -296,3 +296,52 @@ async def test_move_between_regs(dut):
     assert result == 77, f"Expected D3=77, got 0x{result:08X}"
     dut._log.info(f"MOVE.L D0,D3 -> D3 = {result} (correct)")
     h.cleanup()
+
+
+@cocotb.test()
+async def test_prefetch_after_two_single_word_ops(dut):
+    """BUG-001 regression: two single-word ops before a 3-word instruction."""
+    h = CPUTestHarness(dut)
+
+    program = [
+        *moveq(1, 0),                                     # 0x100: single-word
+        *moveq(2, 1),                                     # 0x102: single-word
+        *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),   # 0x104: 3-word
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+
+    fetched_prog = []
+    prev_as_n = 1
+    for _ in range(700):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            if prev_as_n == 1 and as_n == 0 and rw_n == 1:
+                addr = int(dut.ADR_OUT.value)
+                if 0x000100 <= addr < 0x000200:
+                    fetched_prog.append(addr)
+            prev_as_n = as_n
+        except ValueError:
+            pass
+
+    found = await h.run_until_sentinel(max_cycles=4000)
+    assert found, "Sentinel not reached; likely prefetch/decode mis-sequencing"
+
+    # Program fetches should include opcode and both extension words of the
+    # absolute-long destination: 0x104 (opcode), 0x106 (high), 0x108 (low).
+    assert 0x000104 in fetched_prog, "Did not fetch MOVE.L opcode at 0x000104"
+    assert 0x000106 in fetched_prog, "Did not fetch ext-word high at 0x000106"
+    assert 0x000108 in fetched_prog, "Did not fetch ext-word low at 0x000108"
+
+    for i in range(len(fetched_prog) - 1):
+        if fetched_prog[i] == 0x000106 and fetched_prog[i + 1] == 0x000106:
+            raise AssertionError(
+                "Duplicate fetch at 0x000106 detected (BUG-001 prefetch hazard)"
+            )
+
+    result = h.read_result_long(0)
+    assert result == 1, f"Expected RESULT_BASE=1, got 0x{result:08X}"
+
+    h.cleanup()

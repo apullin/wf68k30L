@@ -155,6 +155,7 @@ TRAPTYPE_OPC TRAP_CODE_I;
 logic        FLUSHED;
 logic        PC_INC_I;
 logic        PIPE_RDY;
+logic        OPCODE_ACCEPT;
 logic [6:0]  ADR_OFFSET_S;
 logic [6:0]  PC_VAR_S;
 logic [6:0]  PC_VAR_MEM_S;
@@ -456,6 +457,10 @@ end
 
 assign OW_REQ = BUSY_EXH ? 1'b0 : OW_REQ_MAIN;
 assign EW_REQ = EW_REQ_MAIN;
+// A returned opcode word only advances the prefetch address if it is actually
+// consumed into the instruction pipe. When the pipe is full and no word is
+// being consumed (OW_REQ/EW_REQ low), an in-flight response is dropped.
+assign OPCODE_ACCEPT = OPCODE_RDY_I && ((IPIPE_PNTR < 2'd3) || OW_REQ || EW_REQ);
 
 assign PIPE_RDY = (OW_REQ && IPIPE_PNTR == 2'd3 && INSTR_LVL == LVL_B) ||
                   (OW_REQ && IPIPE_PNTR > 2'd1 && INSTR_LVL == LVL_C) ||
@@ -498,9 +503,9 @@ always_ff @(posedge CLK) begin : pc_offset
 
     if (IPIPE_FLUSH) begin
         ADR_OFFSET = 7'd0;
-    end else if (PC_INC_I && OPCODE_RDY_I) begin
+    end else if (PC_INC_I && OPCODE_ACCEPT) begin
         ADR_OFFSET = ADR_OFFSET + 7'd1 - PC_VAR;
-    end else if (OPCODE_RDY_I) begin
+    end else if (OPCODE_ACCEPT) begin
         ADR_OFFSET = ADR_OFFSET + 7'd1;
     end else if (PC_INC_I) begin
         ADR_OFFSET = ADR_OFFSET - PC_VAR;
@@ -551,6 +556,7 @@ end
 // updates on the following clock edge.
 always_comb begin : pc_offset_comb
     reg [6:0] adr_offset_fwd;
+    reg [6:0] adr_offset_bus;
     if (BUSY_EXH && PC_INC_I) begin
         PC_OFFSET = {PC_VAR_MEM_S, 1'b0};
     end else if (OP == DBcc && LOOP_BSY_I && !LOOP_EXIT) begin
@@ -566,13 +572,23 @@ always_comb begin : pc_offset_comb
     adr_offset_fwd = ADR_OFFSET_S;
     if (IPIPE_FLUSH)
         adr_offset_fwd = 7'd0;
-    else if (PC_INC_I && OPCODE_RDY_I)
+    else if (PC_INC_I && OPCODE_ACCEPT)
         adr_offset_fwd = ADR_OFFSET_S + 7'd1 - PC_VAR_S;
-    else if (OPCODE_RDY_I)
+    else if (OPCODE_ACCEPT)
         adr_offset_fwd = ADR_OFFSET_S + 7'd1;
     else if (PC_INC_I)
         adr_offset_fwd = ADR_OFFSET_S - PC_VAR_S;
-    PC_ADR_OFFSET = {adr_offset_fwd, 1'b0};
+
+    // PC updates on the same edge that can launch the next opcode fetch.
+    // Compensate for that pending PC increment so the fetch address remains
+    // sequential when requests are back-to-back.
+    adr_offset_bus = adr_offset_fwd;
+    // Do not apply this compensation on flush cycles (taken branches/jumps),
+    // where the fetch pipeline is being restarted from a new PC.
+    if (PC_INC_I && !IPIPE_FLUSH)
+        adr_offset_bus = adr_offset_fwd + PC_VAR_S;
+
+    PC_ADR_OFFSET = {adr_offset_bus, 1'b0};
 end
 
 // P_FLUSH
