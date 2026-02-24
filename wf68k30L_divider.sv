@@ -5,8 +5,8 @@
 // -- Copyright (c) 2014-2019 Wolfgang Foerster Inventronik GmbH.        --
 // -- CERN OHL v. 1.2                                                    --
 // --                                                                    --
-// -- BUG-009 fix: On divide-by-zero, preserve QUOTIENT/REMAINDER        --
-// -- unchanged per MC68030 spec (trap handler signals the exception).   --
+// -- BUG-009 fix: On divide-by-zero, drive restored destination values   --
+// -- on QUOTIENT/REMAINDER so architectural Dn is preserved.             --
 // ------------------------------------------------------------------------
 
 module WF68K30L_DIVIDER (
@@ -92,9 +92,11 @@ always_ff @(posedge CLK) begin : division
                 BITCNT = 7'd32;
 
             if (DIVISOR == 32'h0) begin
-                // Division by zero -- BUG-009 fix: do NOT clobber QUOTIENT/REMAINDER.
-                // MC68030 spec: destination register preserved on divide-by-zero.
-                // TRAP_DIVZERO (in the ALU) signals the exception to the CPU.
+                // Division by zero: present the unmodified destination value on the
+                // divider outputs so downstream writeback paths preserve Dn.
+                // The exception itself is still signaled by TRAP_DIVZERO in the ALU.
+                QUOTIENT <= QUOTIENT_REST;
+                REMAINDER <= REMAINDER_REST;
                 DIV_STATE <= DIV_IDLE;
                 DIV_RDY <= 1'b1;
             end else if ({32'h0, DIVISOR} > DIVIDEND) begin

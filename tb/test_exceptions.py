@@ -488,14 +488,9 @@ async def test_divs_divide_by_zero(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divu_divide_by_zero_preserves_dividend(dut):
-    """DIVU.W #0: dividend register should be unchanged after exception.
-
-    CORE BUG: The WF68K30L divider clobbers the destination register to
-    0xFFFFFFFF on divide-by-zero instead of preserving it as per the
-    MC68030 specification. Marked expect_error.
-    """
+    """DIVU.W #0: dividend register should be unchanged after exception."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x300
     vector_addr = 5 * 4
@@ -526,6 +521,43 @@ async def test_divu_divide_by_zero_preserves_dividend(dut):
     d2_val = h.read_result_long(0)
     assert d2_val == 0x12345678, (
         f"DIVU #0 should preserve dividend: expected 0x12345678, got 0x{d2_val:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_divs_divide_by_zero_preserves_dividend(dut):
+    """DIVS.W #0: dividend register should be unchanged after exception."""
+    h = CPUTestHarness(dut)
+    handler_addr = HANDLER_BASE + 0x300
+    vector_addr = 5 * 4
+
+    handler_code = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *move(LONG, DN, 2, AN_IND, 0),        # store D2 (the dividend register)
+        *addq(LONG, 4, AN, 0),
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(0x87654321),                 # D2 = 0x87654321
+        *divs_w(SPECIAL, IMMEDIATE, 2),        # DIVS.W #0,D2
+        *imm_word(0),
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+    d2_val = h.read_result_long(0)
+    assert d2_val == 0x87654321, (
+        f"DIVS #0 should preserve dividend: expected 0x87654321, got 0x{d2_val:08X}"
     )
     h.cleanup()
 
