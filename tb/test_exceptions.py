@@ -677,16 +677,9 @@ async def test_trapv_no_overflow_after_clear(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_trapv_v_set_via_ccr(dut):
-    """TRAPV with V=1 set explicitly via MOVE to CCR: trap occurs.
-
-    CORE BUG: TRAPV does not see the V flag when set via MOVE to CCR.
-    The V flag set by ADDI works (see test_trapv_with_overflow), but
-    setting V via MOVE to CCR then executing TRAPV does not trigger the
-    trap. This may be a pipeline forwarding issue where TRAPV reads V
-    from the ALU result rather than the committed CCR. Marked expect_error.
-    """
+    """TRAPV with V=1 set explicitly via MOVE to CCR: trap occurs."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x400
     trapv_vector_addr = 7 * 4
