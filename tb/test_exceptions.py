@@ -914,19 +914,11 @@ async def test_trap_5_vector_offset(dut):
 
 # =========================================================================
 # CHK exception tests (vector 6) - out of range
-#
-# CORE BUG: CHK exceptions do not fire in WF68K30L. The CHK instruction
-# executes but does not generate the expected exception for negative values
-# or values above the upper bound. These tests are marked expect_error.
 # =========================================================================
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_chk_w_negative_traps(dut):
-    """CHK.W with negative value: triggers CHK exception (vector 6).
-
-    CORE BUG: CHK does not generate exceptions in WF68K30L. The instruction
-    completes without trapping even when Dn < 0. Marked expect_error.
-    """
+    """CHK.W with negative value: triggers CHK exception (vector 6)."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x600
     vector_addr = 6 * 4  # 0x018
@@ -953,13 +945,9 @@ async def test_chk_w_negative_traps(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_chk_w_above_upper_traps(dut):
-    """CHK.W with value > upper bound: triggers CHK exception (vector 6).
-
-    CORE BUG: CHK does not generate exceptions in WF68K30L. The instruction
-    completes without trapping even when Dn > upper. Marked expect_error.
-    """
+    """CHK.W with value > upper bound: triggers CHK exception (vector 6)."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x600
     vector_addr = 6 * 4

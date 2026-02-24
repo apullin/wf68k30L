@@ -367,10 +367,13 @@ always_comb begin : alu_op2_mux
     // CAS/CAS2 destination operand.
     else if (OP == CAS || OP == CAS2)
         ALU_OP2_IN = DATA_TO_CORE;
-    // CHK bounds check.
+    // CHK uses Dn as the tested operand.
+    else if (OP == CHK)
+        ALU_OP2_IN = DR_OUT_2;
+    // CHK2/CMP2 can test either Dn or An.
     else if ((OP == CHK2 || OP == CMP2) && USE_DREG)
         ALU_OP2_IN = DR_OUT_2;
-    else if (OP == CHK || OP == CHK2 || OP == CMP2)
+    else if (OP == CHK2 || OP == CMP2)
         ALU_OP2_IN = AR_OUT_2;
     else if (OP == CMPM)
         ALU_OP2_IN = DATA_TO_CORE;
