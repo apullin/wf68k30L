@@ -1,0 +1,67 @@
+# Cocotb + GHDL testbench Makefile for WF68K30L (original VHDL sources)
+#
+# Usage:
+#   make -f Makefile.ghdl TEST_MODULE=test_instr_arithmetic
+#   make -f Makefile.ghdl TEST_MODULE=test_instr_arithmetic TESTCASE=test_moveq_basic
+#
+# This runs the same cocotb tests against the ORIGINAL VHDL via GHDL,
+# allowing comparison with the SystemVerilog port (Verilator).
+
+SIM = ghdl
+TOPLEVEL_LANG = vhdl
+
+GHDL_BIN_DIR = /opt/homebrew/bin
+CMD = $(GHDL_BIN_DIR)/ghdl
+
+SRC_DIR = $(shell cd .. && pwd)
+
+# VHDL sources -- package first, configuration last
+VHDL_SOURCES = \
+    $(SRC_DIR)/wf68k30L_pkg.vhd \
+    $(SRC_DIR)/wf68k30L_address_registers.vhd \
+    $(SRC_DIR)/wf68k30L_alu.vhd \
+    $(SRC_DIR)/wf68k30L_bus_interface.vhd \
+    $(SRC_DIR)/wf68k30L_control.vhd \
+    $(SRC_DIR)/wf68k30L_data_registers.vhd \
+    $(SRC_DIR)/wf68k30L_exception_handler.vhd \
+    $(SRC_DIR)/wf68k30L_opcode_decoder.vhd \
+    $(SRC_DIR)/wf68k30L_top.vhd \
+    $(SRC_DIR)/wf68k30L_top_cfg.vhd
+
+# cocotb sees the entity name; GHDL elaborates the configuration
+TOPLEVEL = wf68k30l_top
+GHDL_UNIT = wf68k30l_top_cfg
+
+MODULE = $(TEST_MODULE)
+TEST_MODULE ?= test_instr_arithmetic
+
+GHDL_FLAGS = --std=93 --ieee=synopsys -fexplicit
+SIM_BUILD = sim_build_ghdl
+
+COCOTB_VPI = $(shell python3 -c "import cocotb; import os; print(os.path.join(os.path.dirname(cocotb.__file__), 'libs', 'libcocotbvpi_ghdl.so'))")
+
+.PHONY: sim clean
+
+sim: | $(SIM_BUILD)
+	@# Analyze all VHDL sources
+	$(CMD) -a $(GHDL_FLAGS) --workdir=$(SIM_BUILD) --work=work $(VHDL_SOURCES)
+	@# Elaborate the configuration (binds all components to entities)
+	$(CMD) -e $(GHDL_FLAGS) --workdir=$(SIM_BUILD) --work=work $(GHDL_UNIT)
+	@# Run with cocotb VPI -- COCOTB_TOPLEVEL is the entity name for handle lookup
+	rm -f results.xml
+	COCOTB_TEST_MODULES=$(MODULE) \
+	COCOTB_TEST_FILTER=$(if $(TESTCASE),$(TESTCASE)$$,) \
+	COCOTB_TOPLEVEL=$(TOPLEVEL) \
+	TOPLEVEL_LANG=$(TOPLEVEL_LANG) \
+	LIBPYTHON_LOC=$(shell python3 -c "import sysconfig,os; print(os.path.join(sysconfig.get_config_var('LIBDIR'), 'libpython3.12.dylib'))") \
+	PYGPI_PYTHON_BIN=$(shell which python3) \
+	$(CMD) -r $(GHDL_FLAGS) --workdir=$(SIM_BUILD) --work=work $(GHDL_UNIT) \
+	    --vpi=$(COCOTB_VPI) --ieee-asserts=disable
+	@# Check results
+	python3 -m cocotb_tools.check_results results.xml
+
+$(SIM_BUILD):
+	mkdir -p $(SIM_BUILD)
+
+clean:
+	rm -rf $(SIM_BUILD) results.xml
