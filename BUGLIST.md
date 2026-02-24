@@ -52,29 +52,32 @@ Use register-indirect addressing instead of absolute long for store operations:
 
 ---
 
-### BUG-002: Yosys ABC9 combinational loop assertion
+## Resolved Bugs
+
+### BUG-R012: Yosys ABC9 combinational loop assertion (was BUG-002)
 
 **Severity:** Low (tooling)
-**Status:** Open (workaround)
+**Status:** Resolved by Yosys PR #5704 (open)
 **Found:** Synthesis validation
 
 **Description:**
-Running `yosys synth_ecp5` with ABC9 optimization fails with:
+The prior ABC9 crash:
 ```
-Assert `no_loops' failed in `abc9_ops.exe'
+Assert `no_loops' failed in passes/techmap/abc9_ops.cc:795.
 ```
+is no longer reproducible with the updated local Yosys build.
 
-**Workaround:**
-Use `-noabc9` flag: `synth_ecp5 -noabc9 -top WF68K30L_TOP`
+**Validation:**
+- Minimized repro (`abc9_bug/minimized/files_min.txt`) completes with
+  `repro=False`, `retcode=0`.
+- Full in-situ design repro (`abc9_bug/files_full.txt`) completes with
+  `repro=False`, `retcode=0`.
+- Legacy failing logs are retained in `abc9_bug/runs/` for comparison.
 
-Synthesis completes successfully without ABC9. This is likely a Yosys issue with
-the combinational logic structure rather than an actual hardware loop.
-
-**Impact:** None on functionality. May miss some optimization opportunities.
+**Impact:** None on functionality. ABC9 flow is now usable on this design with the
+updated Yosys binary.
 
 ---
-
-## Resolved Bugs
 
 ### BUG-R011: MOVEM word mode and pre-decrement reliability (was BUG-004)
 
