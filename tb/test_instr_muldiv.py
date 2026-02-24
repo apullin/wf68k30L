@@ -618,12 +618,9 @@ async def test_muls_neg_times_pos(dut):
 # DIVU.W tests
 # =========================================================================
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divu_100_div_10(dut):
-    """DIVU.W #10,D0: 100 / 10 = quotient 10, remainder 0.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVU.W #10,D0: 100 / 10 = quotient 10, remainder 0."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -652,12 +649,9 @@ async def test_divu_100_div_10(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divu_7_div_2(dut):
-    """DIVU.W #2,D0: 7 / 2 = quotient 3, remainder 1.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVU.W #2,D0: 7 / 2 = quotient 3, remainder 1."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -686,12 +680,9 @@ async def test_divu_7_div_2(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divu_large_dividend(dut):
-    """DIVU.W #0x1000,D0: 0x00020000 / 0x1000 = quotient 0x20, remainder 0.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVU.W #0x1000,D0: 0x00020000 / 0x1000 = quotient 0x20, remainder 0."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -814,12 +805,9 @@ async def test_divu_small_by_large(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divu_reg_operand(dut):
-    """DIVU.W D1,D0: register operand, 255 / 16 = 15 remainder 15.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVU.W D1,D0: register operand, 255 / 16 = 15 remainder 15."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -849,14 +837,11 @@ async def test_divu_reg_operand(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divu_overflow(dut):
     """DIVU.W #1,D0: 0x00010000 / 1 = 0x10000 -> overflow (quotient > 0xFFFF), V=1.
 
-    On overflow, the destination register is unchanged.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    On overflow, the destination register is unchanged."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -917,12 +902,9 @@ async def test_divu_overflow_large(dut):
 # DIVS.W tests
 # =========================================================================
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divs_neg100_div_10(dut):
-    """DIVS.W #10,D0: -100 / 10 = quotient -10, remainder 0.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVS.W #10,D0: -100 / 10 = quotient -10, remainder 0."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -954,14 +936,11 @@ async def test_divs_neg100_div_10(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divs_neg7_div_2(dut):
     """DIVS.W #2,D0: -7 / 2 = quotient -3, remainder -1.
 
-    MC68030 truncates toward zero: -7/2 = -3 remainder -1.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    MC68030 truncates toward zero: -7/2 = -3 remainder -1."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -993,12 +972,9 @@ async def test_divs_neg7_div_2(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divs_pos_div_neg(dut):
-    """DIVS.W #-5,D0: 100 / -5 = quotient -20, remainder 0.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVS.W #-5,D0: 100 / -5 = quotient -20, remainder 0."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -1027,12 +1003,9 @@ async def test_divs_pos_div_neg(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divs_neg_div_neg(dut):
-    """DIVS.W #-3,D0: -21 / -3 = quotient 7, remainder 0.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVS.W #-3,D0: -21 / -3 = quotient 7, remainder 0."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -1093,12 +1066,9 @@ async def test_divs_zero_dividend(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divs_pos_simple(dut):
-    """DIVS.W D1,D0: 50 / 7 = quotient 7, remainder 1.
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVS.W D1,D0: 50 / 7 = quotient 7, remainder 1."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -1127,12 +1097,9 @@ async def test_divs_pos_simple(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divs_overflow(dut):
-    """DIVS.W #1,D0: 0x00008000 / 1 = 32768 -> overflow for signed (> 0x7FFF).
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVS.W #1,D0: 0x00008000 / 1 = 32768 -> overflow for signed (> 0x7FFF)."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
@@ -1160,12 +1127,9 @@ async def test_divs_overflow(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divs_neg_overflow(dut):
-    """DIVS.W #-1,D0: -32769 / -1 = 32769 -> overflow (> 0x7FFF).
-
-    KNOWN BUG: SV divider iterative path produces incorrect results.
-    """
+    """DIVS.W #-1,D0: -32769 / -1 = 32769 -> overflow (> 0x7FFF)."""
     h = CPUTestHarness(dut)
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),

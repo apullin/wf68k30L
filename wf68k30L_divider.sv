@@ -47,6 +47,13 @@ always_ff @(posedge CLK) begin : division
     logic [31:0] QUOTIENT_VAR;
     logic [31:0] REMAINDER_REST;
     logic [31:0] REMAINDER_VAR;
+    logic        DIV_IS_SIGNED;
+    logic        DIV_QUOT_NEG;
+    logic        DIV_REM_NEG;
+    logic        DIV_WORD_MODE;
+    logic        DIV_OVERFLOW;
+    logic [31:0] QUOTIENT_FINAL;
+    logic [31:0] REMAINDER_FINAL;
 
     DIV_RDY <= 1'b0;
     case (DIV_STATE)
@@ -86,6 +93,16 @@ always_ff @(posedge CLK) begin : division
                 default: REMAINDER_REST = {16'h0, OP2[31:16]};
             endcase
 
+            DIV_IS_SIGNED = (OP == DIVS);
+            DIV_WORD_MODE = (OP_SIZE == WORD);
+            if (OP_SIZE == WORD) begin
+                DIV_QUOT_NEG = (OP == DIVS) && (OP2[31] ^ OP1[15]);
+                DIV_REM_NEG = (OP == DIVS) && OP2[31];
+            end else begin
+                DIV_QUOT_NEG = (OP == DIVS) && ((BIW_1[10] ? OP3[31] : OP2[31]) ^ OP1[31]);
+                DIV_REM_NEG = (OP == DIVS) && (BIW_1[10] ? OP3[31] : OP2[31]);
+            end
+
             if (OP_SIZE == LONG && BIW_1[10])
                 BITCNT = 7'd64;
             else
@@ -102,12 +119,18 @@ always_ff @(posedge CLK) begin : division
             end else if ({32'h0, DIVISOR} > DIVIDEND) begin
                 // Divisor > dividend: quotient=0, remainder=dividend
                 QUOTIENT <= 32'h0;
-                REMAINDER <= DIVIDEND[31:0];
+                if (DIV_REM_NEG && DIVIDEND[31:0] != 32'h0)
+                    REMAINDER <= ~DIVIDEND[31:0] + 1'b1;
+                else
+                    REMAINDER <= DIVIDEND[31:0];
                 DIV_STATE <= DIV_IDLE;
                 DIV_RDY <= 1'b1;
             end else if ({32'h0, DIVISOR} == DIVIDEND) begin
                 // Result is 1
-                QUOTIENT <= 32'h1;
+                if (DIV_IS_SIGNED && DIV_QUOT_NEG)
+                    QUOTIENT <= 32'hFFFF_FFFF;
+                else
+                    QUOTIENT <= 32'h1;
                 REMAINDER <= 32'h0;
                 DIV_STATE <= DIV_IDLE;
                 DIV_RDY <= 1'b1;
@@ -122,14 +145,14 @@ always_ff @(posedge CLK) begin : division
 
             if ({REMAINDER_VAR, DIVIDEND[BITCNT]} < {1'b0, DIVISOR}) begin
                 REMAINDER_VAR = {REMAINDER_VAR[30:0], DIVIDEND[BITCNT]};
-            end else if (OP_SIZE == LONG && BITCNT > 31) begin
+            end else if (!DIV_IS_SIGNED && OP_SIZE == LONG && BITCNT > 31) begin
                 // Division overflow in 64-bit mode
                 VFLAG_DIV <= 1'b1;
                 DIV_STATE <= DIV_IDLE;
                 DIV_RDY <= 1'b1;
                 QUOTIENT <= QUOTIENT_REST;
                 REMAINDER <= REMAINDER_REST;
-            end else if (OP_SIZE == WORD && BITCNT > 15) begin
+            end else if (!DIV_IS_SIGNED && OP_SIZE == WORD && BITCNT > 15) begin
                 // Division overflow in word mode
                 VFLAG_DIV <= 1'b1;
                 DIV_STATE <= DIV_IDLE;
@@ -142,19 +165,47 @@ always_ff @(posedge CLK) begin : division
             end
 
             if (BITCNT == 7'd0) begin
-                // Adjust signs
-                if (OP == DIVS && OP_SIZE == LONG && BIW_1[10] && (OP3[31] ^ OP1[31]))
-                    QUOTIENT <= ~QUOTIENT_VAR + 1'b1;
-                else if (OP == DIVS && OP_SIZE == LONG && !BIW_1[10] && (OP2[31] ^ OP1[31]))
-                    QUOTIENT <= ~QUOTIENT_VAR + 1'b1;
-                else if (OP == DIVS && OP_SIZE == WORD && (OP2[31] ^ OP1[15]))
-                    QUOTIENT <= ~QUOTIENT_VAR + 1'b1;
-                else
-                    QUOTIENT <= QUOTIENT_VAR;
+                if (DIV_IS_SIGNED) begin
+                    if (DIV_WORD_MODE) begin
+                        if (DIV_QUOT_NEG)
+                            DIV_OVERFLOW = (QUOTIENT_VAR > 32'h0000_8000);
+                        else
+                            DIV_OVERFLOW = (QUOTIENT_VAR > 32'h0000_7FFF);
+                    end else begin
+                        if (DIV_QUOT_NEG)
+                            DIV_OVERFLOW = (QUOTIENT_VAR > 32'h8000_0000);
+                        else
+                            DIV_OVERFLOW = (QUOTIENT_VAR > 32'h7FFF_FFFF);
+                    end
 
-                REMAINDER <= REMAINDER_VAR;
-                DIV_RDY <= 1'b1;
-                DIV_STATE <= DIV_IDLE;
+                    if (DIV_OVERFLOW) begin
+                        VFLAG_DIV <= 1'b1;
+                        DIV_STATE <= DIV_IDLE;
+                        DIV_RDY <= 1'b1;
+                        QUOTIENT <= QUOTIENT_REST;
+                        REMAINDER <= REMAINDER_REST;
+                    end else begin
+                        if (DIV_QUOT_NEG)
+                            QUOTIENT_FINAL = ~QUOTIENT_VAR + 1'b1;
+                        else
+                            QUOTIENT_FINAL = QUOTIENT_VAR;
+
+                        if (DIV_REM_NEG && REMAINDER_VAR != 32'h0)
+                            REMAINDER_FINAL = ~REMAINDER_VAR + 1'b1;
+                        else
+                            REMAINDER_FINAL = REMAINDER_VAR;
+
+                        QUOTIENT <= QUOTIENT_FINAL;
+                        REMAINDER <= REMAINDER_FINAL;
+                        DIV_RDY <= 1'b1;
+                        DIV_STATE <= DIV_IDLE;
+                    end
+                end else begin
+                    QUOTIENT <= QUOTIENT_VAR;
+                    REMAINDER <= REMAINDER_VAR;
+                    DIV_RDY <= 1'b1;
+                    DIV_STATE <= DIV_IDLE;
+                end
             end
         end
     endcase
