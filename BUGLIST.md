@@ -3,15 +3,16 @@
 Tracking bugs discovered during MC68030 compliance testing of the SV port.
 VHDL baseline results are in [VHDL_BASELINE.md](VHDL_BASELINE.md).
 
-**Test suite:** 537 tests across 12 modules (cocotb 2.0.1 + Verilator 5.044).
-All 537 pass, with 9 known bugs masked by `expect_error` markers.
+**Test suite:** cocotb + Verilator regression (see `tb/` for current modules/tests).
+Known bugs are tracked below; unresolved behavior is covered with `expect_error`
+tests where appropriate.
 
 ## Open Bugs
 
 ### BUG-001: Prefetch pipeline hazard with multi-word instructions
 
 **Severity:** High
-**Status:** Open (workaround in tests)
+**Status:** Open (core reproduction fixed in RTL; broader refill edge cases pending)
 **Found:** Phase 1 smoke testing
 
 **Description:**
@@ -39,7 +40,10 @@ Use register-indirect addressing instead of absolute long for store operations:
     MOVE.L  D0, (A0)       ; register-indirect store (single extension word)
 ```
 
-**Affected tests:** All tests that store results to memory use the workaround pattern.
+**Affected tests:**
+- Regression added: `test_instr_basic.py::test_prefetch_after_two_single_word_ops`
+  (passes with current RTL fix).
+- Existing tests still commonly use the register-indirect workaround pattern.
 
 **Files involved:**
 - `wf68k30L_opcode_decoder.sv` — PC offset bypass logic
@@ -70,151 +74,147 @@ the combinational logic structure rather than an actual hardware loop.
 
 ---
 
-### BUG-003: Division iterative loop returns incorrect results
+## Resolved Bugs
 
-**Severity:** High
-**Status:** Open (expected failures in tests)
-**Found:** Phase 3 muldiv testing
-
-**Description:**
-The SV divider (`wf68k30L_divider.sv`) produces incorrect results when the iterative
-division loop (DIV_CALC state) executes. Fast-path cases in DIV_INIT work correctly:
-- Divisor > dividend → quotient 0 (correct)
-- Divisor == dividend → quotient 1 (correct)
-
-Non-trivial divisions (e.g., 100/10, 0x7FFF/3) return quotient=0 and remainder=0.
-
-**Root cause (suspected):**
-The QUOTIENT/REMAINDER latching from ALU results has a timing mismatch. The ALU
-result mux or OP_SIZE encoding during DIV_CALC iterations may not be propagating
-correctly through the registered pipeline.
-
-**Reproduction:**
-```asm
-    MOVE.L #100, D0     ; dividend
-    DIVU.W #10, D0      ; should give quotient=10, remainder=0
-    ; Result: D0 = 0x00000000 (incorrect)
-```
-
-**Affected tests:** 12 DIVU/DIVS tests marked with `expect_error=AssertionError` in
-`test_instr_muldiv.py`. Multiply (MULS/MULU) works correctly.
-
-**Files involved:**
-- `wf68k30L_divider.sv` — DIV_CALC state machine, QUOTIENT/REMAINDER latch
-- `wf68k30L_alu.sv` — Result mux during division
-
----
-
-### BUG-004: MOVEM word mode and pre-decrement unreliable
+### BUG-R011: MOVEM word mode and pre-decrement reliability (was BUG-004)
 
 **Severity:** Medium
-**Status:** Open (workaround in tests)
+**Status:** Closed — behavior now correct
 **Found:** Phase 3 memory instruction testing
 
 **Description:**
-MOVEM (Move Multiple Registers) has issues with:
-1. **Word mode (MOVEM.W):** Produces incorrect values when saving/restoring word-sized
-   register lists. Long mode (MOVEM.L) works correctly.
-2. **Pre-decrement mode `-(An)`:** Register values are garbled when using pre-decrement
-   addressing. Post-increment `(An)+` and indirect `(An)` work correctly.
-3. **Small register masks:** Masks with fewer than 3 registers may produce unreliable
-   results.
+The earlier MOVEM issue report is no longer reproducible on current RTL.
+Targeted regressions now verify:
+- `MOVEM.W` register-to-memory low-word storage.
+- `MOVEM.W` memory-to-register sign extension (for both Dn and An destinations).
+- `MOVEM.L` pre-decrement `-(An)` ordering and final address update.
+- Small masks (for example, two-register masks) in both normal and pre-decrement forms.
 
-**Workaround:**
-Use MOVEM.L with `(An)` or `(An)+` addressing and 3+ registers in the mask.
-
-**Affected tests:** `test_instr_memory.py` — all MOVEM tests use the workaround pattern.
-
-**Files involved:**
-- `wf68k30L_control.sv` — MOVEM state machine sequencing
-- `wf68k30L_bus_interface.sv` — Word-size bus cycle generation
+**Validation:**
+- Added/updated regressions in `tb/test_instr_memory.py`:
+  - `test_movem_to_mem_two_regs` (now direct 2-register mask)
+  - `test_movem_word_to_mem_two_regs`
+  - `test_movem_word_from_mem_sign_extend`
+  - `test_movem_predec_two_regs_order_and_final_a1`
+  - `test_movem_word_from_mem_to_aregs_sign_extend`
+  - `test_movem_predec_mixed_da_regs_order`
+- Full memory regression passes: `test_instr_memory` 47/47.
 
 ---
 
-### BUG-005: CHK exception not generated for out-of-range values
+### BUG-R010: DIVS/DIVU iterative divide produced incorrect results (was BUG-003)
+
+**Severity:** High
+**Status:** Fixed
+**Found:** Phase 3 muldiv testing
+
+**Description:**
+The original issue appeared as broad iterative divide failure. After prefetch sequencing
+fixes, remaining defects were in signed divide semantics:
+- `DIVS` remainder kept absolute magnitude instead of using the dividend sign.
+- `DIVS.W` overflow used unsigned thresholds, missing `+32768` and `-32769` cases.
+- Fast paths (`|divisor| > |dividend|` and `|divisor| == |dividend|`) did not apply
+  signed result sign rules.
+
+This now matches MC68030 behavior: quotient truncates toward zero and remainder has
+the dividend's sign.
+
+**Fix:**
+- In `wf68k30L_divider.sv`:
+  - Latched signed-mode metadata at `DIV_INIT` (signed/unsigned mode, quotient sign,
+    remainder sign, word/long limits).
+  - Restored remainder sign for `DIVS`.
+  - Applied signed overflow limits (`DIVS.W`: `+32767/-32768`, `DIVS.L`:
+    `+2147483647/-2147483648`) and preserved destination on overflow.
+  - Made fast-path quotient/remainder sign handling correct for signed divide.
+- In `tb/test_instr_muldiv.py`, converted remaining `DIVU/DIVS` expected-failure tests
+  to normal regressions.
+- Full mul/div regression passes: `test_instr_muldiv` 33/33.
+
+---
+
+### BUG-R009: RTE restored corrupted PC from misaligned long read (was BUG-006)
+
+**Severity:** High
+**Status:** Fixed
+**Found:** Phase 5 exception testing
+
+**Description:**
+`RTE` was restoring `PC` as `0xXXXXXXXX` with duplicated halves (for example,
+`0x010A010A` instead of `0x0000010A`) when popping the exception frame. The
+exception FSM was correct; corruption happened in the bus-interface input
+alignment for `LONG_32` misaligned long reads (`ADR[1:0] != 2'b00`), which fed
+bad `DATA_TO_CORE` into `PC_RESTORE`.
+
+**Fix:**
+- In `wf68k30L_bus_interface.sv`, corrected `LONG_32` long-read lane mapping for
+  `ADR_10 = 2'b01/2'b10/2'b11` to assemble the upper bytes from
+  `DATA_PORT_IN[31:8]`, `DATA_PORT_IN[31:16]`, and `DATA_PORT_IN[31:24]`.
+- Converted `test_exceptions.py::test_trap_rte_returns` and
+  `test_exceptions.py::test_trap_rte_restores_sr` from `expect_error` to normal
+  regressions; both now pass.
+- Full exception regression passes: `test_exceptions` 39/39.
+
+---
+
+### BUG-R008: CHK trapped against An instead of Dn (was BUG-005)
 
 **Severity:** Medium
-**Status:** Open (tests only cover in-range cases)
+**Status:** Fixed
 **Found:** Phase 3 control instruction testing
 
 **Description:**
-CHK.W instruction does not reliably generate a CHK exception (vector 6) when the
-register value is negative or exceeds the upper bound. In-range cases (where no
-exception should occur) work correctly.
+`CHK.W <ea>,Dn` must test `Dn` against bounds. The SV operand mux was incorrectly
+feeding CHK's tested operand from `AR_OUT_2` (address register path) instead of
+`DR_OUT_2` (data register path). This suppressed CHK traps when An did not match Dn.
 
-**Affected tests:** `test_instr_control.py` — CHK tests only verify in-range behavior.
-
-**Files involved:**
-- `wf68k30L_control.sv` — CHK trap generation
-- `wf68k30L_exception_handler.sv` — Exception vector dispatch
-
----
-
-### BUG-006: RTE does not return from exception handlers
-
-**Severity:** High
-**Status:** Open (expected failures in tests)
-**Found:** Phase 5 exception testing
-
-**Description:**
-RTE (Return from Exception) does not properly restore PC and SR from the exception
-stack frame. The CPU hangs instead of resuming execution at the return address.
-This means exception handlers cannot return to normal program flow.
-
-**Affected tests:** `test_exceptions.py` — `test_trap_rte_returns`, `test_trap_rte_restores_sr`
-marked with `expect_error`.
-
-**Files involved:**
-- `wf68k30L_control.sv` — RTE state machine
-- `wf68k30L_exception_handler.sv` — Stack frame pop logic
+**Fix:**
+- In `wf68k30L_operand_mux.sv`, route `OP == CHK` operand 2 to `DR_OUT_2`.
+- Keep CHK2/CMP2 dual-path behavior (`DR_OUT_2` vs `AR_OUT_2`) gated by `USE_DREG`.
+- Converted `test_exceptions.py::test_chk_w_negative_traps` and
+  `test_exceptions.py::test_chk_w_above_upper_traps` from `expect_error` to
+  normal regressions; both now pass.
 
 ---
 
-### BUG-007: TRAPV does not detect V flag set by MOVE to CCR
+### BUG-R007: Divide-by-zero clobbered destination register (was BUG-009)
 
 **Severity:** Medium
-**Status:** Open (expected failure in tests)
+**Status:** Fixed
 **Found:** Phase 5 exception testing
-**Note:** Inherited from original VHDL — not a port regression.
 
 **Description:**
-TRAPV instruction only detects the V (overflow) flag when set by ALU operations
-(e.g., ADDI causing overflow). When V is loaded directly via MOVE to CCR, TRAPV
-does not trigger the exception. Likely a pipeline forwarding issue where TRAPV
-reads the pre-MOVE CCR value.
+On `DIVU.W #0,Dn` / `DIVS.W #0,Dn`, destination registers must be preserved per
+MC68030 behavior. The RTL was returning zeroed divide outputs on divide-by-zero,
+which then propagated through writeback and overwrote `Dn`.
 
-**Affected tests:** `test_exceptions.py` — `test_trapv_v_set_via_ccr` marked with
-`expect_error`.
-
-**Files involved:**
-- `wf68k30L_control.sv` — TRAPV condition evaluation timing
-- `wf68k30L_alu.sv` — CCR forwarding path
+**Fix:**
+- In `wf68k30L_divider.sv`, drive divide outputs to the pre-operation restore
+  values on divide-by-zero (`QUOTIENT_REST` / `REMAINDER_REST`) so writeback
+  preserves the architectural destination value.
+- Converted `test_exceptions.py::test_divu_divide_by_zero_preserves_dividend`
+  from `expect_error` to a normal regression.
+- Added `test_exceptions.py::test_divs_divide_by_zero_preserves_dividend`.
 
 ---
 
-### BUG-009: Divide-by-zero clobbers destination register
+### BUG-R006: TRAPV did not honor V set via MOVE to CCR (was BUG-007)
 
 **Severity:** Medium
-**Status:** Open (expected failure in tests)
+**Status:** Closed — behavior now correct
 **Found:** Phase 5 exception testing
 
 **Description:**
-When DIVU.W or DIVS.W divides by zero, the MC68030 specification says the
-destination register should be preserved (unchanged). The divider wrote
-0xFFFFFFFF to QUOTIENT/REMAINDER; that was removed but the register still reads
-back as 0x00000000 instead of the original value. The writeback path in the ALU
-or control unit may still be zeroing the destination before the exception fires.
+The previous `expect_error` marker for `TRAPV` after `MOVE ... ,CCR` is no longer
+valid. With current RTL, `TRAPV` correctly traps when `CCR.V=1`, including when V
+is set via `MOVE to CCR`.
 
-**Affected tests:** `test_exceptions.py` — `test_divu_divide_by_zero_preserves_dividend`
-marked with `expect_error`.
-
-**Files involved:**
-- `wf68k30L_divider.sv` — Register writeback during divide-by-zero path
-- `wf68k30L_alu.sv` — Result mux / writeback gating
+**Fix:**
+- Converted `test_exceptions.py::test_trapv_v_set_via_ccr` from
+  `expect_error=AssertionError` to a normal regression test.
+- Verified the test now passes as a standard (non-expected-failure) test.
 
 ---
-
-## Resolved Bugs
 
 ### BUG-R005: ADD.L Dn,Dn does not set V for negative overflow (was BUG-008)
 
