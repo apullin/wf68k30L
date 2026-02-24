@@ -1,4 +1,7 @@
 sim_build/
+sim_build_ghdl/
 __pycache__/
 results.xml
 *.vcd
+*.o
+wf68k30l_top

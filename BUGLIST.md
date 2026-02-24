@@ -2,9 +2,32 @@
 
 Tracking bugs discovered during MC68030 compliance testing.
 
+## VHDL Baseline Comparison
+
+The same 537-test cocotb suite was run against the **original VHDL** (via GHDL 5.1.1)
+and the **SystemVerilog port** (via Verilator 5.044). Results:
+
+| | VHDL (GHDL) | SV (Verilator) |
+|--|:-:|:-:|
+| Tests passing | **528** | **537** |
+| True bugs found | **2** | **10** |
+
+The original VHDL core is very solid. Only 2 genuine bugs exist in the VHDL:
+- **BUG-007** (TRAPV / MOVE-to-CCR forwarding)
+- **BUG-008** (ADD.L Dn,Dn V-flag for negative overflow)
+- Plus 3 DIVS edge cases (neg/neg, overflow, neg overflow)
+
+The remaining 8 open bugs were **introduced by the SV port** through
+register-vs-variable timing mismatches and signal width truncations.
+3 such port bugs have already been fixed (BUG-R001, R002, R003).
+
+### Classification key
+
+Each bug below is tagged: `[VHDL]` = exists in original, `[SV-PORT]` = introduced by port.
+
 ## Open Bugs
 
-### BUG-001: Prefetch pipeline hazard with multi-word instructions
+### BUG-001: Prefetch pipeline hazard with multi-word instructions `[SV-PORT]`
 
 **Severity:** High
 **Status:** Open (workaround in tests)
@@ -44,7 +67,7 @@ Use register-indirect addressing instead of absolute long for store operations:
 
 ---
 
-### BUG-002: Yosys ABC9 combinational loop assertion
+### BUG-002: Yosys ABC9 combinational loop assertion `[SV-PORT]`
 
 **Severity:** Low (tooling)
 **Status:** Open (workaround)
@@ -66,11 +89,13 @@ the combinational logic structure rather than an actual hardware loop.
 
 ---
 
-### BUG-003: Division iterative loop returns incorrect results
+### BUG-003: Division iterative loop returns incorrect results `[SV-PORT]`
 
 **Severity:** High
 **Status:** Open (expected failures in tests)
 **Found:** Phase 3 muldiv testing
+**VHDL comparison:** 9 of 12 failing tests pass on original VHDL. Only 3 DIVS edge
+cases (neg/neg, overflow, neg overflow) fail in both.
 
 **Description:**
 The SV divider (`wf68k30L_divider.sv`) produces incorrect results when the iterative
@@ -101,7 +126,7 @@ correctly through the registered pipeline.
 
 ---
 
-### BUG-004: MOVEM word mode and pre-decrement unreliable
+### BUG-004: MOVEM word mode and pre-decrement unreliable `[SV-PORT]`
 
 **Severity:** Medium
 **Status:** Open (workaround in tests)
@@ -127,11 +152,12 @@ Use MOVEM.L with `(An)` or `(An)+` addressing and 3+ registers in the mask.
 
 ---
 
-### BUG-005: CHK exception not generated for out-of-range values
+### BUG-005: CHK exception not generated for out-of-range values `[SV-PORT]`
 
 **Severity:** Medium
 **Status:** Open (tests only cover in-range cases)
 **Found:** Phase 3 control instruction testing
+**VHDL comparison:** CHK exceptions fire correctly in the original VHDL.
 
 **Description:**
 CHK.W instruction does not reliably generate a CHK exception (vector 6) when the
@@ -146,11 +172,12 @@ exception should occur) work correctly.
 
 ---
 
-### BUG-006: RTE does not return from exception handlers
+### BUG-006: RTE does not return from exception handlers `[SV-PORT]`
 
 **Severity:** High
 **Status:** Open (expected failures in tests)
 **Found:** Phase 5 exception testing
+**VHDL comparison:** RTE works correctly in the original VHDL.
 
 **Description:**
 RTE (Return from Exception) does not properly restore PC and SR from the exception
@@ -166,11 +193,12 @@ marked with `expect_error`.
 
 ---
 
-### BUG-007: TRAPV does not detect V flag set by MOVE to CCR
+### BUG-007: TRAPV does not detect V flag set by MOVE to CCR `[VHDL]`
 
 **Severity:** Medium
 **Status:** Open (expected failure in tests)
 **Found:** Phase 5 exception testing
+**VHDL comparison:** Same bug exists in the original VHDL.
 
 **Description:**
 TRAPV instruction only detects the V (overflow) flag when set by ALU operations
@@ -187,11 +215,12 @@ reads the pre-MOVE CCR value.
 
 ---
 
-### BUG-008: ADD.L Dn,Dn does not set V for negative overflow
+### BUG-008: ADD.L Dn,Dn does not set V for negative overflow `[VHDL]`
 
 **Severity:** Medium
 **Status:** Open (expected failure in tests)
 **Found:** Phase 5 exception testing
+**VHDL comparison:** Same bug exists in the original VHDL.
 
 **Description:**
 Register-form ADD.L (e.g., `ADD.L D0,D1`) does not set the V (overflow) flag
@@ -206,11 +235,12 @@ marked with `expect_error`.
 
 ---
 
-### BUG-009: Divide-by-zero clobbers destination register
+### BUG-009: Divide-by-zero clobbers destination register `[SV-PORT]`
 
 **Severity:** Medium
 **Status:** Open (expected failure in tests)
 **Found:** Phase 5 exception testing
+**VHDL comparison:** Destination register is preserved correctly in the original VHDL.
 
 **Description:**
 When DIVU.W or DIVS.W divides by zero, the MC68030 specification says the
@@ -226,11 +256,12 @@ marked with `expect_error`.
 
 ---
 
-### BUG-010: Bus interface fails with 2+ wait states
+### BUG-010: Bus interface fails with 2+ wait states `[SV-PORT]`
 
 **Severity:** Medium
 **Status:** Open (expected failures in tests)
 **Found:** Phase 6 bus protocol testing
+**VHDL comparison:** All wait state tests pass on the original VHDL.
 
 **Description:**
 The CPU produces correct results with 0 or 1 bus wait states, but fails
@@ -247,7 +278,7 @@ marked with `expect_error`.
 
 ## Resolved Bugs
 
-### BUG-R003: Indexed addressing mode ignores index register
+### BUG-R003: Indexed addressing mode ignores index register `[SV-PORT]`
 
 **Severity:** Critical
 **Status:** Fixed (commit f1c0044)
@@ -275,7 +306,7 @@ This matches the VHDL's variable-based same-cycle semantics.
 
 ---
 
-### BUG-R002: BITPOS truncation limits bit operations to positions 0-15
+### BUG-R002: BITPOS truncation limits bit operations to positions 0-15 `[SV-PORT]`
 
 **Severity:** High
 **Status:** Fixed (commit a33ac4e)
@@ -301,7 +332,7 @@ unnecessary truncation.
 
 ---
 
-### BUG-R001: CPU write bus cycles never generated
+### BUG-R001: CPU write bus cycles never generated `[SV-PORT]`
 
 **Severity:** Critical
 **Status:** Fixed (commits bb9e70e)
