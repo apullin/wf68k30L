@@ -127,6 +127,8 @@ TIME_SLICES         T_SLICE;
 logic               WAITSTATES;
 logic [31:0]        WP_BUFFER;
 logic               WRITE_ACCESS;
+logic [2:0]         SIZE_RESTORE;
+logic               RDY_ARMED;
 
 // ---- Synchronize bus termination signals on negative clock edge ----
 logic BUS_FLT_VAR;
@@ -238,13 +240,10 @@ assign BUS_BSY = (BUS_CTRL_STATE != BUS_IDLE);
 // Tracks remaining bytes to transfer across multiple bus cycles when the
 // port width is narrower than the operand size. SIZE_N counts down to zero.
 always_ff @(posedge CLK) begin : partitioning
-    logic [2:0] RESTORE_VAR;
-
-    if (BUS_CTRL_STATE == DATA_C1C4 && T_SLICE == S1) begin
-        RESTORE_VAR = SIZE_N; // Save for early RETRY.
-    end else if (BUS_CTRL_STATE == DATA_C1C4 && ((T_SLICE == S1 && !STERMn) || (T_SLICE == S3 && !WAITSTATES))) begin
-        RESTORE_VAR = SIZE_N; // Save for late RETRY.
-    end
+    if (RESET_CPU_I || (BUS_FLT && HALT_In))
+        SIZE_RESTORE <= 3'b000;
+    else if (!RETRY && BUS_CTRL_STATE == DATA_C1C4 && (T_SLICE == S1 || (T_SLICE == S3 && !WAITSTATES)))
+        SIZE_RESTORE <= SIZE_N;
 
     if (RESET_CPU_I) begin
         SIZE_N <= 3'b000;
@@ -264,7 +263,7 @@ always_ff @(posedge CLK) begin : partitioning
 
     // Decrement remaining size based on how many bytes this cycle transferred.
     if (RETRY) begin
-        SIZE_N <= RESTORE_VAR;
+        SIZE_N <= SIZE_RESTORE;
     end else if (BUS_CTRL_STATE == DATA_C1C4 && ((T_SLICE == S1 && !STERMn) || (T_SLICE == S3 && !WAITSTATES))) begin
         if (BUS_WIDTH == LONG_32 && SIZE_N > 3'd3 && ADR_OUT_I[1:0] == 2'b01)
             SIZE_N <= SIZE_N - 3'b011;
@@ -290,7 +289,6 @@ always_ff @(posedge CLK) begin : partitioning
 
     if (BUS_FLT && HALT_In) begin // Abort bus cycle on unrecoverable fault.
         SIZE_N <= 3'b000;
-        RESTORE_VAR = 3'b000;
     end
 end
 
@@ -539,43 +537,41 @@ end
 
 // ---- Prefetch / data buffers and ready strobes ----
 always_ff @(posedge CLK) begin : prefetch_buffers
-    logic RDY_VAR;
-
     OPCODE_RDY_I <= 1'b0; // Strobe.
     DATA_RDY_I <= 1'b0;   // Strobe.
 
-    if (DATA_RDY_I || OPCODE_RDY_I)
-        RDY_VAR = 1'b0;
+    if (RESET_CPU_I || DATA_RDY_I || OPCODE_RDY_I)
+        RDY_ARMED <= 1'b0;
     else if (BUS_CTRL_STATE == START_CYCLE)
-        RDY_VAR = 1'b1;
+        RDY_ARMED <= 1'b1;
 
     // Opcode cycle complete:
     if (AERR_I)
         OPCODE_RDY_I <= 1'b1;
     else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY && SIZE_N == 3'b000) begin
         OBUFFER <= DATA_INMUX[15:0];
-        OPCODE_RDY_I <= RDY_VAR;
+        OPCODE_RDY_I <= RDY_ARMED;
     end
 
     // Data cycle complete:
     if (WRITE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY && SIZE_N == 3'b000) begin
-        DATA_RDY_I <= RDY_VAR;
+        DATA_RDY_I <= RDY_ARMED;
     end else if (READ_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY) begin
         case (OP_SIZE)
             LONG: begin
                 if (SIZE_N == 3'b000) begin
                     DBUFFER <= DATA_INMUX;
-                    DATA_RDY_I <= RDY_VAR;
+                    DATA_RDY_I <= RDY_ARMED;
                 end
             end
             WORD: begin
                 if (SIZE_N == 3'b000) begin
                     DBUFFER <= {16'h0, DATA_INMUX[15:0]};
-                    DATA_RDY_I <= RDY_VAR;
+                    DATA_RDY_I <= RDY_ARMED;
                 end
             end
             BYTE: begin // Byte always aligned.
-                DATA_RDY_I <= RDY_VAR;
+                DATA_RDY_I <= RDY_ARMED;
                 DBUFFER <= {24'h0, DATA_INMUX[7:0]};
             end
             default: ;
