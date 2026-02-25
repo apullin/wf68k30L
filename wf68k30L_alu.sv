@@ -298,9 +298,11 @@ end
 assign BF_DATA_IN = {OP3, OP2[7:0]};
 
 always_comb begin : bitfield_op
-    logic BF_NZ;
+    logic bfffo_found;
     logic [5:0] BFFFO_CNT;
     logic [39:0] bf_mask;
+    logic [39:0] field_data;
+    logic [5:0] field_span;
     logic [39:0] shifted_data;
     logic [31:0] width_mask;
     integer i;
@@ -309,9 +311,11 @@ always_comb begin : bitfield_op
     bf_mask = ((40'd1 << (BF_UPPER_BND - BF_LOWER_BND + 6'd1)) - 40'd1) << BF_LOWER_BND;
     width_mask = (BF_WIDTH == 6'd32) ? 32'hFFFFFFFF : ((32'd1 << BF_WIDTH) - 32'd1);
     shifted_data = BF_DATA_IN >> BF_LOWER_BND;
+    field_span = BF_UPPER_BND - BF_LOWER_BND + 6'd1;
+    field_data = shifted_data & ((40'd1 << field_span) - 40'd1);
 
     RESULT_BITFIELD = BF_DATA_IN; // Default.
-    BF_NZ = 1'b0;
+    bfffo_found = 1'b0;
     BFFFO_CNT = 6'b000000;
     case (OP)
         BFCHG: begin
@@ -330,13 +334,13 @@ always_comb begin : bitfield_op
             RESULT_BITFIELD[39:8] = shifted_data[31:0] & width_mask;
         end
         BFFFO: begin // Result is in (39 downto 8).
-            // Count consecutive zeros from LSB of field upward
+            // Locate first set bit in the extracted field; if none, count full field width.
+            BFFFO_CNT = field_span;
+            bfffo_found = 1'b0;
             for (i = 0; i < 40; i = i + 1) begin
-                if (i <= BF_UPPER_BND && i >= BF_LOWER_BND) begin
-                    if (!BF_DATA_IN[i] && !BF_NZ)
-                        BFFFO_CNT = BFFFO_CNT + 1'b1;
-                    else
-                        BF_NZ = 1'b1;
+                if (!bfffo_found && i < field_span && field_data[i]) begin
+                    BFFFO_CNT = i[5:0];
+                    bfffo_found = 1'b1;
                 end
             end
             RESULT_BITFIELD = {(BF_OFFSET[31:0] + {26'd0, BFFFO_CNT}), 8'h00};
