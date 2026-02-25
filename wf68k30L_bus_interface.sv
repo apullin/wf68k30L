@@ -129,6 +129,10 @@ logic [31:0]        WP_BUFFER;
 logic               WRITE_ACCESS;
 logic [2:0]         SIZE_RESTORE;
 logic               RDY_ARMED;
+logic               SLICE_S0_TO_S4;
+logic               SLICE_S1_TO_S5;
+logic               SLICE_S2_TO_S4;
+logic               SLICE_S3_TO_S5;
 
 // ---- Synchronize bus termination signals on negative clock edge ----
 logic BUS_FLT_VAR;
@@ -641,16 +645,18 @@ end
 
 // ---- Bus control signal generation ----
 // Active-low signals follow the MC68030 bus protocol timing.
+assign SLICE_S0_TO_S4 = (T_SLICE == S0 || T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4);
+assign SLICE_S1_TO_S5 = (T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4 || T_SLICE == S5);
+assign SLICE_S2_TO_S4 = (T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4);
+assign SLICE_S3_TO_S5 = (T_SLICE == S3 || T_SLICE == S4 || T_SLICE == S5);
+
 assign RWn  = !(WRITE_ACCESS && BUS_CTRL_STATE == DATA_C1C4);
 assign RMCn = !RMC;
 assign ECSn = !(T_SLICE == S0);
 assign OCSn = !(T_SLICE == S0 && !OCS_INH);
-assign ASn  = !(T_SLICE == S0 || T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4);
-assign DSn  = ((T_SLICE == S3 || T_SLICE == S4 || T_SLICE == S5) && WRITE_ACCESS) ? 1'b0 : // Write: DS late.
-              (T_SLICE == S0 || T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4) ? 1'b0 : 1'b1; // Read: DS early.
-
-assign DBENn = ((T_SLICE == S1 || T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4 || T_SLICE == S5) && WRITE_ACCESS) ? 1'b0 : // Write.
-               (T_SLICE == S2 || T_SLICE == S3 || T_SLICE == S4) ? 1'b0 : 1'b1; // Read.
+assign ASn  = !SLICE_S0_TO_S4;
+assign DSn  = !(WRITE_ACCESS ? SLICE_S3_TO_S5 : SLICE_S0_TO_S4); // Write: DS late, read: DS early.
+assign DBENn = !(WRITE_ACCESS ? SLICE_S1_TO_S5 : SLICE_S2_TO_S4); // Write: S1-S5, read: S2-S4.
 
 // ---- Bus tri-state controls ----
 assign BUS_EN       = ARB_STATE == ARB_IDLE && !RESET_CPU_I;
