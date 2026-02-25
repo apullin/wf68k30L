@@ -446,21 +446,23 @@ assign DBcc_COND = (OP_WB == DBcc && ALU_RESULT[15:0] == 16'hFFFF);
 // Predict a branch if an SR-modifying instruction will change the CPU space.
 always_comb begin : branch_prediction
     BRANCH_ATN = 1'b0;
-    if (OP == ANDI_TO_SR && !DATA_IMMEDIATE[13] && STATUS_REG[13])
+    // Use raw immediate extension word bits for SR writes to avoid
+    // introducing a control-loop dependency through DATA_IMMEDIATE/OP_SIZE.
+    if (OP == ANDI_TO_SR && !BIW_1[13] && STATUS_REG[13])
         BRANCH_ATN = 1'b1;
-    else if (OP == ANDI_TO_SR && !DATA_IMMEDIATE[12] && STATUS_REG[12])
+    else if (OP == ANDI_TO_SR && !BIW_1[12] && STATUS_REG[12])
         BRANCH_ATN = 1'b1;
-    else if (OP == EORI_TO_SR && DATA_IMMEDIATE[13])
+    else if (OP == EORI_TO_SR && BIW_1[13])
         BRANCH_ATN = 1'b1;
-    else if (OP == EORI_TO_SR && DATA_IMMEDIATE[12])
+    else if (OP == EORI_TO_SR && BIW_1[12])
         BRANCH_ATN = 1'b1;
-    else if (OP == ORI_TO_SR && DATA_IMMEDIATE[13] && !STATUS_REG[13])
+    else if (OP == ORI_TO_SR && BIW_1[13] && !STATUS_REG[13])
         BRANCH_ATN = 1'b1;
-    else if (OP == ORI_TO_SR && DATA_IMMEDIATE[12] && !STATUS_REG[12])
+    else if (OP == ORI_TO_SR && BIW_1[12] && !STATUS_REG[12])
         BRANCH_ATN = 1'b1;
     else if (OP == MOVE_TO_SR && BIW_0[5:3] == ADR_DN && DR_OUT_1[13:12] != STATUS_REG[13:12])
         BRANCH_ATN = 1'b1;
-    else if (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100 && DATA_IMMEDIATE[13:12] != STATUS_REG[13:12])
+    else if (OP == MOVE_TO_SR && BIW_0[5:0] == 6'b111100 && BIW_1[13:12] != STATUS_REG[13:12])
         BRANCH_ATN = 1'b1;
     else if (OP == MOVE_TO_SR && DATA_TO_CORE[13:12] != STATUS_REG[13:12])
         BRANCH_ATN = 1'b1;

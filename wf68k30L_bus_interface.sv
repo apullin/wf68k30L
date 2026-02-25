@@ -89,6 +89,7 @@ typedef enum logic [2:0] {SLICE_IDLE, S0, S1, S2, S3, S4, S5} TIME_SLICES;
 
 logic [1:0]         ADR_10;
 logic [5:0]         ADR_OFFSET;
+logic [2:0]         ADR_STEP;
 logic [31:0]        ADR_OUT_I;
 logic               AERR_I;
 ARB_STATES          ARB_STATE;
@@ -333,8 +334,6 @@ always_comb begin : bus_ctrl_dec
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
             else if (OPCODE_REQ && ADR_IN_P[0])
                 NEXT_BUS_CTRL_STATE = BUS_IDLE; // Abort due to address error.
-            else if (OPCODE_REQ && ADR_IN_P[0])
-                NEXT_BUS_CTRL_STATE = BUS_IDLE; // Abort due to address error.
             else if (OPCODE_REQ)
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
             else
@@ -354,30 +353,28 @@ end
 // ---- Address offset accumulator ----
 // Tracks the byte offset within a multi-cycle transfer for dynamic bus sizing.
 always_ff @(posedge CLK) begin : adr_offset_calc
-    logic [2:0] OFFSET_VAR;
-
     if (RESET_CPU_I) begin
-        OFFSET_VAR = 3'b000;
+        ADR_STEP <= 3'b000;
     end else if ((T_SLICE == S2 && !STERMn) || T_SLICE == S3) begin
         case (BUS_WIDTH)
             LONG_32: begin
                 case (ADR_OUT_I[1:0])
-                    2'b11:   OFFSET_VAR = 3'b001;
-                    2'b10:   OFFSET_VAR = 3'b010;
-                    2'b01:   OFFSET_VAR = 3'b011;
-                    default: OFFSET_VAR = 3'b100;
+                    2'b11:   ADR_STEP <= 3'b001;
+                    2'b10:   ADR_STEP <= 3'b010;
+                    2'b01:   ADR_STEP <= 3'b011;
+                    default: ADR_STEP <= 3'b100;
                 endcase
             end
             BW_WORD: begin
                 case (ADR_OUT_I[1:0])
-                    2'b01, 2'b11: OFFSET_VAR = 3'b001;
-                    default:      OFFSET_VAR = 3'b010;
+                    2'b01, 2'b11: ADR_STEP <= 3'b001;
+                    default:      ADR_STEP <= 3'b010;
                 endcase
             end
             BW_BYTE:
-                OFFSET_VAR = 3'b001;
+                ADR_STEP <= 3'b001;
             default:
-                OFFSET_VAR = 3'b001;
+                ADR_STEP <= 3'b001;
         endcase
     end
 
@@ -388,7 +385,7 @@ always_ff @(posedge CLK) begin : adr_offset_calc
     else if (BUS_CTRL_STATE != BUS_IDLE && NEXT_BUS_CTRL_STATE == BUS_IDLE)
         ADR_OFFSET <= 6'd0;
     else if (BUS_CYC_RDY)
-        ADR_OFFSET <= ADR_OFFSET + {3'b000, OFFSET_VAR};
+        ADR_OFFSET <= ADR_OFFSET + {3'b000, ADR_STEP};
 end
 
 assign ADR_OUT_I = ADR_IN_P + {26'd0, ADR_OFFSET};

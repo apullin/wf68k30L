@@ -75,8 +75,11 @@ logic        CHK2CMP2_DR;
 logic [4:0]  MSB;
 OP_68K       OP;
 logic [31:0] OP1;
+logic [31:0] OP1_BUFFER;
 logic [31:0] OP2;
+logic [31:0] OP2_BUFFER;
 logic [31:0] OP3;
+logic [31:0] OP3_BUFFER;
 logic [31:0] OP1_SIGNEXT;
 logic [31:0] OP2_SIGNEXT;
 logic [31:0] OP3_SIGNEXT;
@@ -136,26 +139,20 @@ end
 // Operand buffers
 // ========================================================================
 always_ff @(posedge CLK) begin : operands
-    // During instruction execution, the buffers are written
-    // before or during ALU_INIT and copied to the operands
-    // during ALU_INIT.
-    logic [31:0] OP1_BUFFER;
-    logic [31:0] OP2_BUFFER;
-    logic [31:0] OP3_BUFFER;
-
+    // During instruction execution, operand buffers can be loaded one or
+    // more cycles ahead of ALU_INIT. Keep explicit buffer registers and
+    // preserve the same-cycle load+init bypass behavior.
     if (LOAD_OP1)
-        OP1_BUFFER = OP1_IN;
-
+        OP1_BUFFER <= OP1_IN;
     if (LOAD_OP2)
-        OP2_BUFFER = OP2_IN;
-
+        OP2_BUFFER <= OP2_IN;
     if (LOAD_OP3)
-        OP3_BUFFER = OP3_IN;
+        OP3_BUFFER <= OP3_IN;
 
     if (ALU_INIT) begin
-        OP1 <= OP1_BUFFER;
-        OP2 <= OP2_BUFFER;
-        OP3 <= OP3_BUFFER;
+        OP1 <= LOAD_OP1 ? OP1_IN : OP1_BUFFER;
+        OP2 <= LOAD_OP2 ? OP2_IN : OP2_BUFFER;
+        OP3 <= LOAD_OP3 ? OP3_IN : OP3_BUFFER;
     end
 end
 
@@ -887,36 +884,64 @@ end
 // ========================================================================
 assign ALU_COND = ALU_COND_I; // This signal may not be registered to meet a correct timing.
 // Status register conditions:
-assign ALU_COND_I = (OP == CAS2 && !CAS2_COND) ? 1'b0 :
-                    ((OP == CAS || OP == CAS2) && OP_SIZE == LONG && RESULT_INTOP == 32'h0) ? 1'b1 :
-                    ((OP == CAS || OP == CAS2) && OP_SIZE == WORD && RESULT_INTOP[15:0] == 16'h0) ? 1'b1 :
-                    (OP == CAS && RESULT_INTOP[7:0] == 8'h0) ? 1'b1 :
-                    (OP == CAS || OP == CAS2) ? 1'b0 :
-                    (OP == TRAPV &&  STATUS_REG[SR_V]) ? 1'b1 :
-                    (OP == TRAPV) ? 1'b0 :
-                    (BIW_0[11:8] == 4'h0) ? 1'b1 : // True.
-                    (BIW_0[11:8] == 4'h2 && !(STATUS_REG[SR_Z] | STATUS_REG[SR_C])) ? 1'b1 : // High.
-                    (BIW_0[11:8] == 4'h3 &&  (STATUS_REG[SR_Z] | STATUS_REG[SR_C])) ? 1'b1 : // Low or same.
-                    (BIW_0[11:8] == 4'h4 && !STATUS_REG[SR_C]) ? 1'b1 : // Carry clear.
-                    (BIW_0[11:8] == 4'h5 &&  STATUS_REG[SR_C]) ? 1'b1 : // Carry set.
-                    (BIW_0[11:8] == 4'h6 && !STATUS_REG[SR_Z]) ? 1'b1 : // Not Equal.
-                    (BIW_0[11:8] == 4'h7 &&  STATUS_REG[SR_Z]) ? 1'b1 : // Equal.
-                    (BIW_0[11:8] == 4'h8 && !STATUS_REG[SR_V]) ? 1'b1 : // Overflow clear.
-                    (BIW_0[11:8] == 4'h9 &&  STATUS_REG[SR_V]) ? 1'b1 : // Overflow set.
-                    (BIW_0[11:8] == 4'hA && !STATUS_REG[SR_N]) ? 1'b1 : // Plus.
-                    (BIW_0[11:8] == 4'hB &&  STATUS_REG[SR_N]) ? 1'b1 : // Minus.
-                    (BIW_0[11:8] == 4'hC && !(STATUS_REG[SR_N] ^ STATUS_REG[SR_V])) ? 1'b1 : // Greater or Equal.
-                    (BIW_0[11:8] == 4'hD &&  (STATUS_REG[SR_N] ^ STATUS_REG[SR_V])) ? 1'b1 : // Less than.
-                    (BIW_0[11:8] == 4'hE && STATUS_REG[SR_N:SR_V] == 3'b101) ? 1'b1 : // Greater than.
-                    (BIW_0[11:8] == 4'hE && STATUS_REG[SR_N:SR_V] == 3'b000) ? 1'b1 : // Greater than.
-                    (BIW_0[11:8] == 4'hF &&  STATUS_REG[SR_Z]) ? 1'b1 : // Less or equal.
-                    (BIW_0[11:8] == 4'hF &&  (STATUS_REG[SR_N] ^ STATUS_REG[SR_V])) ? 1'b1 : 1'b0; // Less or equal.
+always_comb begin : alu_condition_eval
+    logic n_flag;
+    logic z_flag;
+    logic v_flag;
+    logic c_flag;
+    logic n_xor_v;
+    logic cas_compare_match;
+
+    n_flag = STATUS_REG[SR_N];
+    z_flag = STATUS_REG[SR_Z];
+    v_flag = STATUS_REG[SR_V];
+    c_flag = STATUS_REG[SR_C];
+    n_xor_v = n_flag ^ v_flag;
+
+    cas_compare_match = 1'b0;
+    if (OP == CAS || OP == CAS2) begin
+        case (OP_SIZE)
+            LONG:    cas_compare_match = (RESULT_INTOP == 32'h00000000);
+            WORD:    cas_compare_match = (RESULT_INTOP[15:0] == 16'h0000);
+            default: cas_compare_match = (OP == CAS) && (RESULT_INTOP[7:0] == 8'h00);
+        endcase
+    end
+
+    if (OP == CAS2 && !CAS2_COND) begin
+        ALU_COND_I = 1'b0;
+    end else if (OP == CAS || OP == CAS2) begin
+        ALU_COND_I = cas_compare_match;
+    end else if (OP == TRAPV) begin
+        ALU_COND_I = v_flag;
+    end else begin
+        case (BIW_0[11:8])
+            4'h0: ALU_COND_I = 1'b1;                   // True.
+            4'h1: ALU_COND_I = 1'b0;                   // False.
+            4'h2: ALU_COND_I = !(z_flag | c_flag);     // High.
+            4'h3: ALU_COND_I = (z_flag | c_flag);      // Low or same.
+            4'h4: ALU_COND_I = !c_flag;                // Carry clear.
+            4'h5: ALU_COND_I = c_flag;                 // Carry set.
+            4'h6: ALU_COND_I = !z_flag;                // Not Equal.
+            4'h7: ALU_COND_I = z_flag;                 // Equal.
+            4'h8: ALU_COND_I = !v_flag;                // Overflow clear.
+            4'h9: ALU_COND_I = v_flag;                 // Overflow set.
+            4'hA: ALU_COND_I = !n_flag;                // Plus.
+            4'hB: ALU_COND_I = n_flag;                 // Minus.
+            4'hC: ALU_COND_I = !n_xor_v;               // Greater or Equal.
+            4'hD: ALU_COND_I = n_xor_v;                // Less than.
+            4'hE: ALU_COND_I = !z_flag && !n_xor_v;    // Greater than.
+            4'hF: ALU_COND_I = z_flag || n_xor_v;      // Less or equal.
+            default: ALU_COND_I = 1'b0;
+        endcase
+    end
+end
 
 // ========================================================================
 // Status register
 // ========================================================================
 always_ff @(posedge CLK) begin : status_reg_proc
     logic [15:0] SREG_MEM;
+    SREG_MEM = STATUS_REG;
 
     if (CC_UPDT)
         SREG_MEM[4:0] = XNZVC;

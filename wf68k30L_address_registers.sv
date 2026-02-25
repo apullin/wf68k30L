@@ -132,10 +132,10 @@ logic [31:0] AR [0:6]; // Address registers A0 to A6.
 logic [31:0] AR_OUT_1_I;
 logic [31:0] AR_OUT_2_I;
 logic [32:0] ADR_WB;
-integer AR_PNTR_1;
-integer AR_PNTR_2;
-integer AR_PNTR_WB_1;
-integer AR_PNTR_WB_2;
+logic [2:0] AR_PNTR_1;
+logic [2:0] AR_PNTR_2;
+logic [2:0] AR_PNTR_WB_1;
+logic [2:0] AR_PNTR_WB_2;
 logic [3:0] AR_USED_1;
 logic [3:0] AR_USED_2;
 logic B_S; // Base register suppress.
@@ -153,8 +153,33 @@ logic [2:0] SFC_REG_sig; // Special function code registers.
 logic [31:0] USP_REG; // User stack pointer (refers to A7 in the user mode.).
 logic [31:0] ADR_EFF_TMP_REG;
 
+// Safe A0-A6 read mux for selector values that may be unknown during startup.
+function automatic logic [31:0] ar_read_safe(input logic [2:0] sel);
+    case (sel)
+        3'd0: ar_read_safe = AR[0];
+        3'd1: ar_read_safe = AR[1];
+        3'd2: ar_read_safe = AR[2];
+        3'd3: ar_read_safe = AR[3];
+        3'd4: ar_read_safe = AR[4];
+        3'd5: ar_read_safe = AR[5];
+        3'd6: ar_read_safe = AR[6];
+        default: ar_read_safe = 32'h0;
+    endcase
+endfunction
+
+function automatic logic [31:0] ar_read_word_signext(input logic [2:0] sel);
+    logic [31:0] ar_val;
+    begin
+        ar_val = ar_read_safe(sel);
+        ar_read_word_signext = {{16{ar_val[15]}}, ar_val[15:0]};
+    end
+endfunction
+
 always_ff @(posedge CLK) begin : latch_write_sel
-    if (AR_MARK_USED) begin
+    if (RESET) begin
+        AR_PNTR_WB_1 <= 3'd0;
+        AR_PNTR_WB_2 <= 3'd0;
+    end else if (AR_MARK_USED) begin
         AR_PNTR_WB_1 <= AR_SEL_WR_1;
         AR_PNTR_WB_2 <= AR_SEL_WR_2;
     end
@@ -242,7 +267,7 @@ always_comb begin : index_next_calc
         else if (EXT_WORD[14:12] == 3'b111 && !SBIT)
             index_next = USP_REG;
         else
-            index_next = AR[EXT_WORD[14:12]];
+            index_next = ar_read_safe(EXT_WORD[14:12]);
     end else if (STORE_ADR_FORMAT) begin // Sign extended address register.
         if (EXT_WORD[14:12] == 3'b111 && SBIT && MBIT)
             index_next = {{16{MSP_REG[15]}}, MSP_REG[15:0]};
@@ -251,7 +276,7 @@ always_comb begin : index_next_calc
         else if (EXT_WORD[14:12] == 3'b111 && !SBIT)
             index_next = {{16{USP_REG[15]}}, USP_REG[15:0]};
         else
-            index_next = {{16{AR[EXT_WORD[14:12]][15]}}, AR[EXT_WORD[14:12]][15:0]};
+            index_next = ar_read_word_signext(EXT_WORD[14:12]);
     end else begin
         index_next = INDEX_REG; // No update: retain current register value.
     end
@@ -349,15 +374,13 @@ always_comb begin : adr_eff_calc
         ADR_MUX_comb = 32'h0; // Base register suppress.
     else if (USE_DREG)
         ADR_MUX_comb = AR_IN_1;
+    else if (AR_PNTR_1 == 3'd7) begin
+        if (SBIT && !MBIT)       ADR_MUX_comb = ISP_REG;
+        else if (SBIT)            ADR_MUX_comb = MSP_REG;
+        else                      ADR_MUX_comb = USP_REG;
+    end
     else begin
-        case (AR_PNTR_1)
-            7: begin
-                if (SBIT && !MBIT)       ADR_MUX_comb = ISP_REG;
-                else if (SBIT)            ADR_MUX_comb = MSP_REG;
-                else                      ADR_MUX_comb = USP_REG;
-            end
-            default: ADR_MUX_comb = AR[AR_PNTR_1];
-        endcase
+        ADR_MUX_comb = ar_read_safe(AR_PNTR_1);
     end
 
     // Effective address computation
@@ -437,16 +460,35 @@ assign ADR_EFF = ADR_EFF_I;
 assign ADR_EFF_WB = ADR_WB[31:0];
 
 // Data outputs:
-assign AR_OUT_1_I = ISP_RD           ? ISP_REG :
-                    MSP_RD           ? MSP_REG :
-                    USP_RD           ? USP_REG :
-                    (AR_PNTR_1 < 7)  ? AR[AR_PNTR_1] :
-                    (SBIT &&  MBIT)  ? MSP_REG :
-                    (SBIT && !MBIT)  ? ISP_REG : USP_REG;
+always_comb begin : ar_read_port_1
+    if (ISP_RD)
+        AR_OUT_1_I = ISP_REG;
+    else if (MSP_RD)
+        AR_OUT_1_I = MSP_REG;
+    else if (USP_RD)
+        AR_OUT_1_I = USP_REG;
+    else if (AR_PNTR_1 == 3'd7) begin
+        if (SBIT && MBIT)
+            AR_OUT_1_I = MSP_REG;
+        else if (SBIT)
+            AR_OUT_1_I = ISP_REG;
+        else
+            AR_OUT_1_I = USP_REG;
+    end else
+        AR_OUT_1_I = ar_read_safe(AR_PNTR_1);
+end
 
-assign AR_OUT_2_I = (AR_PNTR_2 < 7)  ? AR[AR_PNTR_2] :
-                    (SBIT &&  MBIT)  ? MSP_REG :
-                    (SBIT && !MBIT)  ? ISP_REG : USP_REG;
+always_comb begin : ar_read_port_2
+    if (AR_PNTR_2 == 3'd7) begin
+        if (SBIT && MBIT)
+            AR_OUT_2_I = MSP_REG;
+        else if (SBIT)
+            AR_OUT_2_I = ISP_REG;
+        else
+            AR_OUT_2_I = USP_REG;
+    end else
+        AR_OUT_2_I = ar_read_safe(AR_PNTR_2);
+end
 
 assign PC = PC_I;
 
@@ -577,27 +619,141 @@ always_ff @(posedge CLK) begin : address_registers_proc
             AR[i] <= 32'h0;
     end
 
-    if (AR_WR_1 && AR_PNTR_WB_1 < 7)
-        AR[AR_PNTR_WB_1] <= AR_IN_1; // Always written long.
-
-    if (AR_INC && AR_PNTR_1 < 7) begin
-        case (OP_SIZE)
-            BYTE:    AR[AR_PNTR_1] <= AR[AR_PNTR_1] + 32'd1;
-            WORD:    AR[AR_PNTR_1] <= AR[AR_PNTR_1] + 32'd2;
-            default: AR[AR_PNTR_1] <= AR[AR_PNTR_1] + 32'd4;
+    if (AR_WR_1 && AR_PNTR_WB_1 != 3'd7) begin
+        case (AR_PNTR_WB_1)
+            3'd0: AR[0] <= AR_IN_1;
+            3'd1: AR[1] <= AR_IN_1;
+            3'd2: AR[2] <= AR_IN_1;
+            3'd3: AR[3] <= AR_IN_1;
+            3'd4: AR[4] <= AR_IN_1;
+            3'd5: AR[5] <= AR_IN_1;
+            3'd6: AR[6] <= AR_IN_1;
+            default: ; // Keep robust behavior for unknown selector values.
         endcase
     end
 
-    if (AR_DEC && AR_PNTR_1 < 7) begin
-        case (OP_SIZE)
-            BYTE:    AR[AR_PNTR_1] <= AR[AR_PNTR_1] - 32'd1;
-            WORD:    AR[AR_PNTR_1] <= AR[AR_PNTR_1] - 32'd2;
-            default: AR[AR_PNTR_1] <= AR[AR_PNTR_1] - 32'd4;
+    if (AR_INC && AR_PNTR_1 != 3'd7) begin
+        case (AR_PNTR_1)
+            3'd0: begin
+                case (OP_SIZE)
+                    BYTE:    AR[0] <= AR[0] + 32'd1;
+                    WORD:    AR[0] <= AR[0] + 32'd2;
+                    default: AR[0] <= AR[0] + 32'd4;
+                endcase
+            end
+            3'd1: begin
+                case (OP_SIZE)
+                    BYTE:    AR[1] <= AR[1] + 32'd1;
+                    WORD:    AR[1] <= AR[1] + 32'd2;
+                    default: AR[1] <= AR[1] + 32'd4;
+                endcase
+            end
+            3'd2: begin
+                case (OP_SIZE)
+                    BYTE:    AR[2] <= AR[2] + 32'd1;
+                    WORD:    AR[2] <= AR[2] + 32'd2;
+                    default: AR[2] <= AR[2] + 32'd4;
+                endcase
+            end
+            3'd3: begin
+                case (OP_SIZE)
+                    BYTE:    AR[3] <= AR[3] + 32'd1;
+                    WORD:    AR[3] <= AR[3] + 32'd2;
+                    default: AR[3] <= AR[3] + 32'd4;
+                endcase
+            end
+            3'd4: begin
+                case (OP_SIZE)
+                    BYTE:    AR[4] <= AR[4] + 32'd1;
+                    WORD:    AR[4] <= AR[4] + 32'd2;
+                    default: AR[4] <= AR[4] + 32'd4;
+                endcase
+            end
+            3'd5: begin
+                case (OP_SIZE)
+                    BYTE:    AR[5] <= AR[5] + 32'd1;
+                    WORD:    AR[5] <= AR[5] + 32'd2;
+                    default: AR[5] <= AR[5] + 32'd4;
+                endcase
+            end
+            3'd6: begin
+                case (OP_SIZE)
+                    BYTE:    AR[6] <= AR[6] + 32'd1;
+                    WORD:    AR[6] <= AR[6] + 32'd2;
+                    default: AR[6] <= AR[6] + 32'd4;
+                endcase
+            end
+            default: ;
         endcase
     end
 
-    if (AR_WR_2 && AR_PNTR_WB_2 < 7)
-        AR[AR_PNTR_WB_2] <= AR_IN_2; // Used for EXG and UNLK.
+    if (AR_DEC && AR_PNTR_1 != 3'd7) begin
+        case (AR_PNTR_1)
+            3'd0: begin
+                case (OP_SIZE)
+                    BYTE:    AR[0] <= AR[0] - 32'd1;
+                    WORD:    AR[0] <= AR[0] - 32'd2;
+                    default: AR[0] <= AR[0] - 32'd4;
+                endcase
+            end
+            3'd1: begin
+                case (OP_SIZE)
+                    BYTE:    AR[1] <= AR[1] - 32'd1;
+                    WORD:    AR[1] <= AR[1] - 32'd2;
+                    default: AR[1] <= AR[1] - 32'd4;
+                endcase
+            end
+            3'd2: begin
+                case (OP_SIZE)
+                    BYTE:    AR[2] <= AR[2] - 32'd1;
+                    WORD:    AR[2] <= AR[2] - 32'd2;
+                    default: AR[2] <= AR[2] - 32'd4;
+                endcase
+            end
+            3'd3: begin
+                case (OP_SIZE)
+                    BYTE:    AR[3] <= AR[3] - 32'd1;
+                    WORD:    AR[3] <= AR[3] - 32'd2;
+                    default: AR[3] <= AR[3] - 32'd4;
+                endcase
+            end
+            3'd4: begin
+                case (OP_SIZE)
+                    BYTE:    AR[4] <= AR[4] - 32'd1;
+                    WORD:    AR[4] <= AR[4] - 32'd2;
+                    default: AR[4] <= AR[4] - 32'd4;
+                endcase
+            end
+            3'd5: begin
+                case (OP_SIZE)
+                    BYTE:    AR[5] <= AR[5] - 32'd1;
+                    WORD:    AR[5] <= AR[5] - 32'd2;
+                    default: AR[5] <= AR[5] - 32'd4;
+                endcase
+            end
+            3'd6: begin
+                case (OP_SIZE)
+                    BYTE:    AR[6] <= AR[6] - 32'd1;
+                    WORD:    AR[6] <= AR[6] - 32'd2;
+                    default: AR[6] <= AR[6] - 32'd4;
+                endcase
+            end
+            default: ;
+        endcase
+    end
+
+    if (AR_WR_2 && AR_PNTR_WB_2 != 3'd7) begin
+        case (AR_PNTR_WB_2)
+            3'd0: AR[0] <= AR_IN_2;
+            3'd1: AR[1] <= AR_IN_2;
+            3'd2: AR[2] <= AR_IN_2;
+            3'd3: AR[3] <= AR_IN_2;
+            3'd4: AR[4] <= AR_IN_2;
+            3'd5: AR[5] <= AR_IN_2;
+            3'd6: AR[6] <= AR_IN_2;
+            default: ;
+        endcase
+    end
 end
 
 always_ff @(posedge CLK) begin : fcodes

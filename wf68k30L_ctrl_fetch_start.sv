@@ -47,7 +47,31 @@ localparam logic [4:0]
     INIT_EXEC_WB   = 5'd14,
     SWITCH_STATE   = 5'd16;
 
+function automatic logic imm_is_long_startgrp2(
+    input logic [6:0]  op_i,
+    input logic [13:0] biw0_i
+);
+begin
+    // Decode long-immediate width directly from opcode bits for START_OP
+    // immediate-source cases to avoid a combinational dependency on OP_SIZE_I.
+    case (op_i)
+        ADDA, CMPA, SUBA: imm_is_long_startgrp2 = (biw0_i[8:7] == 2'b11);
+        MOVEA:            imm_is_long_startgrp2 = (biw0_i[13:12] == 2'b10);
+        CHK:              imm_is_long_startgrp2 = (biw0_i[8:7] == 2'b10);
+        CHK2, CMP2:       imm_is_long_startgrp2 = (biw0_i[10:9] == 2'b10);
+        DIVS, DIVU,
+        MULS, MULU:       imm_is_long_startgrp2 = !biw0_i[7];
+        default:          imm_is_long_startgrp2 = 1'b0;
+    endcase
+end
+endfunction
+
 always_comb begin : start_op_dec
+    logic imm_is_long_startgrp1;
+    logic imm_is_long_startgrp2_v;
+    imm_is_long_startgrp1 = (BIW_0[7:6] == 2'b10);
+    imm_is_long_startgrp2_v = imm_is_long_startgrp2(OP, BIW_0);
+
     if (!OPD_ACK && !OW_RDY) begin
         NEXT_FETCH_STATE = START_OP;
     end else begin
@@ -117,7 +141,7 @@ always_comb begin : start_op_dec
                             NEXT_FETCH_STATE = FETCH_ABS_LO;
                         end else if (BIW_0[2:0] == 3'b001) begin
                             NEXT_FETCH_STATE = FETCH_ABS_HI;
-                        end else if (BIW_0[2:0] == 3'b100 && OP_SIZE_I == LONG) begin
+                        end else if (BIW_0[2:0] == 3'b100 && imm_is_long_startgrp1) begin
                             NEXT_FETCH_STATE = FETCH_IDATA_B2;
                         end else if (BIW_0[2:0] == 3'b100) begin // Word or byte.
                             NEXT_FETCH_STATE = FETCH_IDATA_B1;
@@ -173,7 +197,7 @@ always_comb begin : start_op_dec
                             NEXT_FETCH_STATE = FETCH_ABS_LO;
                         end else if (BIW_0[2:0] == 3'b001) begin
                             NEXT_FETCH_STATE = FETCH_ABS_HI;
-                        end else if (BIW_0[2:0] == 3'b100 && OP_SIZE_I == LONG) begin
+                        end else if (BIW_0[2:0] == 3'b100 && imm_is_long_startgrp2_v) begin
                             NEXT_FETCH_STATE = FETCH_IDATA_B2;
                         end else if (BIW_0[2:0] == 3'b100) begin // Word or Byte.
                             NEXT_FETCH_STATE = FETCH_IDATA_B1;
