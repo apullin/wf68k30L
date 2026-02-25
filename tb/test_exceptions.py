@@ -40,7 +40,7 @@ from m68k_encode import (
     addi, subi, add,
     jmp, jmp_abs, jsr, jsr_abs, rts, rte,
     trap, trapv, illegal,
-    chk_w,
+    chk_w, chk_l,
     move_from_ccr, move_to_ccr, move_from_sr, move_to_sr,
     divu_w, divs_w,
     imm_long, imm_word, abs_long, disp16,
@@ -994,6 +994,64 @@ async def test_chk_w_above_upper_traps(dut):
     h.cleanup()
 
 
+@cocotb.test()
+async def test_chk_l_negative_traps(dut):
+    """CHK.L with negative value: triggers CHK exception (vector 6)."""
+    h = CPUTestHarness(dut)
+    handler_addr = HANDLER_BASE + 0x620
+    vector_addr = 6 * 4  # 0x018
+
+    program = [
+        *moveq(0, 1),
+        *moveq(-1, 0),                         # D0 = 0xFFFFFFFF (-1)
+        *moveq(10, 3),                         # D3 = 10 (upper bound)
+        *chk_l(DN, 3, 0),                      # CHK.L D3,D0: D0 < 0 -> trap
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, _handler_code(h, 1, 0x66))
+
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+    d1_val = h.read_result_long(0)
+    assert d1_val == 0x66, (
+        f"CHK.L with negative value should trap: D1 expected 0x66, got 0x{d1_val:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_chk_l_above_upper_traps(dut):
+    """CHK.L with value > upper bound: triggers CHK exception (vector 6)."""
+    h = CPUTestHarness(dut)
+    handler_addr = HANDLER_BASE + 0x620
+    vector_addr = 6 * 4
+
+    program = [
+        *moveq(0, 1),
+        *moveq(20, 0),                         # D0 = 20 (value)
+        *moveq(10, 3),                         # D3 = 10 (upper bound)
+        *chk_l(DN, 3, 0),                      # CHK.L D3,D0: D0 > D3 -> trap
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, _handler_code(h, 1, 0x66))
+
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+    d1_val = h.read_result_long(0)
+    assert d1_val == 0x66, (
+        f"CHK.L with value > upper should trap: D1 expected 0x66, got 0x{d1_val:08X}"
+    )
+    h.cleanup()
+
+
 # =========================================================================
 # Privilege violation tests (vector 8)
 # =========================================================================
@@ -1114,6 +1172,40 @@ async def test_privilege_violation_move_from_sr_user(dut):
     d1_val = h.read_result_long(0)
     assert d1_val == 0x08, (
         f"MOVE from SR in user mode should trigger vector 8: D1 expected 0x08, got 0x{d1_val:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_privilege_violation_rte_user(dut):
+    """RTE in user mode: triggers privilege violation (vector 8)."""
+    h = CPUTestHarness(dut)
+    handler_addr = HANDLER_BASE + 0x700
+    vector_addr = 8 * 4
+
+    handler_code = _handler_code(h, 1, 0x08)
+
+    program = [
+        *moveq(0, 1),
+        # Switch to user mode
+        *move(WORD, SPECIAL, IMMEDIATE, DN, 5),
+        *imm_word(0x0000),
+        *move_to_sr(DN, 5),
+        # RTE is privileged and must trap in user mode
+        *rte(),
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+
+    found = await h.run_until_sentinel(max_cycles=5000)
+    assert found, "Sentinel not reached"
+    d1_val = h.read_result_long(0)
+    assert d1_val == 0x08, (
+        f"RTE in user mode should trigger vector 8: D1 expected 0x08, got 0x{d1_val:08X}"
     )
     h.cleanup()
 
