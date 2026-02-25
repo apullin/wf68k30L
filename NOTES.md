@@ -112,9 +112,14 @@ the original design targeted ASICs).
 
 ### SystemVerilog — ECP5 synthesis via Yosys (`synth_ecp5`)
 
-Build command:
+Build commands (repo flow):
 
-    yosys -p 'read_verilog -sv wf68k30L_*.sv; synth_ecp5 -noabc9 -top WF68K30L_TOP'
+    ./run_ecp5_representative.sh
+    USE_ABC9=0 ./run_ecp5_representative.sh
+
+Direct Yosys command (default ABC9 mapping):
+
+    yosys -p 'read_verilog -sv wf68k30L_*.sv; synth_ecp5 -top WF68K30L_TOP'
 
 No `-asyncprld` or `async2sync` needed (multi-edge process converted to
 synchronous logic in the SV port).

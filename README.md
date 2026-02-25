@@ -23,9 +23,34 @@ The SV port fits in an LFE5U-25F (~77% utilization) or larger. LUT reduction
 comes primarily from replacing VHDL for-loops with direct equality comparisons
 and bitwise mask operations, plus eliminating `async2sync` overhead.
 
-Build command:
+Build commands (repo flow):
 
-    yosys -p 'read_verilog -sv wf68k30L_*.sv; synth_ecp5 -noabc9 -top WF68K30L_TOP'
+    ./run_ecp5_representative.sh
+    USE_ABC9=0 ./run_ecp5_representative.sh
+
+Direct Yosys command (default ABC9 mapping):
+
+    yosys -p 'read_verilog -sv wf68k30L_*.sv; synth_ecp5 -top WF68K30L_TOP'
+
+## Representative P&R Baseline (ECP5, 25 MHz)
+
+Current repo defaults:
+
+- `run_ecp5_representative.sh` uses **ABC9 by default** (`USE_ABC9=1`).
+- `wf68K30L.sdc` intentionally keeps only the primary clock constraint; this
+  avoids unsupported false-path directives in `nextpnr-ecp5`.
+
+Baseline seed sweep command:
+
+    ./run_ecp5_seed_sweep.sh
+
+Representative baseline from 10 seeds (`build/rep_ecp5_seed_sweep_task3/results.csv`):
+
+| Metric | Value |
+|--------|-------|
+| Fmax min/med/max | 16.131 / 16.481 / 16.898 MHz |
+| TRELLIS_COMB | 18,689 (all 10 seeds) |
+| TRELLIS_FF | 2,522 (all 10 seeds) |
 
 ## Equivalence Validation
 

@@ -59,8 +59,9 @@ is no longer reproducible with the updated local Yosys build.
   `repro=False`, `retcode=0`.
 - Legacy failing logs are retained in `abc9_bug/runs/` for comparison.
 
-**Impact:** None on functionality. ABC9 flow is now usable on this design with the
-updated Yosys binary.
+**Impact:** None on functionality. ABC9 flow is now the default for this repo's
+ECP5 script (`run_ecp5_representative.sh`), with `USE_ABC9=0` fallback retained
+while Yosys PR #5704 remains open.
 
 ---
 
