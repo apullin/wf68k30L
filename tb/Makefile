@@ -38,8 +38,14 @@ VERILOG_SOURCES = \
 
 # Default: full top-level smoke test
 TOPLEVEL ?= WF68K30L_TOP
-MODULE ?= $(TEST_MODULE)
 TEST_MODULE ?= test_smoke
+COCOTB_TEST_MODULES ?= $(TEST_MODULE)
+
+# Keep simulator build products per top-level and isolate the cocotb
+# verilator wrapper object (`../verilator.o`) per top-level too.
+# Using an extra subdir level prevents ABI mismatches when switching
+# TOPLEVEL values without a full clean.
+SIM_BUILD ?= sim_build/$(TOPLEVEL)/sim
 
 # Verilator flags
 EXTRA_ARGS += -I$(SRC_DIR)
