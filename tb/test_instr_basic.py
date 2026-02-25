@@ -423,3 +423,88 @@ async def test_prefetch_single_word_prefix_sweep(dut):
             f"(prefix_words={prefix_words})"
         )
         h.cleanup()
+
+
+@cocotb.test()
+async def test_prefetch_single_word_prefix_wait_state_sweep(dut):
+    """Hardening regression: prefetch sequencing remains stable with wait states."""
+    prefix_ops = [
+        moveq(2, 1),
+        swap(1),
+        moveq(3, 2),
+        clr(LONG, DN, 2),
+        moveq(4, 3),
+        not_op(LONG, DN, 3),
+        moveq(5, 4),
+        neg(LONG, DN, 4),
+    ]
+
+    for wait_states in (1, 2, 3):
+        for extra_words in (1, 4, len(prefix_ops)):
+            h = CPUTestHarness(dut, wait_states=wait_states)
+            prefix_words = 1 + extra_words
+
+            program = [
+                *moveq(0x2A, 0),  # D0 payload
+            ]
+            for op_words in prefix_ops[:extra_words]:
+                program += [*op_words]
+            program += [
+                *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),
+                *h.sentinel_program(),
+            ]
+
+            await h.setup(program)
+
+            fetched_prog = []
+            prev_as_n = 1
+            monitor_cycles = 1600 + (wait_states * 500)
+            for _ in range(monitor_cycles):
+                await RisingEdge(dut.CLK)
+                try:
+                    as_n = int(dut.ASn.value)
+                    rw_n = int(dut.RWn.value)
+                    if prev_as_n == 1 and as_n == 0 and rw_n == 1:
+                        addr = int(dut.ADR_OUT.value)
+                        if 0x000100 <= addr < 0x000240:
+                            fetched_prog.append(addr)
+                    prev_as_n = as_n
+                except ValueError:
+                    pass
+
+            found = await h.run_until_sentinel(max_cycles=9000 + (wait_states * 2000))
+            assert found, (
+                f"Sentinel not reached (wait_states={wait_states}, "
+                f"prefix_words={prefix_words})"
+            )
+
+            opcode_addr = 0x000100 + (2 * prefix_words)
+            ext_high = opcode_addr + 2
+            ext_low = opcode_addr + 4
+
+            assert opcode_addr in fetched_prog, (
+                f"Missing opcode fetch at 0x{opcode_addr:06X} "
+                f"(wait_states={wait_states}, prefix_words={prefix_words})"
+            )
+            assert ext_high in fetched_prog, (
+                f"Missing extension-high fetch at 0x{ext_high:06X} "
+                f"(wait_states={wait_states}, prefix_words={prefix_words})"
+            )
+            assert ext_low in fetched_prog, (
+                f"Missing extension-low fetch at 0x{ext_low:06X} "
+                f"(wait_states={wait_states}, prefix_words={prefix_words})"
+            )
+
+            for i in range(len(fetched_prog) - 1):
+                if fetched_prog[i] == ext_high and fetched_prog[i + 1] == ext_high:
+                    raise AssertionError(
+                        f"Duplicate extension-high fetch at 0x{ext_high:06X} "
+                        f"(wait_states={wait_states}, prefix_words={prefix_words})"
+                    )
+
+            result = h.read_result_long(0)
+            assert result == 0x2A, (
+                f"Expected RESULT_BASE=0x0000002A, got 0x{result:08X} "
+                f"(wait_states={wait_states}, prefix_words={prefix_words})"
+            )
+            h.cleanup()

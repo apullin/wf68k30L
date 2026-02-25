@@ -30,7 +30,7 @@ from cpu_harness import CPUTestHarness
 from m68k_encode import (
     BYTE, WORD, LONG,
     DN, AN, AN_IND, SPECIAL, ABS_L, IMMEDIATE,
-    moveq, move, movea, move_to_abs_long, nop, addq, add, imm_long,
+    moveq, move, movea, move_to_abs_long, nop, addq, add, imm_long, abs_long,
 )
 
 
@@ -576,6 +576,33 @@ async def test_data_bus_width(dut):
 # ===================================================================
 # 5. Edge Cases
 # ===================================================================
+
+@cocotb.test()
+async def test_misaligned_long_read_wait_states(dut):
+    """Misaligned MOVE.L (abs).L read is assembled correctly with wait states."""
+    h = CPUTestHarness(dut, wait_states=2)
+    addr = h.DATA_BASE + 0x181  # force misaligned long access
+    expected = 0x89ABCDEF
+    h.mem.load_long(addr, expected)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),     # A0 = RESULT_BASE
+        *imm_long(h.RESULT_BASE),
+        *move(LONG, SPECIAL, ABS_L, DN, 0),      # D0 = (abs).L misaligned
+        *abs_long(addr),
+        *move(LONG, DN, 0, AN_IND, 0),           # store D0 for checking
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+
+    result = h.read_result_long(0)
+    assert result == expected, (
+        f"Misaligned long read mismatch: expected 0x{expected:08X}, got 0x{result:08X}"
+    )
+    h.cleanup()
+
 
 @cocotb.test()
 async def test_back_to_back_reads(dut):
