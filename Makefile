@@ -53,6 +53,7 @@ test-fast:
 # Broader stable regression set used before larger refactors and releases.
 test-full: test-fast
 	$(MAKE) -C tb TEST_MODULE=test_smoke COCOTB_TEST_FILTER=test_smoke_run$$ TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_software_battery TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_data_regs TOPLEVEL=WF68K30L_DATA_REGISTERS
 	$(MAKE) -C tb TEST_MODULE=test_addr_regs TOPLEVEL=WF68K30L_ADDRESS_REGISTERS
 	$(MAKE) -C tb TEST_MODULE=test_divider TOPLEVEL=WF68K30L_ALU

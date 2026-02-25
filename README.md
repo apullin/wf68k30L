@@ -73,6 +73,24 @@ Run with:
 See [NOTES.md](NOTES.md) for detailed build requirements, compatibility
 changes, and technical notes.
 
+## Software Smoke Battery
+
+In addition to instruction-by-instruction regressions, `tb/test_software_battery.py`
+runs longer software-style kernels that mix control flow, memory traffic, and ALU/divider
+operations in one program image.
+
+These cases enable lightweight bus invariants in the harness:
+
+- Per-cycle stability: `RWn`/`SIZE` remain stable while `ASn` is asserted
+- Bounded handshake progress: no single bus cycle may remain active beyond a
+  configurable cycle bound
+- Control decode sanity: sampled `ASn`/`DSn`/`RWn`/`SIZE` values must remain in
+  legal encoded ranges
+
+Run directly with:
+
+    make -C tb TEST_MODULE=test_software_battery TOPLEVEL=WF68K30L_TOP
+
 ---
 
 ## Original README
