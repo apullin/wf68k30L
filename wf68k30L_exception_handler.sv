@@ -159,6 +159,21 @@ typedef enum logic [4:0] {
     EX_TRAPV    = 5'd16
 } EXCEPTIONS;
 
+typedef enum logic [3:0] {
+    TRAP_SRC_NONE    = 4'd0,
+    TRAP_SRC_CHK     = 4'd1,
+    TRAP_SRC_DIVZERO = 4'd2,
+    TRAP_SRC_TRAP    = 4'd3,
+    TRAP_SRC_TRAPCC  = 4'd4,
+    TRAP_SRC_TRAPV   = 4'd5,
+    TRAP_SRC_PRIV    = 4'd6,
+    TRAP_SRC_1010    = 4'd7,
+    TRAP_SRC_1111    = 4'd8,
+    TRAP_SRC_ILLEGAL = 4'd9,
+    TRAP_SRC_FORMAT  = 4'd10,
+    TRAP_SRC_RTE     = 4'd11
+} TRAP_SOURCES;
+
 // ---- Internal signals ----
 logic        ACCESS_ERR;
 logic        AVEC;
@@ -197,6 +212,8 @@ logic        PIPE_FULL;
 integer      STACK_CNT;
 logic [3:0]  STACK_FORMAT_I;
 logic        SYS_INIT;
+logic        clear_instruction_traps;
+TRAP_SOURCES trap_source;
 
 // True when any exception pending flag is asserted.
 logic        any_exception_pending;
@@ -340,55 +357,61 @@ always_ff @(posedge CLK) begin : pending_interrupts
     end
 end
 
-always_ff @(posedge CLK) begin : pending_instruction_traps
-    // These nine trap sources are mutually exclusive (never fire simultaneously).
+always_comb begin : decode_instruction_trap_source
+    // Preserve original priority between trap sources.
+    trap_source = TRAP_SRC_NONE;
     if (TRAP_CHK)
-        EX_P_CHK <= 1'b1;
+        trap_source = TRAP_SRC_CHK;
     else if (TRAP_DIVZERO)
-        EX_P_DIVZERO <= 1'b1;
+        trap_source = TRAP_SRC_DIVZERO;
     else if (TRAP_CODE_OPC == T_TRAP)
-        EX_P_TRAP <= 1'b1;
+        trap_source = TRAP_SRC_TRAP;
     else if (TRAP_cc)
-        EX_P_TRAPcc <= 1'b1;
+        trap_source = TRAP_SRC_TRAPCC;
     else if (TRAP_V)
-        EX_P_TRAPV <= 1'b1;
+        trap_source = TRAP_SRC_TRAPV;
     else if (TRAP_CODE_OPC == T_PRIV)
-        EX_P_PRIV <= 1'b1;
+        trap_source = TRAP_SRC_PRIV;
     else if (TRAP_CODE_OPC == T_1010)
-        EX_P_1010 <= 1'b1;
+        trap_source = TRAP_SRC_1010;
     else if (TRAP_CODE_OPC == T_1111)
-        EX_P_1111 <= 1'b1;
-    else if (TRAP_CODE_OPC == T_ILLEGAL)
-        EX_P_ILLEGAL <= 1'b1;
-    else if (TRAP_ILLEGAL) // Used for BKPT.
-        EX_P_ILLEGAL <= 1'b1;
-    else if (EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE)
-        EX_P_FORMAT <= 1'b1;
-    else if (EX_STATE == EXS_EXAMINE_VERSION && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE)
-        EX_P_FORMAT <= 1'b1;
+        trap_source = TRAP_SRC_1111;
+    else if (TRAP_CODE_OPC == T_ILLEGAL || TRAP_ILLEGAL)
+        trap_source = TRAP_SRC_ILLEGAL;
+    else if ((EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE) ||
+             (EX_STATE == EXS_EXAMINE_VERSION && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE))
+        trap_source = TRAP_SRC_FORMAT;
     else if (TRAP_CODE_OPC == T_RTE)
-        EX_P_RTE <= 1'b1;
-    else if (EX_STATE == EXS_REFILL_PIPE && NEXT_EX_STATE != EXS_REFILL_PIPE) begin
-        // Clear instruction trap flags after IPIPE_FLUSH for relevant exceptions.
-        case (EXCEPTION)
-            EX_1010, EX_1111, EX_CHK, EX_DIVZERO, EX_ILLEGAL,
-            EX_TRAP, EX_TRAPcc, EX_TRAPV, EX_FORMAT, EX_PRIV, EX_RTE: begin
-                EX_P_CHK     <= 1'b0;
-                EX_P_DIVZERO <= 1'b0;
-                EX_P_PRIV    <= 1'b0;
-                EX_P_1010    <= 1'b0;
-                EX_P_1111    <= 1'b0;
-                EX_P_ILLEGAL <= 1'b0;
-                EX_P_RTE     <= 1'b0;
-                EX_P_TRAP    <= 1'b0;
-                EX_P_TRAPcc  <= 1'b0;
-                EX_P_TRAPV   <= 1'b0;
-                EX_P_FORMAT  <= 1'b0;
-            end
+        trap_source = TRAP_SRC_RTE;
+end
+
+always_comb begin : decode_instruction_trap_clear
+    clear_instruction_traps = SYS_INIT;
+    if (EX_STATE == EXS_REFILL_PIPE && NEXT_EX_STATE != EXS_REFILL_PIPE &&
+        (EXCEPTION == EX_1010 || EXCEPTION == EX_1111 || EXCEPTION == EX_CHK ||
+         EXCEPTION == EX_DIVZERO || EXCEPTION == EX_ILLEGAL || EXCEPTION == EX_TRAP ||
+         EXCEPTION == EX_TRAPcc || EXCEPTION == EX_TRAPV || EXCEPTION == EX_FORMAT ||
+         EXCEPTION == EX_PRIV || EXCEPTION == EX_RTE))
+        clear_instruction_traps = 1'b1;
+end
+
+always_ff @(posedge CLK) begin : pending_instruction_traps
+    if (trap_source != TRAP_SRC_NONE) begin
+        case (trap_source)
+            TRAP_SRC_CHK:     EX_P_CHK <= 1'b1;
+            TRAP_SRC_DIVZERO: EX_P_DIVZERO <= 1'b1;
+            TRAP_SRC_TRAP:    EX_P_TRAP <= 1'b1;
+            TRAP_SRC_TRAPCC:  EX_P_TRAPcc <= 1'b1;
+            TRAP_SRC_TRAPV:   EX_P_TRAPV <= 1'b1;
+            TRAP_SRC_PRIV:    EX_P_PRIV <= 1'b1;
+            TRAP_SRC_1010:    EX_P_1010 <= 1'b1;
+            TRAP_SRC_1111:    EX_P_1111 <= 1'b1;
+            TRAP_SRC_ILLEGAL: EX_P_ILLEGAL <= 1'b1;
+            TRAP_SRC_FORMAT:  EX_P_FORMAT <= 1'b1;
+            TRAP_SRC_RTE:     EX_P_RTE <= 1'b1;
             default: ;
         endcase
-    end else if (SYS_INIT) begin
-        // Clear all instruction traps during reset.
+    end else if (clear_instruction_traps) begin
         EX_P_CHK     <= 1'b0;
         EX_P_DIVZERO <= 1'b0;
         EX_P_PRIV    <= 1'b0;
