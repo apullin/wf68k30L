@@ -214,6 +214,17 @@ logic [3:0]  STACK_FORMAT_I;
 logic        SYS_INIT;
 logic        clear_instruction_traps;
 TRAP_SOURCES trap_source;
+logic        trap_set_chk;
+logic        trap_set_divzero;
+logic        trap_set_trap;
+logic        trap_set_trapcc;
+logic        trap_set_trapv;
+logic        trap_set_priv;
+logic        trap_set_1010;
+logic        trap_set_1111;
+logic        trap_set_illegal;
+logic        trap_set_format;
+logic        trap_set_rte;
 
 // True when any exception pending flag is asserted.
 logic        any_exception_pending;
@@ -395,35 +406,47 @@ always_comb begin : decode_instruction_trap_clear
         clear_instruction_traps = 1'b1;
 end
 
+always_comb begin : decode_instruction_trap_set
+    trap_set_chk     = 1'b0;
+    trap_set_divzero = 1'b0;
+    trap_set_trap    = 1'b0;
+    trap_set_trapcc  = 1'b0;
+    trap_set_trapv   = 1'b0;
+    trap_set_priv    = 1'b0;
+    trap_set_1010    = 1'b0;
+    trap_set_1111    = 1'b0;
+    trap_set_illegal = 1'b0;
+    trap_set_format  = 1'b0;
+    trap_set_rte     = 1'b0;
+
+    case (trap_source)
+        TRAP_SRC_CHK:     trap_set_chk = 1'b1;
+        TRAP_SRC_DIVZERO: trap_set_divzero = 1'b1;
+        TRAP_SRC_TRAP:    trap_set_trap = 1'b1;
+        TRAP_SRC_TRAPCC:  trap_set_trapcc = 1'b1;
+        TRAP_SRC_TRAPV:   trap_set_trapv = 1'b1;
+        TRAP_SRC_PRIV:    trap_set_priv = 1'b1;
+        TRAP_SRC_1010:    trap_set_1010 = 1'b1;
+        TRAP_SRC_1111:    trap_set_1111 = 1'b1;
+        TRAP_SRC_ILLEGAL: trap_set_illegal = 1'b1;
+        TRAP_SRC_FORMAT:  trap_set_format = 1'b1;
+        TRAP_SRC_RTE:     trap_set_rte = 1'b1;
+        default: ;
+    endcase
+end
+
 always_ff @(posedge CLK) begin : pending_instruction_traps
-    if (trap_source != TRAP_SRC_NONE) begin
-        case (trap_source)
-            TRAP_SRC_CHK:     EX_P_CHK <= 1'b1;
-            TRAP_SRC_DIVZERO: EX_P_DIVZERO <= 1'b1;
-            TRAP_SRC_TRAP:    EX_P_TRAP <= 1'b1;
-            TRAP_SRC_TRAPCC:  EX_P_TRAPcc <= 1'b1;
-            TRAP_SRC_TRAPV:   EX_P_TRAPV <= 1'b1;
-            TRAP_SRC_PRIV:    EX_P_PRIV <= 1'b1;
-            TRAP_SRC_1010:    EX_P_1010 <= 1'b1;
-            TRAP_SRC_1111:    EX_P_1111 <= 1'b1;
-            TRAP_SRC_ILLEGAL: EX_P_ILLEGAL <= 1'b1;
-            TRAP_SRC_FORMAT:  EX_P_FORMAT <= 1'b1;
-            TRAP_SRC_RTE:     EX_P_RTE <= 1'b1;
-            default: ;
-        endcase
-    end else if (clear_instruction_traps) begin
-        EX_P_CHK     <= 1'b0;
-        EX_P_DIVZERO <= 1'b0;
-        EX_P_PRIV    <= 1'b0;
-        EX_P_1010    <= 1'b0;
-        EX_P_1111    <= 1'b0;
-        EX_P_ILLEGAL <= 1'b0;
-        EX_P_RTE     <= 1'b0;
-        EX_P_TRAP    <= 1'b0;
-        EX_P_TRAPcc  <= 1'b0;
-        EX_P_TRAPV   <= 1'b0;
-        EX_P_FORMAT  <= 1'b0;
-    end
+    EX_P_CHK     <= trap_set_chk     ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_CHK);
+    EX_P_DIVZERO <= trap_set_divzero ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_DIVZERO);
+    EX_P_TRAP    <= trap_set_trap    ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_TRAP);
+    EX_P_TRAPcc  <= trap_set_trapcc  ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_TRAPcc);
+    EX_P_TRAPV   <= trap_set_trapv   ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_TRAPV);
+    EX_P_PRIV    <= trap_set_priv    ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_PRIV);
+    EX_P_1010    <= trap_set_1010    ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_1010);
+    EX_P_1111    <= trap_set_1111    ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_1111);
+    EX_P_ILLEGAL <= trap_set_illegal ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_ILLEGAL);
+    EX_P_FORMAT  <= trap_set_format  ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_FORMAT);
+    EX_P_RTE     <= trap_set_rte     ? 1'b1 : (clear_instruction_traps ? 1'b0 : EX_P_RTE);
 end
 
 // ---- Derived status signals ----
