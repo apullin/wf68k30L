@@ -29,7 +29,7 @@ from cocotb.triggers import RisingEdge, ClockCycles
 from cpu_harness import CPUTestHarness
 from m68k_encode import (
     BYTE, WORD, LONG,
-    DN, AN, AN_IND, SPECIAL, ABS_L, IMMEDIATE,
+    DN, AN, AN_IND, AN_DISP, SPECIAL, ABS_L, IMMEDIATE,
     moveq, move, movea, move_to_abs_long, nop, addq, add, imm_long, abs_long,
 )
 
@@ -600,6 +600,74 @@ async def test_misaligned_long_read_wait_states(dut):
     result = h.read_result_long(0)
     assert result == expected, (
         f"Misaligned long read mismatch: expected 0x{expected:08X}, got 0x{result:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_move_imm_long_fp_disp_roundtrip(dut):
+    """Regression: MOVE.L #imm,(d16,A6) + MOVEA.L (d16,A6),A0 keeps all bytes.
+
+    CoreMark O2 uses this exact pattern for function-pointer locals.
+    """
+    h = CPUTestHarness(dut)
+
+    mem_addr = 0x00001000 - 78
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),   # A6 = 0x00001000
+        *imm_long(0x00001000),
+        0x2D7C, 0x0000, 0x0A14, 0xFFB2,        # MOVE.L #$00000A14,-78(A6)
+        0x206E, 0xFFB2,                        # MOVEA.L -78(A6),A0
+        *move_to_abs_long(LONG, AN, 0, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel(max_cycles=4000)
+    assert found, "Sentinel not reached"
+
+    got = h.read_result_long(0)
+    mem_val = h.mem.read(mem_addr, 4)
+    assert mem_val == 0x00000A14, (
+        f"Stored long mismatch at 0x{mem_addr:08X}: got 0x{mem_val:08X}"
+    )
+    assert got == 0x00000A14, (
+        f"Round-trip MOVEA mismatch: expected 0x00000A14, got 0x{got:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_move_imm_long_fp_disp_roundtrip_off1(dut):
+    """Regression: misaligned +1 long round-trip keeps all bytes."""
+    h = CPUTestHarness(dut)
+
+    scratch_base = h.DATA_BASE + 0x300
+    disp = 5
+    mem_addr = scratch_base + disp
+    expected = 0xCB91CE37
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),      # A6 = scratch base
+        *imm_long(scratch_base),
+        *move(LONG, SPECIAL, IMMEDIATE, AN_DISP, 6),  # (d16,A6) = expected
+        *imm_long(expected),
+        disp & 0xFFFF,
+        *movea(LONG, AN_DISP, 6, 0),              # A0 = (d16,A6)
+        disp & 0xFFFF,
+        *move_to_abs_long(LONG, AN, 0, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel(max_cycles=4000)
+    assert found, "Sentinel not reached"
+
+    mem_val = h.mem.read(mem_addr, 4)
+    got = h.read_result_long(0)
+    assert mem_val == expected, (
+        f"Stored long mismatch at 0x{mem_addr:08X}: got 0x{mem_val:08X}"
+    )
+    assert got == expected, (
+        f"Round-trip MOVEA mismatch: expected 0x{expected:08X}, got 0x{got:08X}"
     )
     h.cleanup()
 
