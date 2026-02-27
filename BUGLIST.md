@@ -15,6 +15,46 @@ None currently.
 
 ## Resolved Bugs
 
+### BUG-R014: CoreMark false trap due to bus-model split-transfer lane packing
+
+**Severity:** Medium (verification infrastructure)
+**Status:** Fixed
+**Found:** CoreMark O2 smoke (`tb/test_coremark_smoke.py`)
+
+**Description:**
+CoreMark `O2` sometimes terminated via the synthetic vector-handler code with
+`BAD00002` (appearing like a bus-error trap). Root cause was not RTL exception
+logic: the cocotb bus responder (`tb/bus_model.py`) used incorrect lane
+selection for split misaligned long transfers.
+
+This corrupted long reads such as:
+- `MOVE.L #$00000A14,-78(A6)`
+- `MOVEA.L -78(A6),A0`
+
+where memory held `0x00000A14` but the core read back `0x0A140A14`, causing bad
+indirect `JSR` targets in CoreMark.
+
+**Fix:**
+- In `tb/bus_model.py`, replaced simplistic lane mapping with cycle-aware
+  `(start_lane, byte_count)` layout derived from `SIZE` and `ADR[1:0]`.
+- Corrected long split-transfer handling to match observed WF68K30L behavior:
+  misaligned **write** cycles source valid bytes from `A1:A0`, while misaligned
+  **read** cycles present requested bytes from the top lanes across split cycles.
+- Added targeted regression
+  `tb/test_bus_protocol.py::test_move_imm_long_fp_disp_roundtrip` and
+  `tb/test_bus_protocol.py::test_move_imm_long_fp_disp_roundtrip_off1` to lock
+  this behavior.
+
+**Validation:**
+- `make -C tb TEST_MODULE=test_bus_protocol TOPLEVEL=WF68K30L_TOP` targeted
+  misaligned-long regressions pass.
+- `QEMU_DIFF_SEED=5 QEMU_DIFF_OPS=64 make test-qemu-diff-fuzz` passes.
+- Seed sweep `QEMU_DIFF_OPS=64`, seeds `1..40` passes.
+- `COREMARK_OPTS=O2 COREMARK_MAX_CYCLES=20000000 make test-coremark-smoke` ->
+  status `ok` (no vector-handler marker trap path).
+
+---
+
 ### BUG-R013: Prefetch pipeline hazard with multi-word instructions (was BUG-001)
 
 **Severity:** High
