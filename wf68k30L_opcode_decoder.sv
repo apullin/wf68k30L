@@ -173,10 +173,17 @@ logic [6:0]  PC_VAR_MEM_S;
 always_ff @(posedge CLK) begin : opcode_rd_ctrl
     if (OPCODE_RDY)
         OPCODE_RD_I <= 1'b0;
+    else if (OPCODE_FLUSH)
+        // While a pre-flush in-flight opcode response is being discarded,
+        // do not launch another opcode request. Otherwise the first
+        // post-flush opcode can be dropped as well.
+        OPCODE_RD_I <= 1'b0;
     else if (BUSY_EXH && !IPIPE_FILL)
         OPCODE_RD_I <= 1'b0;
     else if (IPIPE_FLUSH)
-        OPCODE_RD_I <= 1'b1;
+        // Let the flush cycle complete before launching the first refill
+        // request, so the address mux cannot reuse a stale pre-flush latch.
+        OPCODE_RD_I <= 1'b0;
     else if ((LOOP_ATN && !OPCODE_RD_I) || LOOP_BSY_I)
         OPCODE_RD_I <= 1'b0;
     else if (IPIPE_PNTR < 2'd3)
@@ -185,14 +192,21 @@ end
 
 // P_OPCODE_FLUSH
 always_ff @(posedge CLK) begin : opcode_flush
-    if (IPIPE_FLUSH && OPCODE_RD_I && !OPCODE_RDY)
+    // Only arm response-discard mode when a pre-flush opcode request is
+    // actually in flight. Otherwise we can deadlock with OPCODE_FLUSH=1 and
+    // no future OPCODE_RDY edge to clear it.
+    if (IPIPE_FLUSH && BUSY_MAIN && !OPCODE_RDY && OPCODE_RD_I)
         OPCODE_FLUSH <= 1'b1;
     else if (OPCODE_RDY || BUSY_EXH)
         OPCODE_FLUSH <= 1'b0;
 end
 
-assign OPCODE_RD = OPCODE_RD_I;
-assign OPCODE_RDY_I = OPCODE_FLUSH ? 1'b0 : OPCODE_RDY; // Dismiss the current read cycle.
+// Match the original VHDL behaviour where OPCODE_RD_I is asynchronously
+// forced low when OPCODE_RDY (or exception takeover) is active.
+assign OPCODE_RD = OPCODE_RD_I && !OPCODE_RDY && !(BUSY_EXH && !IPIPE_FILL);
+// Dismiss opcode responses while flushing; this includes same-cycle
+// IPIPE_FLUSH/OPCODE_RDY collisions.
+assign OPCODE_RDY_I = (OPCODE_FLUSH || IPIPE_FLUSH) ? 1'b0 : OPCODE_RDY;
 assign BUSY_OPD = (EXH_REQ && !BUSY_MAIN && IPIPE_PNTR > 2'd0 && !OPCODE_RD_I) ? 1'b0 : // Fill one opcode is sufficient here.
                   (IPIPE_PNTR < 2'd3 || OPCODE_RD_I) ? 1'b1 : 1'b0;
 
