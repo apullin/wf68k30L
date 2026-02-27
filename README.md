@@ -91,6 +91,126 @@ Run directly with:
 
     make -C tb TEST_MODULE=test_software_battery TOPLEVEL=WF68K30L_TOP
 
+## QEMU Differential Smoke
+
+A lightweight differential check is available against `qemu-system-m68k`
+(`-cpu m68030`). It compares the first instruction-start PC trace of a short
+deterministic program between:
+
+- WF68K30L in cocotb/Verilator
+- QEMU m68030 running the same raw program image
+
+Run with:
+
+    make test-qemu-diff
+
+Seeded randomized differential run (register-state check at epilogue):
+
+    make test-qemu-diff-fuzz
+    QEMU_DIFF_SEED=7 QEMU_DIFF_OPS=64 make test-qemu-diff-fuzz
+    QEMU_DIFF_SEEDS=1-200 QEMU_DIFF_OPS=128 make test-qemu-diff-fuzz
+
+## Csmith Smoke
+
+A bare-metal csmith flow is available for fuzz-style software smoke tests.
+Each seed builds a random C program with `csmith`, cross-compiles with
+`m68k-elf-gcc`, and runs in the cocotb harness until it writes the sentinel.
+
+Requirements:
+
+- `csmith`
+- `m68k-elf-gcc`
+- `m68k-elf-objcopy`
+
+Run the integrated cocotb smoke module:
+
+    make test-csmith-smoke
+
+Default run covers a curated 10-seed set:
+`1,4,5,6,7,8,10,12,13,19`.
+The csmith compile step defaults to `CSMITH_CC_EXTRA_FLAGS=-fno-jump-tables`.
+Override seed selection or cycle budget:
+
+    CSMITH_SEEDS=1-25 make test-csmith-smoke
+    CSMITH_SEEDS=3,7,19 CSMITH_MAX_CYCLES=800000 make test-csmith-smoke
+    CSMITH_CC_EXTRA_FLAGS='-fno-jump-tables' make test-csmith-smoke
+
+Build a standalone seed image manually:
+
+    ./tooling/csmith/build_case.sh --seed 13 --out-dir build/csmith/seed_13
+
+## CoreMark Smoke
+
+CoreMark is integrated as a local bare-metal smoke run in `tb/test_coremark_smoke.py`.
+This path builds and runs four optimization variants (`-O0`, `-O1`, `-O2`, `-Os`)
+on the WF68K30L cocotb harness and prints a summary table with image size,
+cycles, and run status (`ok`/`timeout`/`trap:*`).
+
+Run with:
+
+    make test-coremark-smoke
+
+Defaults:
+
+- `COREMARK_MAX_CYCLES=100000000`
+- `COREMARK_ITERATIONS=1`
+- `COREMARK_TOTAL_DATA_SIZE=2000`
+- `COREMARK_OPTS=O0,O1,O2,Os`
+- `COREMARK_SEED3=0x66`
+- `COREMARK_EXECS_MASK=ID_LIST|ID_MATRIX|ID_STATE`
+- `COREMARK_EXTRA_CFLAGS` unset
+
+Optional run knobs:
+
+    COREMARK_ITERATIONS=2 COREMARK_MAX_CYCLES=12000000 COREMARK_OPTS=O2 make test-coremark-smoke
+    COREMARK_TOTAL_DATA_SIZE=600 COREMARK_OPTS=O2 make test-coremark-smoke
+    COREMARK_OPTS=O2,Os make test-coremark-smoke
+    COREMARK_LIST_ITEMS=1 COREMARK_SEED3=1 COREMARK_EXECS_MASK=ID_LIST COREMARK_MAX_CYCLES=500000 make test-coremark-smoke
+    COREMARK_EXTRA_CFLAGS='-fno-jump-tables' make test-coremark-smoke
+
+## Long Shakeout Campaigns
+
+For long unattended local shakeout runs, use:
+
+    make test-qemu-diff-campaign
+    make test-software-torture
+    make test-shakeout
+
+These commands write per-run logs and a `summary.json` to
+`build/shakeout/<timestamp>/`.
+`test-software-torture` now fails hard if any CoreMark optimization row reports
+status other than `ok` (for example, `timeout` or `trap:*`) for required
+optimization levels. By default, required levels are all values in
+`SHAKEOUT_COREMARK_OPTS`. Override with `SHAKEOUT_COREMARK_REQUIRED_OPTS`.
+
+Default campaign scope:
+
+- QEMU differential campaign: `SHAKEOUT_QEMU_SEEDS=1-300`, `SHAKEOUT_QEMU_OPS=128`
+- Software torture campaign:
+  `SHAKEOUT_CSMITH_SEEDS=1,4-10,12-17,19-23,25-32,34-37,39-59`,
+  `SHAKEOUT_CSMITH_MAX_CYCLES=800000`,
+  `SHAKEOUT_COREMARK_OPTS=O0,O1,O2,Os`,
+  `SHAKEOUT_COREMARK_REQUIRED_OPTS=` (empty => all from `SHAKEOUT_COREMARK_OPTS`),
+  `SHAKEOUT_COREMARK_MAX_CYCLES=5000000`,
+  `SHAKEOUT_COREMARK_ITERATIONS=1`,
+  `SHAKEOUT_COREMARK_TOTAL_DATA_SIZE=600`
+
+Example override:
+
+    SHAKEOUT_QEMU_SEEDS=1-1000 SHAKEOUT_QEMU_OPS=128 make test-qemu-diff-campaign
+    SHAKEOUT_CSMITH_SEEDS=1-80 SHAKEOUT_COREMARK_ITERATIONS=2 make test-software-torture
+    SHAKEOUT_COREMARK_REQUIRED_OPTS=O2,Os make test-software-torture
+
+## Jump-Table Repro Tests
+
+Focused cocotb reproductions for switch/jump-table control flow:
+
+    make test-jump-tables
+
+This suite uses compiler-style `MOVE.W table(PC,Dn*scale)` + `JMP table(PC,Dn)`
+patterns, including a nested `JSR/RTS` variant.
+It is a focused repro suite and is not part of `test-full` yet.
+
 ---
 
 ## Original README

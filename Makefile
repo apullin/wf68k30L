@@ -22,7 +22,7 @@ VHDL_SRC := wf68k30L_address_registers.vhd \
 
 ALL_SRC := $(VHDL_PKG) $(VHDL_SRC)
 
-.PHONY: all synth json clean test-fast test-full
+.PHONY: all synth json clean test-fast test-full test-csmith-smoke test-coremark-smoke test-jump-tables test-qemu-diff test-qemu-diff-fuzz test-qemu-diff-campaign test-software-torture test-shakeout
 
 all: json
 
@@ -68,3 +68,64 @@ test-full: test-fast
 	$(MAKE) -C tb TEST_MODULE=test_instr_move TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_instr_muldiv TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_instr_shift TOPLEVEL=WF68K30L_TOP
+
+# Focused repro suite for switch/jump-table control-flow issues.
+test-jump-tables:
+	$(MAKE) -C tb TEST_MODULE=test_jump_tables TOPLEVEL=WF68K30L_TOP
+
+# Optional software fuzz-style smoke using csmith + m68k-elf cross tools.
+test-csmith-smoke:
+	$(MAKE) -C tb TEST_MODULE=test_csmith_smoke TOPLEVEL=WF68K30L_TOP
+
+# CoreMark smoke across -O0/-O1/-O2/-Os using m68k-elf bare-metal flow.
+test-coremark-smoke:
+	$(MAKE) -C tb TEST_MODULE=test_coremark_smoke TOPLEVEL=WF68K30L_TOP
+
+# Differential smoke against qemu-system-m68k (CPU m68030).
+test-qemu-diff:
+	$(MAKE) -C tb TEST_MODULE=test_qemu_diff_smoke TOPLEVEL=WF68K30L_TOP
+
+# Seeded randomized differential check vs qemu-system-m68k (CPU m68030).
+test-qemu-diff-fuzz:
+	$(MAKE) -C tb TEST_MODULE=test_qemu_diff_fuzz TOPLEVEL=WF68K30L_TOP
+
+# Long-form local shakeout defaults (overridable at invocation).
+SHAKEOUT_QEMU_SEEDS ?= 1-300
+SHAKEOUT_QEMU_OPS ?= 128
+SHAKEOUT_CSMITH_SEEDS ?= 1,4-10,12-17,19-23,25-32,34-37,39-59
+SHAKEOUT_CSMITH_MAX_CYCLES ?= 800000
+SHAKEOUT_COREMARK_OPTS ?= O0,O1,O2,Os
+SHAKEOUT_COREMARK_REQUIRED_OPTS ?=
+SHAKEOUT_COREMARK_MAX_CYCLES ?= 5000000
+SHAKEOUT_COREMARK_ITERATIONS ?= 1
+SHAKEOUT_COREMARK_TOTAL_DATA_SIZE ?= 600
+
+# QEMU differential campaign with per-run logs and JSON summary under build/shakeout/.
+test-qemu-diff-campaign:
+	python3 tooling/shakeout/run_shakeout.py qemu \
+	  --qemu-seeds "$(SHAKEOUT_QEMU_SEEDS)" \
+	  --qemu-ops "$(SHAKEOUT_QEMU_OPS)"
+
+# Expanded software torture campaign: csmith battery + CoreMark opt matrix.
+test-software-torture:
+	python3 tooling/shakeout/run_shakeout.py software \
+	  --csmith-seeds "$(SHAKEOUT_CSMITH_SEEDS)" \
+	  --csmith-max-cycles "$(SHAKEOUT_CSMITH_MAX_CYCLES)" \
+	  --coremark-opts "$(SHAKEOUT_COREMARK_OPTS)" \
+	  --coremark-required-opts "$(SHAKEOUT_COREMARK_REQUIRED_OPTS)" \
+	  --coremark-max-cycles "$(SHAKEOUT_COREMARK_MAX_CYCLES)" \
+	  --coremark-iterations "$(SHAKEOUT_COREMARK_ITERATIONS)" \
+	  --coremark-total-data-size "$(SHAKEOUT_COREMARK_TOTAL_DATA_SIZE)"
+
+# Full shakeout campaign: QEMU differential + software torture.
+test-shakeout:
+	python3 tooling/shakeout/run_shakeout.py all \
+	  --qemu-seeds "$(SHAKEOUT_QEMU_SEEDS)" \
+	  --qemu-ops "$(SHAKEOUT_QEMU_OPS)" \
+	  --csmith-seeds "$(SHAKEOUT_CSMITH_SEEDS)" \
+	  --csmith-max-cycles "$(SHAKEOUT_CSMITH_MAX_CYCLES)" \
+	  --coremark-opts "$(SHAKEOUT_COREMARK_OPTS)" \
+	  --coremark-required-opts "$(SHAKEOUT_COREMARK_REQUIRED_OPTS)" \
+	  --coremark-max-cycles "$(SHAKEOUT_COREMARK_MAX_CYCLES)" \
+	  --coremark-iterations "$(SHAKEOUT_COREMARK_ITERATIONS)" \
+	  --coremark-total-data-size "$(SHAKEOUT_COREMARK_TOTAL_DATA_SIZE)"
