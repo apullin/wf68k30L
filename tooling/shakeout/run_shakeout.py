@@ -169,11 +169,47 @@ def _run_software_campaign(args, run_dir):
         "returncode": csmith_result["returncode"],
     }
 
-    if not out["csmith"]["ok"] and not args.continue_on_fail:
+    jump_seed_expr = args.csmith_jump_seeds.strip()
+    if jump_seed_expr:
+        csmith_jump_env = _merge_env(
+            {
+                "CSMITH_SEEDS": jump_seed_expr,
+                "CSMITH_MAX_CYCLES": str(args.csmith_max_cycles),
+            }
+        )
+        csmith_jump_result = _run_command(
+            "csmith-jump-tables",
+            ["make", "-s", "test-csmith-smoke-jump-tables"],
+            run_dir / "csmith_jump_tables.log",
+            csmith_jump_env,
+        )
+        out["csmith_jump_tables"] = {
+            "ok": csmith_jump_result["returncode"] == 0,
+            "seed_expr": jump_seed_expr,
+            "max_cycles": args.csmith_max_cycles,
+            "elapsed_s": csmith_jump_result["elapsed_s"],
+            "counts": _parse_cocotb_counts(csmith_jump_result["output"]),
+            "log": csmith_jump_result["log"],
+            "returncode": csmith_jump_result["returncode"],
+        }
+    else:
+        out["csmith_jump_tables"] = {
+            "ok": True,
+            "skipped": True,
+            "reason": "csmith jump-table seed set is empty",
+        }
+
+    if (
+        (not out["csmith"]["ok"] or not out["csmith_jump_tables"]["ok"])
+        and not args.continue_on_fail
+    ):
         out["coremark"] = {
             "ok": False,
             "skipped": True,
-            "reason": "csmith failed and continue-on-fail is disabled",
+            "reason": (
+                "csmith and/or csmith_jump_tables failed and continue-on-fail "
+                "is disabled"
+            ),
         }
         out["ok"] = False
         return out
@@ -215,7 +251,11 @@ def _run_software_campaign(args, run_dir):
         "log": coremark_result["log"],
         "returncode": coremark_result["returncode"],
     }
-    out["ok"] = out["csmith"]["ok"] and out["coremark"]["ok"]
+    out["ok"] = (
+        out["csmith"]["ok"]
+        and out["csmith_jump_tables"]["ok"]
+        and out["coremark"]["ok"]
+    )
     return out
 
 
@@ -253,6 +293,20 @@ def _print_summary(summary):
             f"pass={c_counts.get('pass', 'n/a')} "
             f"fail={c_counts.get('fail', 'n/a')}"
         )
+
+        csmith_jt = software.get("csmith_jump_tables", {})
+        if csmith_jt.get("skipped"):
+            print(f"CSmith JT: skipped ({csmith_jt.get('reason', 'unknown')})")
+        else:
+            jt_counts = csmith_jt.get("counts") or {}
+            print(
+                f"CSmith JT:{'PASS' if csmith_jt.get('ok') else 'FAIL'}  "
+                f"seeds={csmith_jt.get('seed_expr')} "
+                f"time={csmith_jt.get('elapsed_s', 0.0):.1f}s "
+                f"tests={jt_counts.get('tests', 'n/a')} "
+                f"pass={jt_counts.get('pass', 'n/a')} "
+                f"fail={jt_counts.get('fail', 'n/a')}"
+            )
 
         coremark = software.get("coremark", {})
         if coremark.get("skipped"):
@@ -309,6 +363,14 @@ def main():
     parser.add_argument(
         "--csmith-seeds",
         default="1,4-10,12-17,19-23,25-32,34-37,39-59",
+    )
+    parser.add_argument(
+        "--csmith-jump-seeds",
+        default="1,4,7,10,13",
+        help=(
+            "Seed expression for jump-table-enabled csmith campaign. "
+            "Set to empty string to skip."
+        ),
     )
     parser.add_argument("--csmith-max-cycles", type=int, default=800000)
 

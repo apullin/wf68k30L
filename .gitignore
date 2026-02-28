@@ -1,6 +1,7 @@
 # Build artifacts
 /build/
-/WF68K30L_TOP.json
+/synth/out/
+/platform.info
 
 # cocotb/verilator/ghdl outputs
 /tb/sim_build/

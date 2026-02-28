@@ -25,24 +25,24 @@ and bitwise mask operations, plus eliminating `async2sync` overhead.
 
 Build commands (repo flow):
 
-    ./run_ecp5_representative.sh
-    USE_ABC9=0 ./run_ecp5_representative.sh
+    ./synth/fpga/run_ecp5_representative.sh
+    USE_ABC9=0 ./synth/fpga/run_ecp5_representative.sh
 
 Direct Yosys command (default ABC9 mapping):
 
-    yosys -p 'read_verilog -sv wf68k30L_*.sv; synth_ecp5 -top WF68K30L_TOP'
+    yosys -p 'read_verilog -sv -I sv sv/wf68k30L_*.sv; synth_ecp5 -top WF68K30L_TOP'
 
 ## Representative P&R Baseline (ECP5, 25 MHz)
 
 Current repo defaults:
 
-- `run_ecp5_representative.sh` uses **ABC9 by default** (`USE_ABC9=1`).
-- `wf68K30L.sdc` intentionally keeps only the primary clock constraint; this
+- `synth/fpga/run_ecp5_representative.sh` uses **ABC9 by default** (`USE_ABC9=1`).
+- `synth/constraints/wf68K30L.sdc` intentionally keeps only the primary clock constraint; this
   avoids unsupported false-path directives in `nextpnr-ecp5`.
 
 Baseline seed sweep command:
 
-    ./run_ecp5_seed_sweep.sh
+    ./synth/fpga/run_ecp5_seed_sweep.sh
 
 Representative baseline from 10 seeds (`build/rep_ecp5_seed_sweep_task3/results.csv`):
 
@@ -70,8 +70,8 @@ Run with:
 
     GHDL_PREFIX=/path/to/oss-cad-suite/lib/ghdl ./validation/run_equiv.sh
 
-See [NOTES.md](NOTES.md) for detailed build requirements, compatibility
-changes, and technical notes.
+Detailed build requirements and local technical notes are kept in local
+workspace notes (not repository-tracked).
 
 ## Software Smoke Battery
 
@@ -128,12 +128,18 @@ Run the integrated cocotb smoke module:
 
 Default run covers a curated 10-seed set:
 `1,4,5,6,7,8,10,12,13,19`.
-The csmith compile step defaults to `CSMITH_CC_EXTRA_FLAGS=-fno-jump-tables`.
+When `CSMITH_CC_EXTRA_FLAGS` is unset, the csmith compile step defaults to
+`-fno-jump-tables`.
 Override seed selection or cycle budget:
 
     CSMITH_SEEDS=1-25 make test-csmith-smoke
     CSMITH_SEEDS=3,7,19 CSMITH_MAX_CYCLES=800000 make test-csmith-smoke
     CSMITH_CC_EXTRA_FLAGS='-fno-jump-tables' make test-csmith-smoke
+
+Run with jump tables enabled:
+
+    make test-csmith-smoke-jump-tables
+    CSMITH_CC_EXTRA_FLAGS='' make test-csmith-smoke
 
 Build a standalone seed image manually:
 
@@ -188,6 +194,7 @@ Default campaign scope:
 - QEMU differential campaign: `SHAKEOUT_QEMU_SEEDS=1-300`, `SHAKEOUT_QEMU_OPS=128`
 - Software torture campaign:
   `SHAKEOUT_CSMITH_SEEDS=1,4-10,12-17,19-23,25-32,34-37,39-59`,
+  `SHAKEOUT_CSMITH_JUMP_SEEDS=1,4,7,10,13`,
   `SHAKEOUT_CSMITH_MAX_CYCLES=800000`,
   `SHAKEOUT_COREMARK_OPTS=O0,O1,O2,Os`,
   `SHAKEOUT_COREMARK_REQUIRED_OPTS=` (empty => all from `SHAKEOUT_COREMARK_OPTS`),
@@ -201,6 +208,31 @@ Example override:
     SHAKEOUT_CSMITH_SEEDS=1-80 SHAKEOUT_COREMARK_ITERATIONS=2 make test-software-torture
     SHAKEOUT_COREMARK_REQUIRED_OPTS=O2,Os make test-software-torture
 
+## Formal Smoke
+
+Lightweight bounded formal checks are available for:
+
+- data-register hazard tracking
+- MMU runtime request gating during stall/fault windows
+- MMU walk-delay state transition safety
+
+    make formal-smoke
+
+## MMU Random Campaign
+
+In addition to directed MMU instruction tests, a randomized descriptor campaign
+is available:
+
+    make test-mmu-random
+
+This campaign randomizes descriptor format (short/long), FCL on/off, bottom-level
+indirection, and selected fault conditions, then checks that the RTL either:
+
+- returns the expected translated data value, or
+- vectors through the MMU fault path (vector 56 marker)
+
+This suite is also included in `test-full`.
+
 ## Jump-Table Repro Tests
 
 Focused cocotb reproductions for switch/jump-table control flow:
@@ -209,7 +241,7 @@ Focused cocotb reproductions for switch/jump-table control flow:
 
 This suite uses compiler-style `MOVE.W table(PC,Dn*scale)` + `JMP table(PC,Dn)`
 patterns, including a nested `JSR/RTS` variant.
-It is a focused repro suite and is not part of `test-full` yet.
+It is also included in `test-full`.
 
 ---
 

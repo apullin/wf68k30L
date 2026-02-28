@@ -19,7 +19,9 @@ Environment overrides:
   OBJCOPY_BIN     Path to objcopy (default: m68k-elf-objcopy)
   CPU             m68k CPU variant (default: 68030)
   CSMITH_EXTRA_FLAGS  Extra flags appended to csmith invocation
-  CSMITH_CC_EXTRA_FLAGS Extra C compiler flags (default: -fno-jump-tables)
+  CSMITH_CC_EXTRA_FLAGS Extra C compiler flags
+                        (default when unset: -fno-jump-tables; set to empty
+                        to permit jump-table generation)
 EOF
 }
 
@@ -79,7 +81,9 @@ ELF_PATH="${OUT_DIR}/program.elf"
 BIN_PATH="${OUT_DIR}/program.bin"
 
 read -r -a CSMITH_EXTRA_ARR <<< "${CSMITH_EXTRA_FLAGS:-}"
-read -r -a CSMITH_CC_EXTRA_ARR <<< "${CSMITH_CC_EXTRA_FLAGS:--fno-jump-tables}"
+# Use default only when variable is unset. An explicit empty string enables
+# compiler defaults (including jump-table generation when applicable).
+read -r -a CSMITH_CC_EXTRA_ARR <<< "${CSMITH_CC_EXTRA_FLAGS--fno-jump-tables}"
 
 CSMITH_FLAGS=(
   --seed "${SEED}"
