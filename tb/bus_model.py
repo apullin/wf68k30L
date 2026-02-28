@@ -17,6 +17,8 @@ SIZE[1:0] encoding (active-low in real 68030, but this core uses active-high enc
   11 = 3-byte (line -- not used here)
 """
 
+import os
+
 import cocotb
 from cocotb.triggers import RisingEdge, FallingEdge, Timer
 
@@ -35,6 +37,12 @@ class BusModel:
         self.memory = memory
         self.wait_states = wait_states
         self._running = False
+        self._trace = os.environ.get("BUS_TRACE", "0") not in ("", "0", "false", "False")
+        self._trace_min = int(os.environ.get("BUS_TRACE_MIN", "0"), 0)
+        self._trace_max = int(os.environ.get("BUS_TRACE_MAX", "0xFFFFFFFF"), 0)
+
+    def _trace_enabled(self, addr):
+        return self._trace and (self._trace_min <= addr <= self._trace_max)
 
     async def start(self):
         """Start the bus responder coroutine."""
@@ -45,27 +53,46 @@ class BusModel:
         """Stop the bus responder."""
         self._running = False
 
-    def _get_bus_size(self):
-        """Decode the SIZE output to number of bytes.
+    def _get_size_code(self):
+        """Decode SIZE[1:0] from the DUT.
 
-        The bus interface SIZE output follows the MC68030 encoding:
-          SIZE[1:0] = 00 -> 4 bytes (long word)
-          SIZE[1:0] = 01 -> 1 byte
-          SIZE[1:0] = 10 -> 2 bytes (word)
-          SIZE[1:0] = 11 -> 3 bytes (not typical)
+        Encoding:
+          00 = long
+          01 = byte
+          10 = word
+          11 = three-byte transfer
         """
         try:
-            size_val = int(self.dut.SIZE.value)
+            return int(self.dut.SIZE.value)
         except ValueError:
-            return 4  # Default to long if X/Z
-        if size_val == 0:
-            return 4
-        elif size_val == 1:
-            return 1
-        elif size_val == 2:
-            return 2
-        else:
-            return 4  # Fallback
+            return 0
+
+    def _cycle_layout(self, addr, size_code, *, is_write=False):
+        """Return (start_lane, byte_count) for this bus cycle.
+
+        Lane 0 is DATA[31:24], lane 1 is DATA[23:16], lane 2 is DATA[15:8],
+        lane 3 is DATA[7:0].
+
+        This matches the WF68K30L bus-interface alignment behavior for
+        split transfers (e.g., unaligned long reads/writes).
+        """
+        a = addr & 0x3
+        if size_code == 0:  # long
+            # WF68K30L read cycles consume long data from the top lanes and
+            # shift by cycle boundaries, while write cycles source valid bytes
+            # starting at A1:A0 for misaligned stores.
+            if is_write:
+                return a, 4 - a
+            return 0, 4 - a
+        if size_code == 1:  # byte
+            return a, 1
+        if size_code == 2:  # word
+            return a, 1 if a == 3 else 2
+        # three-byte transfer
+        count = 3 - a
+        if count <= 0:
+            count = 1
+        return a, count
 
     async def _responder(self):
         """Main bus responder loop -- runs as a cocotb coroutine.
@@ -101,7 +128,10 @@ class BusModel:
                 except ValueError:
                     addr = 0
 
-                num_bytes = self._get_bus_size()
+                size_code = self._get_size_code()
+                start_lane, byte_count = self._cycle_layout(
+                    addr, size_code, is_write=(rw_n == 0)
+                )
 
                 # Insert wait states
                 for _ in range(self.wait_states):
@@ -109,15 +139,26 @@ class BusModel:
 
                 if rw_n == 1:
                     # READ cycle: drive DATA_IN with data from memory
-                    data = self.memory.read(addr, num_bytes)
-                    byte_lane = addr & 3
-                    shift = (3 - byte_lane) * 8  # MSB-first lane mapping
-                    if num_bytes == 1:
-                        data = (data & 0xFF) << shift
-                    elif num_bytes == 2:
-                        data = (data & 0xFFFF) << (shift - 8)
+                    # Pack bytes into the exact bus lanes expected by the
+                    # core's SIZE/ADR transfer semantics.
+                    data = 0
+                    for i in range(byte_count):
+                        b = self.memory.read(addr + i, 1) & 0xFF
+                        lane = start_lane + i
+                        shift = (3 - lane) * 8  # MSB-first lane mapping
+                        data |= b << shift
 
                     self.dut.DATA_IN.value = data
+                    if self._trace_enabled(addr):
+                        self.dut._log.warning(
+                            "bus rd addr=0x%08X size=%d a=%d lanes=%d+%d data=0x%08X",
+                            addr,
+                            size_code,
+                            addr & 0x3,
+                            start_lane,
+                            byte_count,
+                            data,
+                        )
                     self.dut.DSACKn.value = 0b00  # 32-bit port ack
 
                 else:
@@ -127,16 +168,22 @@ class BusModel:
                     except ValueError:
                         data = 0
 
-                    byte_lane = addr & 3
-                    shift = (3 - byte_lane) * 8
-                    if num_bytes == 1:
+                    # Unpack only the lanes that are valid for this cycle.
+                    for i in range(byte_count):
+                        lane = start_lane + i
+                        shift = (3 - lane) * 8
                         byte_val = (data >> shift) & 0xFF
-                        self.memory.write(addr, 1, byte_val)
-                    elif num_bytes == 2:
-                        word_val = (data >> (shift - 8)) & 0xFFFF
-                        self.memory.write(addr, 2, word_val)
-                    else:
-                        self.memory.write(addr, 4, data)
+                        self.memory.write(addr + i, 1, byte_val)
+                    if self._trace_enabled(addr):
+                        self.dut._log.warning(
+                            "bus wr addr=0x%08X size=%d a=%d lanes=%d+%d data=0x%08X",
+                            addr,
+                            size_code,
+                            addr & 0x3,
+                            start_lane,
+                            byte_count,
+                            data,
+                        )
 
                     self.dut.DSACKn.value = 0b00  # 32-bit port ack
 

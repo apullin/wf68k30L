@@ -4,7 +4,7 @@ Memory-oriented instruction compliance tests for WF68K30L.
 Tests LEA, PEA, LINK/UNLK, MOVEM, TAS, and MOVEA against the MC68030
 specification.
 
-Each test uses the prefetch pipeline hazard workaround:
+Each test uses a consistent result-store pattern:
   - Load RESULT_BASE into A0 early
   - Store results via MOVE.L Dn,(A0) (single-word, no extension words)
   - Advance A0 with ADDQ.L #4,A0
@@ -47,6 +47,15 @@ def ccr_flags(val):
     v = (ccr >> 1) & 1
     c = ccr & 1
     return x, n, z, v, c
+
+
+def movem_predec_mask(mask):
+    """Reverse MOVEM mask bit order for -(An) encoding."""
+    rev = 0
+    for i in range(16):
+        if (mask >> i) & 1:
+            rev |= 1 << (15 - i)
+    return rev
 
 
 # =========================================================================
@@ -653,22 +662,19 @@ async def test_movem_from_mem_postinc(dut):
 
 @cocotb.test()
 async def test_movem_to_mem_two_regs(dut):
-    """MOVEM.L D0-D2,(A1) with two-register mask D0-D1: verify first two regs."""
+    """MOVEM.L D0-D1,(A1): two-register masks are handled correctly."""
     h = CPUTestHarness(dut)
-    # Use 3-register mask (D0-D2) to work around potential MOVEM minimum-count quirk,
-    # but verify only the first two
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
         *imm_long(h.RESULT_BASE),
         *moveq(0x55, 0),                          # D0 = 0x55
         *moveq(0x66, 1),                          # D1 = 0x66
-        *moveq(0x77, 2),                          # D2 = 0x77 (padding)
         *movea(LONG, SPECIAL, IMMEDIATE, 1),
         *imm_long(h.DATA_BASE),
-        # MOVEM.L D0-D2,(A1)
-        *movem_to_mem(LONG, AN_IND, 1, 0x0007),
+        # MOVEM.L D0-D1,(A1)
+        *movem_to_mem(LONG, AN_IND, 1, 0x0003),
         *nop(), *nop(),
-        # Read back via POSTINC (only D0, D1)
+        # Read back via POSTINC
         *movea(LONG, SPECIAL, IMMEDIATE, 1),
         *imm_long(h.DATA_BASE),
         *move(LONG, AN_POSTINC, 1, AN_IND, 0),
@@ -682,6 +688,186 @@ async def test_movem_to_mem_two_regs(dut):
     assert found, "Sentinel not reached"
     assert h.read_result_long(0) == 0x55, f"D0 got 0x{h.read_result_long(0):08X}"
     assert h.read_result_long(4) == 0x66, f"D1 got 0x{h.read_result_long(4):08X}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_movem_word_to_mem_two_regs(dut):
+    """MOVEM.W D0-D1,(A1): stores low words in register-list order."""
+    h = CPUTestHarness(dut)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x12345678),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 1),
+        *imm_long(0x89ABCDEF),
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(h.DATA_BASE),
+        *movem_to_mem(WORD, AN_IND, 1, 0x0003),   # D0-D1
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+
+    w0 = h.mem.read(h.DATA_BASE + 0, 2)
+    w1 = h.mem.read(h.DATA_BASE + 2, 2)
+    assert w0 == 0x5678, f"word[0] expected 0x5678, got 0x{w0:04X}"
+    assert w1 == 0xCDEF, f"word[1] expected 0xCDEF, got 0x{w1:04X}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_movem_word_from_mem_sign_extend(dut):
+    """MOVEM.W (A1),D0-D1: word loads are sign-extended to 32 bits."""
+    h = CPUTestHarness(dut)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(h.DATA_BASE),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 5),
+        *imm_long(0x00007FFF),
+        *move(WORD, DN, 5, AN_POSTINC, 1),        # [DATA_BASE+0] = 0x7FFF
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 5),
+        *imm_long(0x00008001),
+        *move(WORD, DN, 5, AN_POSTINC, 1),        # [DATA_BASE+2] = 0x8001
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(h.DATA_BASE),
+        *movem_from_mem(WORD, AN_IND, 1, 0x0003), # D0-D1
+        *nop(), *nop(),
+        *move(LONG, DN, 0, AN_IND, 0),
+        *addq(LONG, 4, AN, 0),
+        *move(LONG, DN, 1, AN_IND, 0),
+        *addq(LONG, 4, AN, 0),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+
+    d0 = h.read_result_long(0)
+    d1 = h.read_result_long(4)
+    assert d0 == 0x00007FFF, f"D0 expected 0x00007FFF, got 0x{d0:08X}"
+    assert d1 == 0xFFFF8001, f"D1 expected 0xFFFF8001, got 0x{d1:08X}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_movem_predec_two_regs_order_and_final_a1(dut):
+    """MOVEM.L D0-D1,-(A1): small mask order and final predecrement address."""
+    h = CPUTestHarness(dut)
+    predec_mask = movem_predec_mask(0x0003)  # D0-D1 in -(An) encoding.
+    start_addr = h.DATA_BASE + 8
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x11111111),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 1),
+        *imm_long(0x22222222),
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(start_addr),
+        *movem_to_mem(LONG, AN_PREDEC, 1, predec_mask),
+        *nop(), *nop(),
+        *move(LONG, AN, 1, DN, 4),               # capture final A1
+        *move(LONG, DN, 4, AN_IND, 0),
+        *addq(LONG, 4, AN, 0),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+
+    m0 = h.mem.read(h.DATA_BASE + 0, 4)
+    m1 = h.mem.read(h.DATA_BASE + 4, 4)
+    a1_final = h.read_result_long(0)
+    assert m0 == 0x11111111, f"mem[0] expected D0, got 0x{m0:08X}"
+    assert m1 == 0x22222222, f"mem[4] expected D1, got 0x{m1:08X}"
+    assert a1_final == h.DATA_BASE, (
+        f"A1 final expected DATA_BASE=0x{h.DATA_BASE:08X}, got 0x{a1_final:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_movem_word_from_mem_to_aregs_sign_extend(dut):
+    """MOVEM.W (A1),A2-A3: word loads into A-regs are sign-extended."""
+    h = CPUTestHarness(dut)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(h.DATA_BASE),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 5),
+        *imm_long(0x00008001),
+        *move(WORD, DN, 5, AN_POSTINC, 1),        # [DATA_BASE+0] = 0x8001
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 5),
+        *imm_long(0x00007FFF),
+        *move(WORD, DN, 5, AN_POSTINC, 1),        # [DATA_BASE+2] = 0x7FFF
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(h.DATA_BASE),
+        *movem_from_mem(WORD, AN_IND, 1, 0x0C00), # A2-A3
+        *nop(), *nop(),
+        *move(LONG, AN, 2, DN, 4),
+        *move(LONG, DN, 4, AN_IND, 0),
+        *addq(LONG, 4, AN, 0),
+        *move(LONG, AN, 3, DN, 4),
+        *move(LONG, DN, 4, AN_IND, 0),
+        *addq(LONG, 4, AN, 0),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+
+    a2 = h.read_result_long(0)
+    a3 = h.read_result_long(4)
+    assert a2 == 0xFFFF8001, f"A2 expected 0xFFFF8001, got 0x{a2:08X}"
+    assert a3 == 0x00007FFF, f"A3 expected 0x00007FFF, got 0x{a3:08X}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_movem_predec_mixed_da_regs_order(dut):
+    """MOVEM.L D0/D1/A2,-(A1): mixed mask order and final address."""
+    h = CPUTestHarness(dut)
+    predec_mask = movem_predec_mask(0x0403)  # D0, D1, A2 in -(An) encoding.
+    start_addr = h.DATA_BASE + 12
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x11111111),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 1),
+        *imm_long(0x22222222),
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(0x33333333),
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(start_addr),
+        *movem_to_mem(LONG, AN_PREDEC, 1, predec_mask),
+        *nop(), *nop(),
+        *move(LONG, AN, 1, DN, 4),               # capture final A1
+        *move(LONG, DN, 4, AN_IND, 0),
+        *addq(LONG, 4, AN, 0),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+
+    m0 = h.mem.read(h.DATA_BASE + 0, 4)
+    m1 = h.mem.read(h.DATA_BASE + 4, 4)
+    m2 = h.mem.read(h.DATA_BASE + 8, 4)
+    a1_final = h.read_result_long(0)
+    assert m0 == 0x11111111, f"mem[0] expected D0, got 0x{m0:08X}"
+    assert m1 == 0x22222222, f"mem[4] expected D1, got 0x{m1:08X}"
+    assert m2 == 0x33333333, f"mem[8] expected A2, got 0x{m2:08X}"
+    assert a1_final == h.DATA_BASE, (
+        f"A1 final expected DATA_BASE=0x{h.DATA_BASE:08X}, got 0x{a1_final:08X}"
+    )
     h.cleanup()
 
 

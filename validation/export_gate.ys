@@ -1,6 +1,0 @@
-# Synthesize SV (gate model) to RTLIL
-# Run from repo root. Caller provides write_verilog via -p flag.
-read_verilog -sv wf68k30L_pkg.sv wf68k30L_address_registers.sv wf68k30L_data_registers.sv wf68k30L_alu.sv wf68k30L_bus_interface.sv wf68k30L_exception_handler.sv wf68k30L_opcode_decoder.sv wf68k30L_control.sv wf68k30L_top.sv
-prep -top WF68K30L_TOP -flatten
-memory_map
-rename WF68K30L_TOP GATE_TOP

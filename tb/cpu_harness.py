@@ -127,6 +127,7 @@ class CPUTestHarness:
         self.dut.AVECn.value = 1       # No auto-vector
         self.dut.DATA_IN.value = 0
         self.dut.STERMn.value = 1      # No synchronous termination
+        self.dut.CBACKn.value = 1      # No burst acknowledge
         self.dut.BRn.value = 1         # No bus request
         self.dut.BGACKn.value = 1      # No bus grant acknowledge
 
@@ -160,7 +161,12 @@ class CPUTestHarness:
         """
         self._load_memory(words)
 
-    async def run_until_sentinel(self, max_cycles=None):
+    async def run_until_sentinel(
+        self,
+        max_cycles=None,
+        check_bus_invariants=False,
+        max_bus_cycle_cycles=128,
+    ):
         """Run the CPU until the sentinel value appears in memory.
 
         The test program should write SENTINEL_VAL to SENTINEL_ADDR
@@ -168,18 +174,84 @@ class CPUTestHarness:
 
         Args:
             max_cycles: Maximum clock cycles to wait. Defaults to CYCLE_BUDGET.
+            check_bus_invariants: If True, check lightweight bus-protocol
+                safety invariants each cycle.
+            max_bus_cycle_cycles: Maximum allowed cycles with ASn asserted
+                for a single bus cycle before flagging a stalled handshake.
 
         Returns:
             True if the sentinel was detected, False if the budget expired.
         """
         budget = max_cycles or self.CYCLE_BUDGET
+        monitor_state = {
+            "in_cycle": False,
+            "cycle_len": 0,
+            "rw": 1,
+            "size": 0,
+        }
+
         for _ in range(budget):
             await RisingEdge(self.dut.CLK)
+            if check_bus_invariants:
+                self._check_bus_invariants(
+                    monitor_state,
+                    max_bus_cycle_cycles=max_bus_cycle_cycles,
+                )
             # Check if sentinel has been written to memory
             val = self.mem.read(self.SENTINEL_ADDR, 4)
             if val == self.SENTINEL_VAL:
                 return True
         return False
+
+    def _check_bus_invariants(self, state, max_bus_cycle_cycles=128):
+        """Check lightweight safety invariants over ASn/DSn/RWn/SIZE.
+
+        These checks are intentionally local and bounded:
+          - RWn and SIZE remain stable for a single ASn-asserted cycle.
+          - A single ASn-asserted cycle must complete within a bounded window.
+          - Control outputs decode to legal binary values (no X/Z once sampled).
+        """
+        try:
+            as_n = int(self.dut.ASn.value)
+            ds_n = int(self.dut.DSn.value)
+            rw_n = int(self.dut.RWn.value)
+            size = int(self.dut.SIZE.value)
+        except ValueError:
+            # During reset and initialization, control lines may be X/Z.
+            return
+
+        if as_n not in (0, 1) or ds_n not in (0, 1) or rw_n not in (0, 1):
+            raise AssertionError(
+                f"Invalid bus control decode: ASn={as_n}, DSn={ds_n}, RWn={rw_n}"
+            )
+        if size not in (0, 1, 2, 3):
+            raise AssertionError(f"Invalid SIZE decode: SIZE={size}")
+
+        if as_n == 1:
+            state["in_cycle"] = False
+            state["cycle_len"] = 0
+            return
+
+        if not state["in_cycle"]:
+            state["in_cycle"] = True
+            state["cycle_len"] = 1
+            state["rw"] = rw_n
+            state["size"] = size
+            return
+
+        state["cycle_len"] += 1
+        if rw_n != state["rw"]:
+            raise AssertionError(
+                f"RWn changed mid-cycle: start={state['rw']} now={rw_n}"
+            )
+        if size != state["size"]:
+            raise AssertionError(
+                f"SIZE changed mid-cycle: start={state['size']} now={size}"
+            )
+        if state["cycle_len"] > max_bus_cycle_cycles:
+            raise AssertionError(
+                f"Bus cycle exceeded {max_bus_cycle_cycles} clocks"
+            )
 
     def read_result_long(self, offset=0):
         """Read a 32-bit value from RESULT_BASE + offset.
@@ -247,7 +319,13 @@ class CPUTestHarness:
         from m68k_encode import stop
         return stop(0x2700)
 
-    async def execute_and_check(self, program_words, expected_results):
+    async def execute_and_check(
+        self,
+        program_words,
+        expected_results,
+        check_bus_invariants=False,
+        max_bus_cycle_cycles=128,
+    ):
         """Convenience: setup, load program, run, and verify results.
 
         This is a complete one-call test flow. The program_words should
@@ -263,7 +341,10 @@ class CPUTestHarness:
             AssertionError if sentinel not reached or any result mismatches.
         """
         await self.setup(program_words)
-        found = await self.run_until_sentinel()
+        found = await self.run_until_sentinel(
+            check_bus_invariants=check_bus_invariants,
+            max_bus_cycle_cycles=max_bus_cycle_cycles,
+        )
         assert found, "Sentinel not reached within cycle budget"
         for offset, expected in expected_results.items():
             actual = self.read_result_long(offset)

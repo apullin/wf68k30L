@@ -6,11 +6,6 @@ results via memory writes. Each test loads a short program that
 performs an operation and writes the result to RESULT_BASE, then
 writes the sentinel to SENTINEL_ADDR to signal completion.
 
-NOTE: These tests require a working CPU write bus cycle path.
-As of initial development, the write path may need additional
-bus model timing work. The test infrastructure (encoder, harness,
-reference model) is validated independently.
-
 These tests validate that the CPU correctly fetches, decodes, and
 executes fundamental instructions.
 """
@@ -88,12 +83,7 @@ async def test_moveq_d0(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning(
-            "Sentinel not reached -- CPU write path may not be functional yet. "
-            "This is a known issue under investigation."
-        )
-        return  # Skip assertion -- infrastructure is correct, CPU write path needs work
+    assert found, "Sentinel not reached in test_moveq_d0"
 
     result = h.read_result_long(0)
     assert result == 42, f"Expected D0=42, got D0=0x{result:08X}"
@@ -113,9 +103,7 @@ async def test_moveq_negative(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_moveq_negative"
 
     result = h.read_result_long(0)
     assert result == 0xFFFFFFFF, f"Expected D1=0xFFFFFFFF, got 0x{result:08X}"
@@ -138,9 +126,7 @@ async def test_addq_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_addq_long"
 
     result = h.read_result_long(0)
     assert result == 15, f"Expected D0=15, got D0=0x{result:08X}"
@@ -163,9 +149,7 @@ async def test_subq_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_subq_long"
 
     result = h.read_result_long(0)
     assert result == 17, f"Expected D0=17, got D0=0x{result:08X}"
@@ -190,9 +174,7 @@ async def test_swap(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_swap"
 
     result = h.read_result_long(0)
     assert result == 0x56781234, f"Expected 0x56781234, got 0x{result:08X}"
@@ -213,9 +195,7 @@ async def test_clr_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_clr_long"
 
     result = h.read_result_long(0)
     assert result == 0, f"Expected D2=0, got 0x{result:08X}"
@@ -238,9 +218,7 @@ async def test_not_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_not_long"
 
     result = h.read_result_long(0)
     assert result == 0xFFFFFFFF, f"Expected 0xFFFFFFFF, got 0x{result:08X}"
@@ -263,9 +241,7 @@ async def test_neg_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_neg_long"
 
     result = h.read_result_long(0)
     assert result == 0xFFFFFFFF, f"Expected 0xFFFFFFFF, got 0x{result:08X}"
@@ -288,11 +264,221 @@ async def test_move_between_regs(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_move_between_regs"
 
     result = h.read_result_long(0)
     assert result == 77, f"Expected D3=77, got 0x{result:08X}"
     dut._log.info(f"MOVE.L D0,D3 -> D3 = {result} (correct)")
     h.cleanup()
+
+
+@cocotb.test()
+async def test_prefetch_after_two_single_word_ops(dut):
+    """BUG-001 regression: two single-word ops before a 3-word instruction."""
+    h = CPUTestHarness(dut)
+
+    program = [
+        *moveq(1, 0),                                     # 0x100: single-word
+        *moveq(2, 1),                                     # 0x102: single-word
+        *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),   # 0x104: 3-word
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+
+    fetched_prog = []
+    prev_as_n = 1
+    for _ in range(700):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            if prev_as_n == 1 and as_n == 0 and rw_n == 1:
+                addr = int(dut.ADR_OUT.value)
+                if 0x000100 <= addr < 0x000200:
+                    fetched_prog.append(addr)
+            prev_as_n = as_n
+        except ValueError:
+            pass
+
+    found = await h.run_until_sentinel(max_cycles=4000)
+    assert found, "Sentinel not reached; likely prefetch/decode mis-sequencing"
+
+    # Program fetches should include opcode and both extension words of the
+    # absolute-long destination: 0x104 (opcode), 0x106 (high), 0x108 (low).
+    assert 0x000104 in fetched_prog, "Did not fetch MOVE.L opcode at 0x000104"
+    assert 0x000106 in fetched_prog, "Did not fetch ext-word high at 0x000106"
+    assert 0x000108 in fetched_prog, "Did not fetch ext-word low at 0x000108"
+
+    for i in range(len(fetched_prog) - 1):
+        if fetched_prog[i] == 0x000106 and fetched_prog[i + 1] == 0x000106:
+            raise AssertionError(
+                "Duplicate fetch at 0x000106 detected (BUG-001 prefetch hazard)"
+            )
+
+    result = h.read_result_long(0)
+    assert result == 1, f"Expected RESULT_BASE=1, got 0x{result:08X}"
+
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_prefetch_single_word_prefix_sweep(dut):
+    """BUG-001 closure regression: sweep longer single-word prefixes."""
+    # All of these are single-word register operations.
+    prefix_ops = [
+        moveq(2, 1),
+        swap(1),
+        moveq(3, 2),
+        clr(LONG, DN, 2),
+        moveq(4, 3),
+        not_op(LONG, DN, 3),
+        moveq(5, 4),
+        neg(LONG, DN, 4),
+    ]
+
+    for extra_words in range(1, len(prefix_ops) + 1):
+        h = CPUTestHarness(dut)
+        prefix_words = 1 + extra_words  # initial D0 load + selected single-word ops
+
+        program = [
+            *moveq(0x11, 0),                              # D0 payload value
+        ]
+        for op_words in prefix_ops[:extra_words]:
+            program += [*op_words]
+        program += [
+            *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),  # 3-word target op
+            *h.sentinel_program(),
+        ]
+
+        await h.setup(program)
+
+        fetched_prog = []
+        prev_as_n = 1
+        for _ in range(1200):
+            await RisingEdge(dut.CLK)
+            try:
+                as_n = int(dut.ASn.value)
+                rw_n = int(dut.RWn.value)
+                if prev_as_n == 1 and as_n == 0 and rw_n == 1:
+                    addr = int(dut.ADR_OUT.value)
+                    if 0x000100 <= addr < 0x000200:
+                        fetched_prog.append(addr)
+                prev_as_n = as_n
+            except ValueError:
+                pass
+
+        found = await h.run_until_sentinel(max_cycles=5000)
+        assert found, f"Sentinel not reached (prefix_words={prefix_words})"
+
+        opcode_addr = 0x000100 + (2 * prefix_words)
+        ext_high = opcode_addr + 2
+        ext_low = opcode_addr + 4
+
+        assert opcode_addr in fetched_prog, (
+            f"Missing opcode fetch at 0x{opcode_addr:06X} (prefix_words={prefix_words})"
+        )
+        assert ext_high in fetched_prog, (
+            f"Missing extension-high fetch at 0x{ext_high:06X} (prefix_words={prefix_words})"
+        )
+        assert ext_low in fetched_prog, (
+            f"Missing extension-low fetch at 0x{ext_low:06X} (prefix_words={prefix_words})"
+        )
+
+        for i in range(len(fetched_prog) - 1):
+            if fetched_prog[i] == ext_high and fetched_prog[i + 1] == ext_high:
+                raise AssertionError(
+                    f"Duplicate extension-high fetch at 0x{ext_high:06X} "
+                    f"(prefix_words={prefix_words})"
+                )
+
+        result = h.read_result_long(0)
+        assert result == 0x11, (
+            f"Expected RESULT_BASE=0x00000011, got 0x{result:08X} "
+            f"(prefix_words={prefix_words})"
+        )
+        h.cleanup()
+
+
+@cocotb.test()
+async def test_prefetch_single_word_prefix_wait_state_sweep(dut):
+    """Hardening regression: prefetch sequencing remains stable with wait states."""
+    prefix_ops = [
+        moveq(2, 1),
+        swap(1),
+        moveq(3, 2),
+        clr(LONG, DN, 2),
+        moveq(4, 3),
+        not_op(LONG, DN, 3),
+        moveq(5, 4),
+        neg(LONG, DN, 4),
+    ]
+
+    for wait_states in (1, 2, 3):
+        for extra_words in (1, 4, len(prefix_ops)):
+            h = CPUTestHarness(dut, wait_states=wait_states)
+            prefix_words = 1 + extra_words
+
+            program = [
+                *moveq(0x2A, 0),  # D0 payload
+            ]
+            for op_words in prefix_ops[:extra_words]:
+                program += [*op_words]
+            program += [
+                *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),
+                *h.sentinel_program(),
+            ]
+
+            await h.setup(program)
+
+            fetched_prog = []
+            prev_as_n = 1
+            monitor_cycles = 1600 + (wait_states * 500)
+            for _ in range(monitor_cycles):
+                await RisingEdge(dut.CLK)
+                try:
+                    as_n = int(dut.ASn.value)
+                    rw_n = int(dut.RWn.value)
+                    if prev_as_n == 1 and as_n == 0 and rw_n == 1:
+                        addr = int(dut.ADR_OUT.value)
+                        if 0x000100 <= addr < 0x000240:
+                            fetched_prog.append(addr)
+                    prev_as_n = as_n
+                except ValueError:
+                    pass
+
+            found = await h.run_until_sentinel(max_cycles=9000 + (wait_states * 2000))
+            assert found, (
+                f"Sentinel not reached (wait_states={wait_states}, "
+                f"prefix_words={prefix_words})"
+            )
+
+            opcode_addr = 0x000100 + (2 * prefix_words)
+            ext_high = opcode_addr + 2
+            ext_low = opcode_addr + 4
+
+            assert opcode_addr in fetched_prog, (
+                f"Missing opcode fetch at 0x{opcode_addr:06X} "
+                f"(wait_states={wait_states}, prefix_words={prefix_words})"
+            )
+            assert ext_high in fetched_prog, (
+                f"Missing extension-high fetch at 0x{ext_high:06X} "
+                f"(wait_states={wait_states}, prefix_words={prefix_words})"
+            )
+            assert ext_low in fetched_prog, (
+                f"Missing extension-low fetch at 0x{ext_low:06X} "
+                f"(wait_states={wait_states}, prefix_words={prefix_words})"
+            )
+
+            for i in range(len(fetched_prog) - 1):
+                if fetched_prog[i] == ext_high and fetched_prog[i + 1] == ext_high:
+                    raise AssertionError(
+                        f"Duplicate extension-high fetch at 0x{ext_high:06X} "
+                        f"(wait_states={wait_states}, prefix_words={prefix_words})"
+                    )
+
+            result = h.read_result_long(0)
+            assert result == 0x2A, (
+                f"Expected RESULT_BASE=0x0000002A, got 0x{result:08X} "
+                f"(wait_states={wait_states}, prefix_words={prefix_words})"
+            )
+            h.cleanup()

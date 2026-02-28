@@ -40,7 +40,7 @@ from m68k_encode import (
     addi, subi, add,
     jmp, jmp_abs, jsr, jsr_abs, rts, rte,
     trap, trapv, illegal,
-    chk_w,
+    chk_w, chk_l,
     move_from_ccr, move_to_ccr, move_from_sr, move_to_sr,
     divu_w, divs_w,
     imm_long, imm_word, abs_long, disp16,
@@ -151,6 +151,85 @@ def _handler_code_read_frame(h, marker_val):
         *addq(LONG, 4, AN, 0),
         *h.sentinel_program(),
     ]
+
+
+def _load_bus_fault_frame(
+    h,
+    sp_addr,
+    frame_format,
+    resume_pc,
+    *,
+    saved_sr=0x2700,
+    ssw=0x0000,
+    stage_d=0x4E71,
+    stage_c=0x4E71,
+    stage_b=0x4E71,
+    version=0x1904,
+):
+    """Load a synthetic format-A/B bus-fault frame at sp_addr."""
+    if frame_format not in (0xA, 0xB):
+        raise ValueError(f"Unsupported frame format 0x{frame_format:X}")
+
+    word_count = 16 if frame_format == 0xA else 46
+    frame = [0x0000] * word_count
+
+    frame[0x00 // 2] = saved_sr & 0xFFFF
+    frame[0x02 // 2] = (resume_pc >> 16) & 0xFFFF
+    frame[0x04 // 2] = resume_pc & 0xFFFF
+    frame[0x06 // 2] = (frame_format << 12) & 0xF000
+    frame[0x08 // 2] = stage_d & 0xFFFF
+    frame[0x0A // 2] = ssw & 0xFFFF
+    frame[0x0C // 2] = stage_c & 0xFFFF
+    frame[0x0E // 2] = stage_b & 0xFFFF
+
+    if frame_format == 0xB:
+        stage_b_addr = (resume_pc + 4) & 0xFFFFFFFF
+        frame[0x24 // 2] = (stage_b_addr >> 16) & 0xFFFF
+        frame[0x26 // 2] = stage_b_addr & 0xFFFF
+        frame[0x36 // 2] = version & 0xFFFF
+
+    h.mem.load_words(sp_addr, frame)
+
+
+async def _run_until_sentinel_capture_reads(
+    h,
+    dut,
+    *,
+    max_cycles=8000,
+    addr_lo=0x00000000,
+    addr_hi=0xFFFFFFFF,
+    stop_on_sentinel=True,
+):
+    """Run until sentinel while capturing read bus-cycle start addresses."""
+    addrs = []
+    pipe_load_seen = False
+    sentinel_seen = False
+    prev_as_n = 1
+
+    for _ in range(max_cycles):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            adr = int(dut.ADR_OUT.value) & 0xFFFFFFFF
+            pipe_load = int(dut.RTE_PIPE_LOAD.value)
+        except ValueError:
+            prev_as_n = 1
+            continue
+
+        if pipe_load == 1:
+            pipe_load_seen = True
+
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr_lo <= adr <= addr_hi:
+            addrs.append(adr)
+        prev_as_n = as_n
+
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            sentinel_seen = True
+            if stop_on_sentinel:
+                return True, addrs, pipe_load_seen
+
+    return sentinel_seen, addrs, pipe_load_seen
 
 
 # =========================================================================
@@ -488,14 +567,9 @@ async def test_divs_divide_by_zero(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_divu_divide_by_zero_preserves_dividend(dut):
-    """DIVU.W #0: dividend register should be unchanged after exception.
-
-    CORE BUG: The WF68K30L divider clobbers the destination register to
-    0xFFFFFFFF on divide-by-zero instead of preserving it as per the
-    MC68030 specification. Marked expect_error.
-    """
+    """DIVU.W #0: dividend register should be unchanged after exception."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x300
     vector_addr = 5 * 4
@@ -526,6 +600,43 @@ async def test_divu_divide_by_zero_preserves_dividend(dut):
     d2_val = h.read_result_long(0)
     assert d2_val == 0x12345678, (
         f"DIVU #0 should preserve dividend: expected 0x12345678, got 0x{d2_val:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_divs_divide_by_zero_preserves_dividend(dut):
+    """DIVS.W #0: dividend register should be unchanged after exception."""
+    h = CPUTestHarness(dut)
+    handler_addr = HANDLER_BASE + 0x300
+    vector_addr = 5 * 4
+
+    handler_code = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *move(LONG, DN, 2, AN_IND, 0),        # store D2 (the dividend register)
+        *addq(LONG, 4, AN, 0),
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(0x87654321),                 # D2 = 0x87654321
+        *divs_w(SPECIAL, IMMEDIATE, 2),        # DIVS.W #0,D2
+        *imm_word(0),
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+    d2_val = h.read_result_long(0)
+    assert d2_val == 0x87654321, (
+        f"DIVS #0 should preserve dividend: expected 0x87654321, got 0x{d2_val:08X}"
     )
     h.cleanup()
 
@@ -603,10 +714,6 @@ async def test_trapv_overflow_via_add_negative(dut):
 
     -1 (0xFFFFFFFF) + 0x80000000 = 0x7FFFFFFF, which is positive from
     two negative operands -> V=1.
-
-    Uses multi-word MOVE.L to load both operands, avoiding the prefetch
-    pipeline hazard (BUG-001) that occurs when single-word instructions
-    precede register-form ADD.
     """
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x400
@@ -615,7 +722,6 @@ async def test_trapv_overflow_via_add_negative(dut):
     program = [
         *moveq(0, 1),
         # D2 = 0x80000000 (most negative), D3 = -1 (0xFFFFFFFF)
-        # Use multi-word MOVE.L for both to avoid prefetch pipeline hazard
         *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
         *imm_long(0x80000000),
         *move(LONG, SPECIAL, IMMEDIATE, DN, 3),
@@ -677,16 +783,9 @@ async def test_trapv_no_overflow_after_clear(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_trapv_v_set_via_ccr(dut):
-    """TRAPV with V=1 set explicitly via MOVE to CCR: trap occurs.
-
-    CORE BUG: TRAPV does not see the V flag when set via MOVE to CCR.
-    The V flag set by ADDI works (see test_trapv_with_overflow), but
-    setting V via MOVE to CCR then executing TRAPV does not trigger the
-    trap. This may be a pipeline forwarding issue where TRAPV reads V
-    from the ALU result rather than the committed CCR. Marked expect_error.
-    """
+    """TRAPV with V=1 set explicitly via MOVE to CCR: trap occurs."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x400
     trapv_vector_addr = 7 * 4
@@ -914,19 +1013,11 @@ async def test_trap_5_vector_offset(dut):
 
 # =========================================================================
 # CHK exception tests (vector 6) - out of range
-#
-# CORE BUG: CHK exceptions do not fire in WF68K30L. The CHK instruction
-# executes but does not generate the expected exception for negative values
-# or values above the upper bound. These tests are marked expect_error.
 # =========================================================================
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_chk_w_negative_traps(dut):
-    """CHK.W with negative value: triggers CHK exception (vector 6).
-
-    CORE BUG: CHK does not generate exceptions in WF68K30L. The instruction
-    completes without trapping even when Dn < 0. Marked expect_error.
-    """
+    """CHK.W with negative value: triggers CHK exception (vector 6)."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x600
     vector_addr = 6 * 4  # 0x018
@@ -953,13 +1044,9 @@ async def test_chk_w_negative_traps(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_chk_w_above_upper_traps(dut):
-    """CHK.W with value > upper bound: triggers CHK exception (vector 6).
-
-    CORE BUG: CHK does not generate exceptions in WF68K30L. The instruction
-    completes without trapping even when Dn > upper. Marked expect_error.
-    """
+    """CHK.W with value > upper bound: triggers CHK exception (vector 6)."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x600
     vector_addr = 6 * 4
@@ -982,6 +1069,64 @@ async def test_chk_w_above_upper_traps(dut):
     d1_val = h.read_result_long(0)
     assert d1_val == 0x66, (
         f"CHK with value > upper should trap: D1 expected 0x66, got 0x{d1_val:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_chk_l_negative_traps(dut):
+    """CHK.L with negative value: triggers CHK exception (vector 6)."""
+    h = CPUTestHarness(dut)
+    handler_addr = HANDLER_BASE + 0x620
+    vector_addr = 6 * 4  # 0x018
+
+    program = [
+        *moveq(0, 1),
+        *moveq(-1, 0),                         # D0 = 0xFFFFFFFF (-1)
+        *moveq(10, 3),                         # D3 = 10 (upper bound)
+        *chk_l(DN, 3, 0),                      # CHK.L D3,D0: D0 < 0 -> trap
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, _handler_code(h, 1, 0x66))
+
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+    d1_val = h.read_result_long(0)
+    assert d1_val == 0x66, (
+        f"CHK.L with negative value should trap: D1 expected 0x66, got 0x{d1_val:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_chk_l_above_upper_traps(dut):
+    """CHK.L with value > upper bound: triggers CHK exception (vector 6)."""
+    h = CPUTestHarness(dut)
+    handler_addr = HANDLER_BASE + 0x620
+    vector_addr = 6 * 4
+
+    program = [
+        *moveq(0, 1),
+        *moveq(20, 0),                         # D0 = 20 (value)
+        *moveq(10, 3),                         # D3 = 10 (upper bound)
+        *chk_l(DN, 3, 0),                      # CHK.L D3,D0: D0 > D3 -> trap
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, _handler_code(h, 1, 0x66))
+
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+    d1_val = h.read_result_long(0)
+    assert d1_val == 0x66, (
+        f"CHK.L with value > upper should trap: D1 expected 0x66, got 0x{d1_val:08X}"
     )
     h.cleanup()
 
@@ -1106,6 +1251,40 @@ async def test_privilege_violation_move_from_sr_user(dut):
     d1_val = h.read_result_long(0)
     assert d1_val == 0x08, (
         f"MOVE from SR in user mode should trigger vector 8: D1 expected 0x08, got 0x{d1_val:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_privilege_violation_rte_user(dut):
+    """RTE in user mode: triggers privilege violation (vector 8)."""
+    h = CPUTestHarness(dut)
+    handler_addr = HANDLER_BASE + 0x700
+    vector_addr = 8 * 4
+
+    handler_code = _handler_code(h, 1, 0x08)
+
+    program = [
+        *moveq(0, 1),
+        # Switch to user mode
+        *move(WORD, SPECIAL, IMMEDIATE, DN, 5),
+        *imm_word(0x0000),
+        *move_to_sr(DN, 5),
+        # RTE is privileged and must trap in user mode
+        *rte(),
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+
+    found = await h.run_until_sentinel(max_cycles=5000)
+    assert found, "Sentinel not reached"
+    d1_val = h.read_result_long(0)
+    assert d1_val == 0x08, (
+        f"RTE in user mode should trigger vector 8: D1 expected 0x08, got 0x{d1_val:08X}"
     )
     h.cleanup()
 
@@ -1338,21 +1517,247 @@ async def test_line_f_vector_offset_in_frame(dut):
 
 
 # =========================================================================
-# TRAP with RTE: verify we can return from a trap handler
-#
-# CORE BUG: RTE does not properly return from exception handlers in the
-# WF68K30L. The CPU appears to hang or not restore PC correctly.
-# These tests are marked expect_error.
+# RTE bus-fault frame restore semantics (HW-004)
 # =========================================================================
 
-@cocotb.test(expect_error=AssertionError)
-async def test_trap_rte_returns(dut):
-    """TRAP #0 with RTE: handler returns, execution continues after TRAP.
+@cocotb.test()
+async def test_rte_format_a_skips_long_version_check(dut):
+    """RTE format A must not read/check long-frame version word at SP+0x36."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001800
+    target_pc = 0x00000400
+    format_handler_addr = HANDLER_BASE + 0x880
+    format_vector_addr = 14 * 4
 
-    CORE BUG: RTE does not properly return from exception handlers.
-    The CPU hangs instead of continuing execution after the TRAP.
-    Marked expect_error.
-    """
+    target_code = _handler_code(h, 1, 0x5A)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    h.mem.load_long(format_vector_addr, format_handler_addr)
+    h.mem.load_words(format_handler_addr, _handler_code(h, 1, 0x0E))
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xA,
+        target_pc,
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+    )
+    # Poison long-format version location; format A must ignore it.
+    h.mem.write(frame_sp + 0x36, 2, 0xBEEF)
+
+    _found, read_addrs, _pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=2000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+        stop_on_sentinel=False,
+    )
+    assert (frame_sp + 0x1E) in read_addrs, "Format-A RTE should validate bottom word at SP+0x1E"
+    assert (frame_sp + 0x36) not in read_addrs, "Format-A RTE must not read long-frame version at SP+0x36"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_rte_format_b_invalid_version_traps_format_error(dut):
+    """RTE format B with wrong version should trap format error (vector 14)."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001A00
+    target_pc = 0x00000480
+    format_handler_addr = HANDLER_BASE + 0x8A0
+    format_vector_addr = 14 * 4
+
+    target_code = _handler_code(h, 1, 0x5B)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    h.mem.load_long(format_vector_addr, format_handler_addr)
+    h.mem.load_words(format_handler_addr, _handler_code(h, 1, 0x0E))
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xB,
+        target_pc,
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+        version=0x0000,  # invalid on purpose
+    )
+
+    found, read_addrs, _pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=8000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+    )
+    assert found, "Sentinel not reached"
+
+    marker = h.read_result_long(0)
+    assert marker == 0x0E, (
+        f"Invalid long-frame version should trigger format-error handler marker 0x0E: got 0x{marker:08X}"
+    )
+    assert (frame_sp + 0x36) in read_addrs, "Format-B RTE should read/check version word at SP+0x36"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_rte_format_a_valid_frame_returns_via_pipe_restore(dut):
+    """RTE format A valid frame should assert pipe-restore load and avoid format error."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001C00
+    target_pc = 0x00000500
+    format_handler_addr = HANDLER_BASE + 0x8C0
+    format_vector_addr = 14 * 4
+
+    target_code = _handler_code(h, 1, 0x5C)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    h.mem.load_long(format_vector_addr, format_handler_addr)
+    h.mem.load_words(format_handler_addr, _handler_code(h, 1, 0x0E))
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xA,
+        target_pc,
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+    )
+
+    _found, read_addrs, pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=4000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+        stop_on_sentinel=False,
+    )
+    assert pipe_load_seen, "Expected RTE pipe restore load for valid format-A frame"
+    marker = h.read_result_long(0)
+    assert marker != 0x0E, "Valid format-A frame must not trap format error"
+    assert (frame_sp + 0x1E) in read_addrs, "Format-A RTE should validate bottom word at SP+0x1E"
+    assert (frame_sp + 0x36) not in read_addrs, "Format-A RTE must not read long-frame version at SP+0x36"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_rte_format_b_valid_frame_returns_via_pipe_restore(dut):
+    """RTE format B valid frame should assert pipe-restore load and avoid format error."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001E00
+    target_pc = 0x00000580
+    format_handler_addr = HANDLER_BASE + 0x8E0
+    format_vector_addr = 14 * 4
+
+    target_code = _handler_code(h, 1, 0x5D)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    h.mem.load_long(format_vector_addr, format_handler_addr)
+    h.mem.load_words(format_handler_addr, _handler_code(h, 1, 0x0E))
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xB,
+        target_pc,
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+        version=0x1904,
+    )
+
+    _found, read_addrs, pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=5000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+        stop_on_sentinel=False,
+    )
+    marker = h.read_result_long(0)
+    assert marker != 0x0E, "Valid format-B frame must not trap format error"
+    # Depending on stacked SSW semantics this path may choose restore-load or refill.
+    assert (frame_sp + 0x36) in read_addrs, "Format-B RTE should read/check version word at SP+0x36"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_rte_format_a_rerun_ssw_uses_refill_path(dut):
+    """RTE format A with rerun requested in SSW should skip pipe-restore load."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00002000
+    target_pc = 0x00000600
+
+    target_code = _handler_code(h, 1, 0x5E)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xA,
+        target_pc,
+        ssw=0x0100,  # FB set: force rerun/refill behavior
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+    )
+
+    found, _read_addrs, pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=8000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+    )
+    assert found, "Sentinel not reached"
+    assert not pipe_load_seen, "RTE pipe restore load must be suppressed when SSW requests rerun"
+    marker = h.read_result_long(0)
+    assert marker == 0x5E, f"Expected marker 0x5E after rerun/refill path, got 0x{marker:08X}"
+    h.cleanup()
+
+
+# =========================================================================
+# TRAP with RTE: verify we can return from a trap handler
+# =========================================================================
+
+@cocotb.test()
+async def test_trap_rte_returns(dut):
+    """TRAP #0 with RTE: handler returns, execution continues after TRAP."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x800
     trap_vector_addr = 32 * 4
@@ -1389,13 +1794,9 @@ async def test_trap_rte_returns(dut):
     h.cleanup()
 
 
-@cocotb.test(expect_error=AssertionError)
+@cocotb.test()
 async def test_trap_rte_restores_sr(dut):
-    """TRAP with RTE: verify SR is restored from the stack frame.
-
-    CORE BUG: RTE does not properly return from exception handlers.
-    Marked expect_error.
-    """
+    """TRAP with RTE: verify SR is restored from the stack frame."""
     h = CPUTestHarness(dut)
     handler_addr = HANDLER_BASE + 0x800
     trap_vector_addr = 32 * 4

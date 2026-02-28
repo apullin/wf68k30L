@@ -20,7 +20,7 @@ Addressing modes tested:
   Mode 111/011 (d8,PC,Xn)  - PC-relative indexed
   Mode 111/100 #imm        - immediate
 
-Each test uses the prefetch pipeline hazard workaround:
+Each test uses a consistent result-store pattern:
   - Load RESULT_BASE into A0 early with MOVEA.L #addr, A0
   - Store results via MOVE.L Dn, (A0) (single-word, no extension)
   - Advance A0 via ADDQ.L #4, A0
@@ -739,6 +739,32 @@ async def test_indexed_dn_word(dut):
     assert found, "Sentinel not reached"
     result = h.read_result_long(0)
     assert result == 0xC0FFEE00, f"Expected 0xC0FFEE00, got 0x{result:08X}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_indexed_dn_word_negative_scaled(dut):
+    """MOVE.L (0,A3,D1.W*4),D0 with D1=-2: index must sign-extend before scale."""
+    h = CPUTestHarness(dut, wait_states=2)
+    base = h.DATA_BASE + 0x40
+    target = base - 8  # (-2 as word) * 4
+    h.mem.load_long(target, 0x0BADF00D)
+    opcode = move(LONG, AN_IDX, 3, DN, 0)
+    ext = _brief_extension_word(da=0, reg=1, wl=0, scale=2, disp8=0)
+    program = [
+        *_setup_a0(h),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3), *imm_long(base),
+        *moveq(-2, 1),                         # D1.W = 0xFFFE
+        *nop(), *nop(),                        # pipeline drain
+        *opcode, ext,
+        *_store_dn_and_advance(0),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel(max_cycles=7000)
+    assert found, "Sentinel not reached"
+    result = h.read_result_long(0)
+    assert result == 0x0BADF00D, f"Expected 0x0BADF00D, got 0x{result:08X}"
     h.cleanup()
 
 

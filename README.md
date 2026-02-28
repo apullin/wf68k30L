@@ -23,9 +23,43 @@ The SV port fits in an LFE5U-25F (~77% utilization) or larger. LUT reduction
 comes primarily from replacing VHDL for-loops with direct equality comparisons
 and bitwise mask operations, plus eliminating `async2sync` overhead.
 
-Build command:
+Build commands (repo flow):
 
-    yosys -p 'read_verilog -sv wf68k30L_*.sv; synth_ecp5 -noabc9 -top WF68K30L_TOP'
+    ./synth/fpga/run_ecp5_representative.sh
+    USE_ABC9=0 ./synth/fpga/run_ecp5_representative.sh
+
+Direct Yosys command (default ABC9 mapping):
+
+    yosys -p 'read_verilog -sv -I sv sv/wf68k30L_*.sv; synth_ecp5 -top WF68K30L_TOP'
+
+## Representative P&R Baseline (ECP5, 25 MHz)
+
+Current repo defaults:
+
+- `synth/fpga/run_ecp5_representative.sh` uses **ABC9 by default** (`USE_ABC9=1`).
+- `synth/constraints/wf68K30L.sdc` intentionally keeps only the primary clock constraint; this
+  avoids unsupported false-path directives in `nextpnr-ecp5`.
+
+Baseline seed sweep command:
+
+    ./synth/fpga/run_ecp5_seed_sweep.sh
+
+Representative baseline from 10 seeds (`build/rep_ecp5_seed_sweep_task3/results.csv`):
+
+| Metric | Value |
+|--------|-------|
+| Fmax min/med/max | 16.131 / 16.481 / 16.898 MHz |
+| TRELLIS_COMB | 18,689 (all 10 seeds) |
+| TRELLIS_FF | 2,522 (all 10 seeds) |
+
+Latest representative single-run log (`build/rep_ecp5/nextpnr.log`):
+
+| Metric | Value |
+|--------|-------|
+| LUT4 | 21,941 / 43,848 (50%) |
+| TRELLIS_COMB | 22,603 / 43,848 (51%) |
+| TRELLIS_FF | 2,487 / 43,848 (5%) |
+| Fmax @ 25 MHz target | 26.69 MHz (timing pass) |
 
 ## Equivalence Validation
 
@@ -45,8 +79,178 @@ Run with:
 
     GHDL_PREFIX=/path/to/oss-cad-suite/lib/ghdl ./validation/run_equiv.sh
 
-See [NOTES.md](NOTES.md) for detailed build requirements, compatibility
-changes, and technical notes.
+Detailed build requirements and local technical notes are kept in local
+workspace notes (not repository-tracked).
+
+## Software Smoke Battery
+
+In addition to instruction-by-instruction regressions, `tb/test_software_battery.py`
+runs longer software-style kernels that mix control flow, memory traffic, and ALU/divider
+operations in one program image.
+
+These cases enable lightweight bus invariants in the harness:
+
+- Per-cycle stability: `RWn`/`SIZE` remain stable while `ASn` is asserted
+- Bounded handshake progress: no single bus cycle may remain active beyond a
+  configurable cycle bound
+- Control decode sanity: sampled `ASn`/`DSn`/`RWn`/`SIZE` values must remain in
+  legal encoded ranges
+
+Run directly with:
+
+    make -C tb TEST_MODULE=test_software_battery TOPLEVEL=WF68K30L_TOP
+
+## QEMU Differential Smoke
+
+A lightweight differential check is available against `qemu-system-m68k`
+(`-cpu m68030`). It compares the first instruction-start PC trace of a short
+deterministic program between:
+
+- WF68K30L in cocotb/Verilator
+- QEMU m68030 running the same raw program image
+
+Run with:
+
+    make test-qemu-diff
+
+Seeded randomized differential run (register-state check at epilogue):
+
+    make test-qemu-diff-fuzz
+    QEMU_DIFF_SEED=7 QEMU_DIFF_OPS=64 make test-qemu-diff-fuzz
+    QEMU_DIFF_SEEDS=1-200 QEMU_DIFF_OPS=128 make test-qemu-diff-fuzz
+
+## Csmith Smoke
+
+A bare-metal csmith flow is available for fuzz-style software smoke tests.
+Each seed builds a random C program with `csmith`, cross-compiles with
+`m68k-elf-gcc`, and runs in the cocotb harness until it writes the sentinel.
+
+Requirements:
+
+- `csmith`
+- `m68k-elf-gcc`
+- `m68k-elf-objcopy`
+
+Run the integrated cocotb smoke module:
+
+    make test-csmith-smoke
+
+Default run covers a curated 10-seed set:
+`1,4,5,6,7,8,10,12,13,19`.
+When `CSMITH_CC_EXTRA_FLAGS` is unset, the csmith compile step defaults to
+`-fno-jump-tables`.
+Override seed selection or cycle budget:
+
+    CSMITH_SEEDS=1-25 make test-csmith-smoke
+    CSMITH_SEEDS=3,7,19 CSMITH_MAX_CYCLES=800000 make test-csmith-smoke
+    CSMITH_CC_EXTRA_FLAGS='-fno-jump-tables' make test-csmith-smoke
+
+Run with jump tables enabled:
+
+    make test-csmith-smoke-jump-tables
+    CSMITH_CC_EXTRA_FLAGS='' make test-csmith-smoke
+
+Build a standalone seed image manually:
+
+    ./tooling/csmith/build_case.sh --seed 13 --out-dir build/csmith/seed_13
+
+## CoreMark Smoke
+
+CoreMark is integrated as a local bare-metal smoke run in `tb/test_coremark_smoke.py`.
+This path builds and runs four optimization variants (`-O0`, `-O1`, `-O2`, `-Os`)
+on the WF68K30L cocotb harness and prints a summary table with image size,
+cycles, and run status (`ok`/`timeout`/`trap:*`).
+
+Run with:
+
+    make test-coremark-smoke
+
+Defaults:
+
+- `COREMARK_MAX_CYCLES=100000000`
+- `COREMARK_ITERATIONS=1`
+- `COREMARK_TOTAL_DATA_SIZE=2000`
+- `COREMARK_OPTS=O0,O1,O2,Os`
+- `COREMARK_SEED3=0x66`
+- `COREMARK_EXECS_MASK=ID_LIST|ID_MATRIX|ID_STATE`
+- `COREMARK_EXTRA_CFLAGS` unset
+
+Optional run knobs:
+
+    COREMARK_ITERATIONS=2 COREMARK_MAX_CYCLES=12000000 COREMARK_OPTS=O2 make test-coremark-smoke
+    COREMARK_TOTAL_DATA_SIZE=600 COREMARK_OPTS=O2 make test-coremark-smoke
+    COREMARK_OPTS=O2,Os make test-coremark-smoke
+    COREMARK_LIST_ITEMS=1 COREMARK_SEED3=1 COREMARK_EXECS_MASK=ID_LIST COREMARK_MAX_CYCLES=500000 make test-coremark-smoke
+    COREMARK_EXTRA_CFLAGS='-fno-jump-tables' make test-coremark-smoke
+
+## Long Shakeout Campaigns
+
+For long unattended local shakeout runs, use:
+
+    make test-qemu-diff-campaign
+    make test-software-torture
+    make test-shakeout
+
+These commands write per-run logs and a `summary.json` to
+`build/shakeout/<timestamp>/`.
+`test-software-torture` now fails hard if any CoreMark optimization row reports
+status other than `ok` (for example, `timeout` or `trap:*`) for required
+optimization levels. By default, required levels are all values in
+`SHAKEOUT_COREMARK_OPTS`. Override with `SHAKEOUT_COREMARK_REQUIRED_OPTS`.
+
+Default campaign scope:
+
+- QEMU differential campaign: `SHAKEOUT_QEMU_SEEDS=1-300`, `SHAKEOUT_QEMU_OPS=128`
+- Software torture campaign:
+  `SHAKEOUT_CSMITH_SEEDS=1,4-10,12-17,19-23,25-32,34-37,39-59`,
+  `SHAKEOUT_CSMITH_JUMP_SEEDS=1,4,7,10,13`,
+  `SHAKEOUT_CSMITH_MAX_CYCLES=800000`,
+  `SHAKEOUT_COREMARK_OPTS=O0,O1,O2,Os`,
+  `SHAKEOUT_COREMARK_REQUIRED_OPTS=` (empty => all from `SHAKEOUT_COREMARK_OPTS`),
+  `SHAKEOUT_COREMARK_MAX_CYCLES=5000000`,
+  `SHAKEOUT_COREMARK_ITERATIONS=1`,
+  `SHAKEOUT_COREMARK_TOTAL_DATA_SIZE=600`
+
+Example override:
+
+    SHAKEOUT_QEMU_SEEDS=1-1000 SHAKEOUT_QEMU_OPS=128 make test-qemu-diff-campaign
+    SHAKEOUT_CSMITH_SEEDS=1-80 SHAKEOUT_COREMARK_ITERATIONS=2 make test-software-torture
+    SHAKEOUT_COREMARK_REQUIRED_OPTS=O2,Os make test-software-torture
+
+## Formal Smoke
+
+Lightweight bounded formal checks are available for:
+
+- data-register hazard tracking
+- MMU runtime request gating during stall/fault windows
+- MMU walk-delay state transition safety
+
+    make formal-smoke
+
+## MMU Random Campaign
+
+In addition to directed MMU instruction tests, a randomized descriptor campaign
+is available:
+
+    make test-mmu-random
+
+This campaign randomizes descriptor format (short/long), FCL on/off, bottom-level
+indirection, and selected fault conditions, then checks that the RTL either:
+
+- returns the expected translated data value, or
+- vectors through the MMU fault path (vector 56 marker)
+
+This suite is also included in `test-full`.
+
+## Jump-Table Repro Tests
+
+Focused cocotb reproductions for switch/jump-table control flow:
+
+    make test-jump-tables
+
+This suite uses compiler-style `MOVE.W table(PC,Dn*scale)` + `JMP table(PC,Dn)`
+patterns, including a nested `JSR/RTS` variant.
+It is also included in `test-full`.
 
 ---
 

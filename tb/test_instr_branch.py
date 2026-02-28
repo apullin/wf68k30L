@@ -3,7 +3,7 @@ Branch, condition-code, and subroutine instruction compliance tests for WF68K30L
 
 Tests: BRA, Bcc (all 14 conditions), BSR/RTS, DBcc, Scc.
 
-Each test uses the prefetch pipeline hazard workaround:
+Each test uses a consistent result-store pattern:
   - MOVEA.L #RESULT_BASE, A0 early
   - Store via MOVE.L Dn, (A0) (single-word, no extension)
   - Advance via ADDQ.L #4, A0

@@ -415,3 +415,59 @@ async def test_add_negative_overflow_exact(dut):
     assert flags["N"] == 0, f"N should be 0 (result positive), got {flags['N']}"
     assert flags["C"] == 1, f"C should be 1 (unsigned carry), got {flags['C']}"
     dut._log.info("PASS: ADD negative overflow (exact test values) V=1")
+
+
+@cocotb.test()
+async def test_load_and_init_same_cycle_uses_new_operands(dut):
+    """LOAD_OP* and ALU_INIT in the same cycle must use current input operands."""
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    init_signals(dut)
+    await RisingEdge(dut.CLK)
+    await do_reset(dut)
+
+    # Preload stale buffered values to make sure same-cycle bypass is exercised.
+    dut.OP1_IN.value = 10
+    dut.OP2_IN.value = 20
+    dut.LOAD_OP1.value = 1
+    dut.LOAD_OP2.value = 1
+    await RisingEdge(dut.CLK)
+    dut.LOAD_OP1.value = 0
+    dut.LOAD_OP2.value = 0
+
+    # Issue ADD with LOAD_OP* and ALU_INIT asserted in the same cycle.
+    dut.OP_IN.value = ADD
+    dut.OP_SIZE_IN.value = LONG
+    dut.OP1_IN.value = 1
+    dut.OP2_IN.value = 2
+    dut.LOAD_OP1.value = 1
+    dut.LOAD_OP2.value = 1
+    dut.ALU_INIT.value = 1
+    await RisingEdge(dut.CLK)
+    dut.LOAD_OP1.value = 0
+    dut.LOAD_OP2.value = 0
+    dut.ALU_INIT.value = 0
+
+    for _ in range(20):
+        await RisingEdge(dut.CLK)
+        if int(dut.ALU_REQ.value) == 1:
+            break
+    else:
+        raise TimeoutError("ALU_REQ never asserted for same-cycle load/init test")
+
+    dut.CC_UPDT.value = 1
+    await RisingEdge(dut.CLK)
+    dut.CC_UPDT.value = 0
+
+    result = int(dut.RESULT.value) & 0xFFFFFFFF
+    status = int(dut.STATUS_REG_OUT.value)
+    flags = get_flags(status)
+
+    dut.ALU_ACK.value = 1
+    await RisingEdge(dut.CLK)
+    dut.ALU_ACK.value = 0
+    await RisingEdge(dut.CLK)
+
+    dut._log.info(f"same-cycle load/init ADD: result=0x{result:08X}, flags={flags}")
+    assert result == 3, f"Expected 3 from 2+1, got {result}"
+    assert flags["Z"] == 0, "Z should be 0"

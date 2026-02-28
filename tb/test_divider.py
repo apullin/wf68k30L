@@ -299,7 +299,8 @@ async def test_divu_divide_by_zero(dut):
     """DIVU.L: 100 / 0 -> BUG-009: check divide-by-zero behavior.
 
     The MC68030 spec says destination register is unchanged on div-by-zero.
-    After BUG-009 fix, QUOTIENT and REMAINDER should NOT be modified.
+    For the divider interface this means outputs restore the destination image
+    provided at ALU init (OP2 -> quotient field, OP3 -> remainder field).
     """
     clock = Clock(dut.CLK, 10, unit="ns")
     cocotb.start_soon(clock.start())
@@ -307,25 +308,25 @@ async def test_divu_divide_by_zero(dut):
     await RisingEdge(dut.CLK)
     await do_reset(dut)
 
-    # First do a normal division to set known values in QUOTIENT/REMAINDER
+    # First do a normal division to prove the divider state machine is active.
     q1, r1, st1 = await alu_div(dut, DIVU, LONG, 5, 15)
     dut._log.info(f"Setup: DIVU 15/5: Q={q1}, R={r1}")
     assert q1 == 3, f"Setup failed: expected Q=3, got {q1}"
     assert r1 == 0, f"Setup failed: expected R=0, got {r1}"
 
     # Now divide by zero
-    q2, r2, st2 = await alu_div(dut, DIVU, LONG, 0, 100)
+    q2, r2, st2 = await alu_div(dut, DIVU, LONG, 0, 100, dividend_hi=0xA5A5A5A5)
     dut._log.info(f"DIVU.L 100/0: Q=0x{q2:08X}, R=0x{r2:08X}")
 
-    # After BUG-009 fix: QUOTIENT and REMAINDER should be preserved (unchanged)
-    assert q2 == 3, f"BUG-009: Expected Q=3 (preserved), got Q=0x{q2:08X}"
-    assert r2 == 0, f"BUG-009: Expected R=0 (preserved), got R=0x{r2:08X}"
-    dut._log.info("PASS: divide-by-zero preserves destination register")
+    # BUG-009 fix behavior: restore destination image from OP2/OP3.
+    assert q2 == 100, f"BUG-009: Expected Q=0x00000064 (OP2 restored), got Q=0x{q2:08X}"
+    assert r2 == 0xA5A5A5A5, f"BUG-009: Expected R=0xA5A5A5A5 (OP3 restored), got R=0x{r2:08X}"
+    dut._log.info("PASS: divide-by-zero restores destination image")
 
 
 @cocotb.test()
 async def test_divs_divide_by_zero(dut):
-    """DIVS.L: 100 / 0 -> same BUG-009 test for signed division."""
+    """DIVS.L: 100 / 0 -> same BUG-009 restore-image behavior for signed division."""
     clock = Clock(dut.CLK, 10, unit="ns")
     cocotb.start_soon(clock.start())
     init_signals(dut)
@@ -338,13 +339,13 @@ async def test_divs_divide_by_zero(dut):
     assert q1 == 14, f"Setup failed: expected Q=14, got {q1}"
 
     # Divide by zero
-    q2, r2, st2 = await alu_div(dut, DIVS, LONG, 0, 100)
+    q2, r2, st2 = await alu_div(dut, DIVS, LONG, 0, 100, dividend_hi=0x5AA55AA5)
     dut._log.info(f"DIVS.L 100/0: Q=0x{q2:08X}, R=0x{r2:08X}")
 
-    # QUOTIENT and REMAINDER preserved
-    assert q2 == 14, f"BUG-009: Expected Q=14 (preserved), got Q=0x{q2:08X}"
-    assert r2 == 2, f"BUG-009: Expected R=2 (preserved), got R=0x{r2:08X}"
-    dut._log.info("PASS: divide-by-zero preserves destination register")
+    # QUOTIENT/REMAINDER restore from OP2/OP3.
+    assert q2 == 100, f"BUG-009: Expected Q=0x00000064 (OP2 restored), got Q=0x{q2:08X}"
+    assert r2 == 0x5AA55AA5, f"BUG-009: Expected R=0x5AA55AA5 (OP3 restored), got R=0x{r2:08X}"
+    dut._log.info("PASS: divide-by-zero restores destination image")
 
 
 # --- WORD mode tests ---

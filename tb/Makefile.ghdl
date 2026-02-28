@@ -14,19 +14,20 @@ GHDL_BIN_DIR = /opt/homebrew/bin
 CMD = $(GHDL_BIN_DIR)/ghdl
 
 SRC_DIR = $(shell cd .. && pwd)
+VHDL_DIR = $(SRC_DIR)/vhdl
 
 # VHDL sources -- package first, configuration last
 VHDL_SOURCES = \
-    $(SRC_DIR)/wf68k30L_pkg.vhd \
-    $(SRC_DIR)/wf68k30L_address_registers.vhd \
-    $(SRC_DIR)/wf68k30L_alu.vhd \
-    $(SRC_DIR)/wf68k30L_bus_interface.vhd \
-    $(SRC_DIR)/wf68k30L_control.vhd \
-    $(SRC_DIR)/wf68k30L_data_registers.vhd \
-    $(SRC_DIR)/wf68k30L_exception_handler.vhd \
-    $(SRC_DIR)/wf68k30L_opcode_decoder.vhd \
-    $(SRC_DIR)/wf68k30L_top.vhd \
-    $(SRC_DIR)/wf68k30L_top_cfg.vhd
+    $(VHDL_DIR)/wf68k30L_pkg.vhd \
+    $(VHDL_DIR)/wf68k30L_address_registers.vhd \
+    $(VHDL_DIR)/wf68k30L_alu.vhd \
+    $(VHDL_DIR)/wf68k30L_bus_interface.vhd \
+    $(VHDL_DIR)/wf68k30L_control.vhd \
+    $(VHDL_DIR)/wf68k30L_data_registers.vhd \
+    $(VHDL_DIR)/wf68k30L_exception_handler.vhd \
+    $(VHDL_DIR)/wf68k30L_opcode_decoder.vhd \
+    $(VHDL_DIR)/wf68k30L_top.vhd \
+    $(VHDL_DIR)/wf68k30L_top_cfg.vhd
 
 # cocotb sees the entity name; GHDL elaborates the configuration
 TOPLEVEL = wf68k30l_top

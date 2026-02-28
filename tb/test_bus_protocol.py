@@ -29,8 +29,8 @@ from cocotb.triggers import RisingEdge, ClockCycles
 from cpu_harness import CPUTestHarness
 from m68k_encode import (
     BYTE, WORD, LONG,
-    DN, AN, AN_IND, SPECIAL, ABS_L, IMMEDIATE,
-    moveq, move, movea, move_to_abs_long, nop, addq, add, imm_long,
+    DN, AN, AN_IND, AN_DISP, SPECIAL, ABS_L, IMMEDIATE,
+    moveq, move, movea, move_to_abs_long, nop, addq, add, imm_long, abs_long,
 )
 
 
@@ -43,11 +43,10 @@ from m68k_encode import (
 def _arithmetic_program(h):
     """Return a program that computes 10+5+3=18 and stores to RESULT_BASE.
 
-    Uses the BUG-001 workaround: pre-load A0 with RESULT_BASE via
-    MOVEA.L and store via (A0) instead of absolute long addressing.
+    Uses register-indirect result stores for a stable bus-cycle pattern.
     """
     return [
-        # Load result address into A0 (workaround for BUG-001)
+        # Load result address into A0.
         *movea(LONG, SPECIAL, IMMEDIATE, 0),      # MOVEA.L #RESULT_BASE,A0
         *imm_long(h.RESULT_BASE),
         # Arithmetic: D0 = 10, D1 = 5, D2 = 3
@@ -579,6 +578,101 @@ async def test_data_bus_width(dut):
 # ===================================================================
 
 @cocotb.test()
+async def test_misaligned_long_read_wait_states(dut):
+    """Misaligned MOVE.L (abs).L read is assembled correctly with wait states."""
+    h = CPUTestHarness(dut, wait_states=2)
+    addr = h.DATA_BASE + 0x181  # force misaligned long access
+    expected = 0x89ABCDEF
+    h.mem.load_long(addr, expected)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),     # A0 = RESULT_BASE
+        *imm_long(h.RESULT_BASE),
+        *move(LONG, SPECIAL, ABS_L, DN, 0),      # D0 = (abs).L misaligned
+        *abs_long(addr),
+        *move(LONG, DN, 0, AN_IND, 0),           # store D0 for checking
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+
+    result = h.read_result_long(0)
+    assert result == expected, (
+        f"Misaligned long read mismatch: expected 0x{expected:08X}, got 0x{result:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_move_imm_long_fp_disp_roundtrip(dut):
+    """Regression: MOVE.L #imm,(d16,A6) + MOVEA.L (d16,A6),A0 keeps all bytes.
+
+    CoreMark O2 uses this exact pattern for function-pointer locals.
+    """
+    h = CPUTestHarness(dut)
+
+    mem_addr = 0x00001000 - 78
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),   # A6 = 0x00001000
+        *imm_long(0x00001000),
+        0x2D7C, 0x0000, 0x0A14, 0xFFB2,        # MOVE.L #$00000A14,-78(A6)
+        0x206E, 0xFFB2,                        # MOVEA.L -78(A6),A0
+        *move_to_abs_long(LONG, AN, 0, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel(max_cycles=4000)
+    assert found, "Sentinel not reached"
+
+    got = h.read_result_long(0)
+    mem_val = h.mem.read(mem_addr, 4)
+    assert mem_val == 0x00000A14, (
+        f"Stored long mismatch at 0x{mem_addr:08X}: got 0x{mem_val:08X}"
+    )
+    assert got == 0x00000A14, (
+        f"Round-trip MOVEA mismatch: expected 0x00000A14, got 0x{got:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_move_imm_long_fp_disp_roundtrip_off1(dut):
+    """Regression: misaligned +1 long round-trip keeps all bytes."""
+    h = CPUTestHarness(dut)
+
+    scratch_base = h.DATA_BASE + 0x300
+    disp = 5
+    mem_addr = scratch_base + disp
+    expected = 0xCB91CE37
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),      # A6 = scratch base
+        *imm_long(scratch_base),
+        *move(LONG, SPECIAL, IMMEDIATE, AN_DISP, 6),  # (d16,A6) = expected
+        *imm_long(expected),
+        disp & 0xFFFF,
+        *movea(LONG, AN_DISP, 6, 0),              # A0 = (d16,A6)
+        disp & 0xFFFF,
+        *move_to_abs_long(LONG, AN, 0, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel(max_cycles=4000)
+    assert found, "Sentinel not reached"
+
+    mem_val = h.mem.read(mem_addr, 4)
+    got = h.read_result_long(0)
+    assert mem_val == expected, (
+        f"Stored long mismatch at 0x{mem_addr:08X}: got 0x{mem_val:08X}"
+    )
+    assert got == expected, (
+        f"Round-trip MOVEA mismatch: expected 0x{expected:08X}, got 0x{got:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
 async def test_back_to_back_reads(dut):
     """Verify multiple sequential instruction fetches (back-to-back reads).
 
@@ -704,4 +798,97 @@ async def test_read_then_write(dut):
 
     dut._log.info(f"Stored values: [0]=0x{val1:08X}, [4]=0x{val2:08X}")
     dut._log.info("Read-then-write bus turnaround verified")
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_misaligned_long_read_retry_recovers(dut):
+    """Inject one BERR+HALT retry on misaligned long read; cycle should restart and complete."""
+    h = CPUTestHarness(dut, wait_states=1)
+    data_addr = h.DATA_BASE + 0x181  # misaligned long forces multi-part transfer
+    expected = 0x89ABCDEF
+    res = h.RESULT_BASE + 0xD0
+    berr_handler = 0x000760
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, res),
+        *moveq(0x5A, 1),
+        *move_to_abs_long(LONG, DN, 1, res + 4),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, expected)
+    await h.setup(program)
+
+    # If retry handling is wrong, this handler will fire and write 0xEE.
+    h.mem.load_long(2 * 4, berr_handler)
+    h.mem.load_words(
+        berr_handler,
+        [
+            *moveq(0x6E, 2),
+            *move_to_abs_long(LONG, DN, 2, res + 8),
+            *h.sentinel_program(),
+        ],
+    )
+
+    prev_as_n = 1
+    retry_injected = False
+    retry_phase = 0  # 0=idle, 1=berr+halt asserted, 2=berr released/holding halt, 3=done
+    starts_at_target = 0
+    found = False
+    data_rdy_events = []
+
+    for _ in range(40000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            bus_bsy = int(dut.BUS_BSY.value)
+            data_rdy = int(dut.DATA_RDY.value)
+            data_valid = int(dut.DATA_VALID.value)
+            data_to_core = int(dut.DATA_TO_CORE.value)
+        except ValueError:
+            continue
+
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr == data_addr:
+            starts_at_target += 1
+            if not retry_injected:
+                # Assert retry request for the active cycle.
+                dut.BERRn.value = 0
+                dut.HALT_INn.value = 0
+                retry_injected = True
+                retry_phase = 1
+
+        if data_rdy:
+            data_rdy_events.append((data_valid, data_to_core))
+
+        if retry_phase == 1 and as_n == 1:
+            # Release bus error at end of the retried cycle, keep HALT low
+            # until BUS_BSY drops so the cycle is treated strictly as retry.
+            dut.BERRn.value = 1
+            retry_phase = 2
+        elif retry_phase == 2 and bus_bsy == 0:
+            # Retry acknowledged; allow restart.
+            dut.HALT_INn.value = 1
+            retry_phase = 3
+
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert retry_injected, "Did not inject retry on target misaligned long read"
+    assert starts_at_target >= 2, f"Expected retried restart of target read, saw {starts_at_target} start(s)"
+    assert found, "Retry recovery test did not complete"
+    assert h.mem.read(res, 4) == expected, (
+        f"Retried misaligned read data mismatch: expected 0x{expected:08X}, got 0x{h.mem.read(res, 4):08X}; "
+        f"res+4=0x{h.mem.read(res + 4, 4):08X}, res+8=0x{h.mem.read(res + 8, 4):08X}, "
+        f"data_rdy_events={[(v, hex(d)) for v, d in data_rdy_events[:8]]}"
+    )
+    assert h.mem.read(res + 4, 4) == 0x0000005A, "Program did not continue after retry recovery"
+    assert h.mem.read(res + 8, 4) != 0x0000006E, "Bus-error handler fired; retry was not recovered"
     h.cleanup()
