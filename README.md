@@ -52,6 +52,15 @@ Representative baseline from 10 seeds (`build/rep_ecp5_seed_sweep_task3/results.
 | TRELLIS_COMB | 18,689 (all 10 seeds) |
 | TRELLIS_FF | 2,522 (all 10 seeds) |
 
+Latest representative single-run log (`build/rep_ecp5/nextpnr.log`):
+
+| Metric | Value |
+|--------|-------|
+| LUT4 | 21,941 / 43,848 (50%) |
+| TRELLIS_COMB | 22,603 / 43,848 (51%) |
+| TRELLIS_FF | 2,487 / 43,848 (5%) |
+| Fmax @ 25 MHz target | 26.69 MHz (timing pass) |
+
 ## Equivalence Validation
 
 The `validation/` directory contains a co-simulation harness that compares
