@@ -89,10 +89,13 @@ module WF68K30L_TOP #(
     output logic        DSn,
     output logic        ECSn,
     output logic        OCSn,
+    output logic        CIOUTn,
+    output logic        CBREQn,
     output logic        DBENn,           // Data buffer enable.
     output logic        BUS_EN,          // Enables ADR, ASn, DSn, RWn, RMCn, FC and SIZE.
 
     // Synchronous bus control:
+    input  logic        CBACKn,
     input  logic        STERMn,
 
     // Status controls:
@@ -122,6 +125,7 @@ logic [31:0] ADR_OFFSET;
 logic [31:0] ADR_OFFSET_EXH;
 logic [5:0]  ADR_OFFSET_MAIN;
 logic [31:0] ADR_P;
+logic [31:0] ADR_BUS_REQ_PHYS;
 logic [31:0] ADR_P_PHYS;
 logic [31:0] ADR_P_PHYS_CALC;
 logic [31:0] ADR_P_PHYS_LATCH;
@@ -211,7 +215,16 @@ logic [MMU_ATC_LINES-1:0] MMU_ATC_W;
 logic [MMU_ATC_LINES-1:0] MMU_ATC_M;
 logic [2:0]  MMU_ATC_FC [0:MMU_ATC_LINES-1];
 logic [31:0] MMU_ATC_TAG[0:MMU_ATC_LINES-1];
+logic [31:0] MMU_ATC_PTAG[0:MMU_ATC_LINES-1];
 logic [$clog2(MMU_ATC_LINES)-1:0] MMU_ATC_REPL_PTR;
+localparam int MMU_DESC_SHADOW_LINES = 256;
+logic [MMU_DESC_SHADOW_LINES-1:0] MMU_DESC_SHADOW_V;
+logic [31:0] MMU_DESC_SHADOW_ADDR[0:MMU_DESC_SHADOW_LINES-1];
+logic [31:0] MMU_DESC_SHADOW_DATA[0:MMU_DESC_SHADOW_LINES-1];
+logic [$clog2(MMU_DESC_SHADOW_LINES)-1:0] MMU_DESC_SHADOW_REPL_PTR;
+logic        MMU_DESC_SHADOW_PENDING;
+logic [31:0] MMU_DESC_SHADOW_PENDING_ADDR;
+logic        MMU_DESC_SHADOW_PENDING_WR;
 logic        DR_WR_1;
 logic        DR_WR_2;
 logic        DR_MARK_USED;
@@ -229,6 +242,8 @@ logic        DATA_WR_MAIN;
 logic        DATA_RDY;
 logic        DATA_RDY_BUSIF;
 logic        DATA_RDY_CACHE;
+logic        MMU_FAULT_DATA_ACK;
+logic        MMU_FAULT_OPCODE_ACK;
 logic [31:0] DATA_TO_CORE;
 logic [31:0] DATA_TO_CORE_BUSIF;
 logic [31:0] DATA_TO_CORE_CACHE;
@@ -261,6 +276,7 @@ logic        FB;
 logic        FC;
 logic        FETCH_MEM_ADR;
 logic [2:0]  FC_I;
+logic [2:0]  FC_BUS_REQ;
 logic [2:0]  FC_LATCH;
 logic        HILOn;
 logic [31:0] INBUFFER;
@@ -288,6 +304,7 @@ logic        MSP_WR;
 logic        OPCODE_RD;
 logic        OPCODE_RDY;
 logic        OPCODE_RDY_BUSIF;
+logic        OPCODE_RDY_BUSIF_CORE;
 logic        OPCODE_VALID;
 logic        OPCODE_VALID_BUSIF;
 logic [15:0] OPCODE_TO_CORE;
@@ -326,12 +343,20 @@ logic        RC;
 logic        RD_REQ;
 logic        RD_REQ_I;
 logic        DATA_RD_BUS;
+logic        DATA_RDY_BUSIF_CORE;
 logic        RMC;
 logic        REFILLn_EXH;
 logic        RESTORE_ISP_PC;
 logic        RESET_CPU;
 logic        RESET_IN;
 logic        RESET_STRB;
+logic        CIOUT_ASSERT;
+logic        CBREQ_ASSERT;
+logic        CBREQ_REQ_NOW;
+logic        CBREQ_REQ_LATCH;
+logic        CBREQ_INST_REQ_NOW;
+logic        CBREQ_DATA_REQ_NOW;
+logic        OPCODE_REQ_CORE_MISS;
 logic        SP_ADD_DISPL;
 logic        SP_ADD_DISPL_EXH;
 logic        SP_ADD_DISPL_MAIN;
@@ -373,6 +398,15 @@ logic        TRAP_CHK;
 logic        TRAP_DIVZERO;
 logic        TRAP_V;
 logic        TRAP_MMU_CFG;
+logic        MMU_RUNTIME_REQ;
+logic        MMU_RUNTIME_FAULT;
+logic        MMU_RUNTIME_ATC_REFILL;
+logic [2:0]  MMU_RUNTIME_ATC_FC;
+logic [31:0] MMU_RUNTIME_ATC_TAG;
+logic [31:0] MMU_RUNTIME_ATC_PTAG;
+logic        MMU_RUNTIME_ATC_B;
+logic        MMU_RUNTIME_ATC_W;
+logic        MMU_RUNTIME_ATC_M;
 logic        UNMARK;
 logic        USE_APAIR;
 logic        USE_DFC;
@@ -395,6 +429,15 @@ logic [15:0] ICACHE_OPCODE_WORD;
 logic        ICACHE_FILL_PENDING;
 logic [31:0] ICACHE_FILL_ADDR;
 logic        ICACHE_FILL_CACHEABLE;
+logic [2:0]  ICACHE_FILL_FC;
+logic        ICACHE_BURST_TRACK_VALID;
+logic [3:0]  ICACHE_BURST_TRACK_LINE;
+logic [23:0] ICACHE_BURST_TRACK_TAG;
+logic        ICACHE_BURST_FILL_VALID;
+logic [3:0]  ICACHE_BURST_FILL_LINE;
+logic [23:0] ICACHE_BURST_FILL_TAG;
+logic [7:0]  ICACHE_BURST_FILL_PENDING;
+logic [2:0]  ICACHE_BURST_FILL_FC;
 logic [23:0] ICACHE_TAG [0:15];
 logic [7:0]  ICACHE_VALID [0:15];
 logic [15:0] ICACHE_DATA [0:15][0:7];
@@ -409,11 +452,28 @@ logic        DCACHE_READ_FILL_PENDING;
 logic [31:0] DCACHE_READ_FILL_ADDR;
 OP_SIZETYPE  DCACHE_READ_FILL_SIZE;
 logic        DCACHE_READ_FILL_CACHEABLE;
+logic [2:0]  DCACHE_READ_FILL_FC;
+logic        DCACHE_BURST_TRACK_VALID;
+logic [3:0]  DCACHE_BURST_TRACK_LINE;
+logic [23:0] DCACHE_BURST_TRACK_TAG;
+logic        DCACHE_BURST_FILL_VALID;
+logic [3:0]  DCACHE_BURST_FILL_LINE;
+logic [23:0] DCACHE_BURST_FILL_TAG;
+logic [3:0]  DCACHE_BURST_FILL_PENDING;
+logic [2:0]  DCACHE_BURST_FILL_FC;
 logic        DCACHE_WRITE_PENDING;
 logic [31:0] DCACHE_WRITE_ADDR;
 OP_SIZETYPE  DCACHE_WRITE_SIZE;
 logic [31:0] DCACHE_WRITE_DATA;
 logic        DCACHE_WRITE_CACHEABLE;
+logic        BURST_PREFETCH_OP_REQ;
+logic        BURST_PREFETCH_DATA_REQ;
+logic [2:0]  BURST_PREFETCH_OP_WORD;
+logic [1:0]  BURST_PREFETCH_DATA_ENTRY;
+logic [31:0] BURST_PREFETCH_ADDR;
+logic [2:0]  BURST_PREFETCH_FC;
+logic        BUS_CYCLE_BURST;
+logic        BUS_CYCLE_BURST_IS_OP;
 
 // ========================================================================
 // Exception handler data multiplexer
@@ -539,7 +599,86 @@ begin
 end
 endfunction
 
+function automatic logic [31:0] mmu_page_compose_addr(
+    input logic [31:0] tc_in,
+    input logic [31:0] ptag,
+    input logic [31:0] logical_addr
+);
+    logic [4:0] shift;
+    logic [31:0] page_mask;
+begin
+    shift = mmu_page_shift(tc_in);
+    if (shift == 5'd0)
+        page_mask = 32'h0000_0000;
+    else
+        page_mask = 32'hFFFF_FFFF >> (6'd32 - {1'b0, shift});
+    mmu_page_compose_addr = (ptag << shift) | (logical_addr & page_mask);
+end
+endfunction
+
+function automatic logic [31:0] mmu_index_extract(
+    input logic [31:0] logical_addr,
+    input logic [3:0]  initial_shift,
+    input logic [5:0]  consumed_bits,
+    input logic [3:0]  width
+);
+    logic [31:0] idx;
+    logic [5:0] bitpos;
+    integer j;
+begin
+    idx = 32'h0;
+    for (j = 0; j < 16; j = j + 1) begin
+        if (j < width) begin
+            bitpos = {2'b00, initial_shift} + consumed_bits + j[5:0];
+            if (bitpos < 6'd32)
+                idx = {idx[30:0], logical_addr[31 - bitpos]};
+            else
+                idx = {idx[30:0], 1'b0};
+        end
+    end
+    mmu_index_extract = idx;
+end
+endfunction
+
+function automatic logic [32:0] mmu_desc_shadow_read(input logic [31:0] addr);
+    logic hit;
+    logic [31:0] data;
+    logic [31:0] addr_w;
+    integer i;
+begin
+    hit = 1'b0;
+    data = 32'h0;
+    addr_w = {addr[31:2], 2'b00};
+    for (i = 0; i < MMU_DESC_SHADOW_LINES; i = i + 1) begin
+        if (!hit && MMU_DESC_SHADOW_V[i] && MMU_DESC_SHADOW_ADDR[i] == addr_w) begin
+            hit = 1'b1;
+            data = MMU_DESC_SHADOW_DATA[i];
+        end
+    end
+    mmu_desc_shadow_read = {hit, data};
+end
+endfunction
+
 function automatic logic mmu_cache_inhibit(
+    input logic [2:0]  fc,
+    input logic [31:0] addr,
+    input logic        read_access,
+    input logic        write_access,
+    input logic        rmw_access,
+    input logic [31:0] tt0,
+    input logic [31:0] tt1
+);
+    logic ci_out;
+begin
+    ci_out = mmu_ci_out(fc, addr, read_access, write_access, rmw_access, tt0, tt1);
+    if (fc == FC_CPU_SPACE)
+        mmu_cache_inhibit = 1'b1;
+    else
+        mmu_cache_inhibit = ci_out;
+end
+endfunction
+
+function automatic logic mmu_ci_out(
     input logic [2:0]  fc,
     input logic [31:0] addr,
     input logic        read_access,
@@ -551,13 +690,9 @@ function automatic logic mmu_cache_inhibit(
     logic tt0_hit;
     logic tt1_hit;
 begin
-    if (fc == FC_CPU_SPACE) begin
-        mmu_cache_inhibit = 1'b1;
-    end else begin
-        tt0_hit = mmu_tt_match(tt0, fc, addr, read_access, write_access, rmw_access);
-        tt1_hit = mmu_tt_match(tt1, fc, addr, read_access, write_access, rmw_access);
-        mmu_cache_inhibit = (tt0_hit && tt0[10]) || (tt1_hit && tt1[10]); // CI bit.
-    end
+    tt0_hit = mmu_tt_match(tt0, fc, addr, read_access, write_access, rmw_access);
+    tt1_hit = mmu_tt_match(tt1, fc, addr, read_access, write_access, rmw_access);
+    mmu_ci_out = (tt0_hit && tt0[10]) || (tt1_hit && tt1[10]); // CI bit.
 end
 endfunction
 
@@ -655,6 +790,10 @@ always_ff @(posedge CLK) begin : cache_registers
     logic [3:0]  dcache_line;
     logic [1:0]  dcache_entry;
     logic [23:0] dcache_tag;
+    logic [7:0]  icache_valid_after;
+    logic [7:0]  icache_burst_pending_after;
+    logic [3:0]  dcache_valid_after;
+    logic [3:0]  dcache_burst_pending_after;
     logic [31:0] dcache_merged_word;
     logic        dcache_hit;
     if (RESET_CPU) begin
@@ -665,6 +804,15 @@ always_ff @(posedge CLK) begin : cache_registers
         ICACHE_FILL_PENDING <= 1'b0;
         ICACHE_FILL_ADDR <= 32'h0;
         ICACHE_FILL_CACHEABLE <= 1'b0;
+        ICACHE_FILL_FC <= 3'b000;
+        ICACHE_BURST_TRACK_VALID <= 1'b0;
+        ICACHE_BURST_TRACK_LINE <= 4'h0;
+        ICACHE_BURST_TRACK_TAG <= 24'h0;
+        ICACHE_BURST_FILL_VALID <= 1'b0;
+        ICACHE_BURST_FILL_LINE <= 4'h0;
+        ICACHE_BURST_FILL_TAG <= 24'h0;
+        ICACHE_BURST_FILL_PENDING <= 8'h00;
+        ICACHE_BURST_FILL_FC <= 3'b000;
         DATA_RDY_CACHE <= 1'b0;
         DATA_VALID_CACHE <= 1'b0;
         DATA_TO_CORE_CACHE <= 32'h0;
@@ -675,6 +823,15 @@ always_ff @(posedge CLK) begin : cache_registers
         DCACHE_READ_FILL_ADDR <= 32'h0;
         DCACHE_READ_FILL_SIZE <= LONG;
         DCACHE_READ_FILL_CACHEABLE <= 1'b0;
+        DCACHE_READ_FILL_FC <= 3'b000;
+        DCACHE_BURST_TRACK_VALID <= 1'b0;
+        DCACHE_BURST_TRACK_LINE <= 4'h0;
+        DCACHE_BURST_TRACK_TAG <= 24'h0;
+        DCACHE_BURST_FILL_VALID <= 1'b0;
+        DCACHE_BURST_FILL_LINE <= 4'h0;
+        DCACHE_BURST_FILL_TAG <= 24'h0;
+        DCACHE_BURST_FILL_PENDING <= 4'h0;
+        DCACHE_BURST_FILL_FC <= 3'b000;
         DCACHE_WRITE_PENDING <= 1'b0;
         DCACHE_WRITE_ADDR <= 32'h0;
         DCACHE_WRITE_SIZE <= LONG;
@@ -700,7 +857,7 @@ always_ff @(posedge CLK) begin : cache_registers
         // Hold the last data-return source between ready strobes.
         if (DATA_RDY_CACHE)
             DATA_LAST_FROM_CACHE <= 1'b1;
-        else if (DATA_RDY_BUSIF)
+        else if (DATA_RDY_BUSIF_CORE)
             DATA_LAST_FROM_CACHE <= 1'b0;
 
         // Serve opcode requests directly from the instruction-cache model.
@@ -715,7 +872,7 @@ always_ff @(posedge CLK) begin : cache_registers
             DATA_RDY_CACHE <= 1'b1;
             DATA_VALID_CACHE <= 1'b1;
             DCACHE_HIT_PENDING <= 1'b0;
-        end else if (!BUS_BSY && DATA_RD && DCACHE_HIT_NOW && !DATA_RDY_BUSIF) begin
+        end else if (!BUS_BSY && DATA_RD && DCACHE_HIT_NOW && !DATA_RDY_BUSIF_CORE) begin
             DCACHE_HIT_DATA_PENDING <= DCACHE_HIT_DATA_NOW;
             DCACHE_HIT_PENDING <= 1'b1;
         end
@@ -723,30 +880,34 @@ always_ff @(posedge CLK) begin : cache_registers
         // Track in-flight opcode misses to fill cache on bus completion.
         if (!BUS_BSY && OPCODE_REQ) begin
             ICACHE_FILL_PENDING <= 1'b1;
-            ICACHE_FILL_ADDR <= ADR_P_PHYS;
-            ICACHE_FILL_CACHEABLE <= !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
+            ICACHE_FILL_ADDR <= ADR_BUS_REQ_PHYS;
+            ICACHE_FILL_CACHEABLE <= BURST_PREFETCH_OP_REQ ? 1'b1 :
+                                     !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
+            ICACHE_FILL_FC <= FC_BUS_REQ;
         end else if (OPCODE_RDY_BUSIF) begin
             ICACHE_FILL_PENDING <= 1'b0;
         end
 
         // Track in-flight data reads for cache fill on completion.
-        if (!BUS_BSY && DATA_RD_BUS) begin
+        if (!BUS_BSY && ((DATA_RD_BUS && !MMU_RUNTIME_FAULT) || BURST_PREFETCH_DATA_REQ)) begin
             DCACHE_READ_FILL_PENDING <= 1'b1;
-            DCACHE_READ_FILL_ADDR <= ADR_P_PHYS;
-            DCACHE_READ_FILL_SIZE <= OP_SIZE_BUS;
-            DCACHE_READ_FILL_CACHEABLE <= !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, RMC, MMU_TT0, MMU_TT1);
+            DCACHE_READ_FILL_ADDR <= ADR_BUS_REQ_PHYS;
+            DCACHE_READ_FILL_SIZE <= BURST_PREFETCH_DATA_REQ ? LONG : OP_SIZE_BUS;
+            DCACHE_READ_FILL_CACHEABLE <= BURST_PREFETCH_DATA_REQ ? 1'b1 :
+                                          !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, RMC, MMU_TT0, MMU_TT1);
+            DCACHE_READ_FILL_FC <= FC_BUS_REQ;
         end else if (DATA_RDY_BUSIF) begin
             DCACHE_READ_FILL_PENDING <= 1'b0;
         end
 
         // Track in-flight data writes for write-through cache maintenance.
-        if (!BUS_BSY && DATA_WR) begin
+        if (!BUS_BSY && DATA_WR && !MMU_RUNTIME_FAULT) begin
             DCACHE_WRITE_PENDING <= 1'b1;
             DCACHE_WRITE_ADDR <= ADR_P_PHYS;
             DCACHE_WRITE_SIZE <= OP_SIZE_BUS;
             DCACHE_WRITE_DATA <= DATA_FROM_CORE;
             DCACHE_WRITE_CACHEABLE <= !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b0, 1'b1, RMC, MMU_TT0, MMU_TT1);
-        end else if (DATA_RDY_BUSIF && DCACHE_WRITE_PENDING) begin
+        end else if (DATA_RDY_BUSIF_CORE && DCACHE_WRITE_PENDING) begin
             DCACHE_WRITE_PENDING <= 1'b0;
         end
 
@@ -760,6 +921,48 @@ always_ff @(posedge CLK) begin : cache_registers
             ICACHE_TAG[fill_line] <= fill_tag;
             ICACHE_DATA[fill_line][fill_word] <= OPCODE_TO_CORE_BUSIF;
             ICACHE_VALID[fill_line][fill_word] <= 1'b1;
+
+            icache_valid_after = (ICACHE_TAG[fill_line] == fill_tag) ?
+                                 (ICACHE_VALID[fill_line] | (8'h01 << fill_word)) :
+                                 (8'h01 << fill_word);
+            icache_burst_pending_after = ICACHE_BURST_FILL_PENDING & ~(8'h01 << fill_word);
+
+            // Phase-5 line-aware burst tracking:
+            // A burst-acknowledged fill marks this line as the active burst context.
+            // Subsequent same-line misses suppress redundant CBREQ assertions.
+            if (CACR[4] && !CBACKn) begin
+                ICACHE_BURST_TRACK_VALID <= 1'b1;
+                ICACHE_BURST_TRACK_LINE <= fill_line;
+                ICACHE_BURST_TRACK_TAG <= fill_tag;
+            end else if (ICACHE_BURST_TRACK_VALID &&
+                         ICACHE_BURST_TRACK_LINE == fill_line &&
+                         ICACHE_BURST_TRACK_TAG == fill_tag &&
+                         icache_valid_after == 8'hFF) begin
+                ICACHE_BURST_TRACK_VALID <= 1'b0; // Entire line now resident.
+            end else if (ICACHE_BURST_TRACK_VALID &&
+                         (ICACHE_BURST_TRACK_LINE != fill_line || ICACHE_BURST_TRACK_TAG != fill_tag)) begin
+                ICACHE_BURST_TRACK_VALID <= 1'b0;
+            end
+
+            // Phase-8 autonomous burst completion:
+            // once the first burst-acknowledged miss returns, background reads
+            // complete the rest of the line without exposing extra ready strobes
+            // to the core.
+            if (ICACHE_BURST_FILL_VALID &&
+                ICACHE_BURST_FILL_LINE == fill_line &&
+                ICACHE_BURST_FILL_TAG == fill_tag) begin
+                ICACHE_BURST_FILL_PENDING <= icache_burst_pending_after;
+                if (icache_burst_pending_after == 8'h00)
+                    ICACHE_BURST_FILL_VALID <= 1'b0;
+            end
+
+            if (!BUS_CYCLE_BURST && CACR[4] && !CBACKn) begin
+                ICACHE_BURST_FILL_PENDING <= ~icache_valid_after;
+                ICACHE_BURST_FILL_LINE <= fill_line;
+                ICACHE_BURST_FILL_TAG <= fill_tag;
+                ICACHE_BURST_FILL_FC <= ICACHE_FILL_FC;
+                ICACHE_BURST_FILL_VALID <= (~icache_valid_after != 8'h00);
+            end
         end
 
         // Fill data cache on eligible read misses (long-word aligned only).
@@ -773,6 +976,41 @@ always_ff @(posedge CLK) begin : cache_registers
             DCACHE_TAG[dcache_line] <= dcache_tag;
             DCACHE_DATA[dcache_line][dcache_entry] <= DATA_TO_CORE_BUSIF;
             DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
+
+            dcache_valid_after = (DCACHE_TAG[dcache_line] == dcache_tag) ?
+                                 (DCACHE_VALID[dcache_line] | (4'h1 << dcache_entry)) :
+                                 (4'h1 << dcache_entry);
+            dcache_burst_pending_after = DCACHE_BURST_FILL_PENDING & ~(4'h1 << dcache_entry);
+
+            if (CACR[12] && !CBACKn) begin
+                DCACHE_BURST_TRACK_VALID <= 1'b1;
+                DCACHE_BURST_TRACK_LINE <= dcache_line;
+                DCACHE_BURST_TRACK_TAG <= dcache_tag;
+            end else if (DCACHE_BURST_TRACK_VALID &&
+                         DCACHE_BURST_TRACK_LINE == dcache_line &&
+                         DCACHE_BURST_TRACK_TAG == dcache_tag &&
+                         dcache_valid_after == 4'hF) begin
+                DCACHE_BURST_TRACK_VALID <= 1'b0;
+            end else if (DCACHE_BURST_TRACK_VALID &&
+                         (DCACHE_BURST_TRACK_LINE != dcache_line || DCACHE_BURST_TRACK_TAG != dcache_tag)) begin
+                DCACHE_BURST_TRACK_VALID <= 1'b0;
+            end
+
+            if (DCACHE_BURST_FILL_VALID &&
+                DCACHE_BURST_FILL_LINE == dcache_line &&
+                DCACHE_BURST_FILL_TAG == dcache_tag) begin
+                DCACHE_BURST_FILL_PENDING <= dcache_burst_pending_after;
+                if (dcache_burst_pending_after == 4'h0)
+                    DCACHE_BURST_FILL_VALID <= 1'b0;
+            end
+
+            if (!BUS_CYCLE_BURST && CACR[12] && !CBACKn) begin
+                DCACHE_BURST_FILL_PENDING <= ~dcache_valid_after;
+                DCACHE_BURST_FILL_LINE <= dcache_line;
+                DCACHE_BURST_FILL_TAG <= dcache_tag;
+                DCACHE_BURST_FILL_FC <= DCACHE_READ_FILL_FC;
+                DCACHE_BURST_FILL_VALID <= (~dcache_valid_after != 4'h0);
+            end
         end
 
         // Write-through updates: hit always updates; WA controls miss allocation.
@@ -810,18 +1048,43 @@ always_ff @(posedge CLK) begin : cache_registers
             if (cacr_write_value[11]) begin // CD
                 for (i = 0; i < DCACHE_LINES; i = i + 1)
                     DCACHE_VALID[i] <= 4'h0;
+                DCACHE_BURST_TRACK_VALID <= 1'b0;
+                DCACHE_BURST_FILL_VALID <= 1'b0;
+                DCACHE_BURST_FILL_PENDING <= 4'h0;
             end
-            if (cacr_write_value[10]) // CED
+            if (cacr_write_value[10]) begin // CED
                 DCACHE_VALID[caar_line][caar_entry] <= 1'b0;
+                DCACHE_BURST_TRACK_VALID <= 1'b0;
+                DCACHE_BURST_FILL_VALID <= 1'b0;
+                DCACHE_BURST_FILL_PENDING <= 4'h0;
+            end
 
             // Clear-instruction operations invalidate cache entries immediately.
             if (cacr_write_value[3]) begin // CI
                 for (i = 0; i < ICACHE_LINES; i = i + 1)
                     ICACHE_VALID[i] <= 8'h00;
+                ICACHE_BURST_TRACK_VALID <= 1'b0;
+                ICACHE_BURST_FILL_VALID <= 1'b0;
+                ICACHE_BURST_FILL_PENDING <= 8'h00;
             end
             if (cacr_write_value[2]) begin // CEI
                 ICACHE_VALID[caar_line][{caar_entry, 1'b0}] <= 1'b0;
                 ICACHE_VALID[caar_line][{caar_entry, 1'b1}] <= 1'b0;
+                ICACHE_BURST_TRACK_VALID <= 1'b0;
+                ICACHE_BURST_FILL_VALID <= 1'b0;
+                ICACHE_BURST_FILL_PENDING <= 8'h00;
+            end
+
+            // Disabling burst capability clears line-tracking context.
+            if (!cacr_write_value[0] || !cacr_write_value[4]) begin
+                ICACHE_BURST_TRACK_VALID <= 1'b0;
+                ICACHE_BURST_FILL_VALID <= 1'b0;
+                ICACHE_BURST_FILL_PENDING <= 8'h00;
+            end
+            if (!cacr_write_value[8] || !cacr_write_value[12]) begin
+                DCACHE_BURST_TRACK_VALID <= 1'b0;
+                DCACHE_BURST_FILL_VALID <= 1'b0;
+                DCACHE_BURST_FILL_PENDING <= 4'h0;
             end
         end
 
@@ -842,6 +1105,7 @@ always_ff @(posedge CLK) begin : mmu_registers
     logic [2:0]  atc_mask;
     logic [31:0] atc_logical;
     logic [31:0] atc_tag;
+    logic [31:0] atc_ptag;
     logic [63:0] root_ptr;
     logic [31:0] root_offs;
     logic [15:0] mmusr_value;
@@ -875,6 +1139,7 @@ always_ff @(posedge CLK) begin : mmu_registers
         for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
             MMU_ATC_FC[i] <= 3'b000;
             MMU_ATC_TAG[i] <= 32'h0;
+            MMU_ATC_PTAG[i] <= 32'h0;
         end
     end else begin
         tc_cfg_err = mmu_tc_cfg_error(ALU_RESULT[31:0]);
@@ -884,6 +1149,8 @@ always_ff @(posedge CLK) begin : mmu_registers
                            (MMU_TC_WR || MMU_SRP_WR || MMU_CRP_WR || MMU_TT0_WR || MMU_TT1_WR);
         pflush_exec = MMU_ATC_FLUSH && !pmove_flush_exec;
         TRAP_MMU_CFG <= 1'b0;
+        if (MMU_RUNTIME_REQ && MMU_RUNTIME_FAULT)
+            TRAP_MMU_CFG <= 1'b1;
         if (MMU_ATC_FLUSH)
             MMU_ATC_FLUSH_COUNT <= MMU_ATC_FLUSH_COUNT + 32'd1;
         if (MMU_SRP_WR) begin
@@ -954,6 +1221,7 @@ always_ff @(posedge CLK) begin : mmu_registers
             root_offs = {root_ptr[31:4], 4'b0000};
             atc_valid_result = (!tt_hit) && (atc_fc != FC_CPU_SPACE) && (root_ptr[33:32] == 2'b01);
             atc_phys = atc_valid_result ? (atc_logical + root_offs) : 32'h0;
+            atc_ptag = mmu_page_tag(MMU_TC, atc_phys);
             atc_b_result = !atc_valid_result;
             atc_w_result = 1'b0;
             atc_m_result = !BIW_1[9]; // PLOADW marks modified.
@@ -987,9 +1255,51 @@ always_ff @(posedge CLK) begin : mmu_registers
                 MMU_ATC_M[atc_ins_idx] <= atc_m_result;
                 MMU_ATC_FC[atc_ins_idx] <= atc_fc;
                 MMU_ATC_TAG[atc_ins_idx] <= atc_tag;
+                MMU_ATC_PTAG[atc_ins_idx] <= atc_ptag;
                 if (!atc_hit && !atc_free)
                     MMU_ATC_REPL_PTR <= MMU_ATC_REPL_PTR + 1'b1;
             end
+        end
+
+        // Runtime translation miss fill: insert resolved mapping into ATC.
+        if (MMU_RUNTIME_ATC_REFILL) begin
+            atc_fc = MMU_RUNTIME_ATC_FC;
+            atc_tag = MMU_RUNTIME_ATC_TAG;
+            atc_ptag = MMU_RUNTIME_ATC_PTAG;
+            atc_b_result = MMU_RUNTIME_ATC_B;
+            atc_w_result = MMU_RUNTIME_ATC_W;
+            atc_m_result = MMU_RUNTIME_ATC_M;
+
+            atc_hit = 1'b0;
+            atc_free = 1'b0;
+            atc_hit_idx = '0;
+            atc_free_idx = '0;
+            for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
+                if (!atc_hit && MMU_ATC_V[i] && MMU_ATC_FC[i] == atc_fc && MMU_ATC_TAG[i] == atc_tag) begin
+                    atc_hit = 1'b1;
+                    atc_hit_idx = i[$clog2(MMU_ATC_LINES)-1:0];
+                end
+                if (!atc_free && !MMU_ATC_V[i]) begin
+                    atc_free = 1'b1;
+                    atc_free_idx = i[$clog2(MMU_ATC_LINES)-1:0];
+                end
+            end
+
+            atc_ins_idx = atc_hit ? atc_hit_idx : (atc_free ? atc_free_idx : MMU_ATC_REPL_PTR);
+
+            for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
+                if (MMU_ATC_V[i] && MMU_ATC_FC[i] == atc_fc && MMU_ATC_TAG[i] == atc_tag)
+                    MMU_ATC_V[i] <= 1'b0;
+            end
+            MMU_ATC_V[atc_ins_idx] <= 1'b1;
+            MMU_ATC_B[atc_ins_idx] <= atc_b_result;
+            MMU_ATC_W[atc_ins_idx] <= atc_w_result;
+            MMU_ATC_M[atc_ins_idx] <= atc_m_result;
+            MMU_ATC_FC[atc_ins_idx] <= atc_fc;
+            MMU_ATC_TAG[atc_ins_idx] <= atc_tag;
+            MMU_ATC_PTAG[atc_ins_idx] <= atc_ptag;
+            if (!atc_hit && !atc_free)
+                MMU_ATC_REPL_PTR <= MMU_ATC_REPL_PTR + 1'b1;
         end
 
         // PTEST writes MMUSR with level-specific status.
@@ -1143,7 +1453,8 @@ end
 // ========================================================================
 
 assign OP_SIZE = BUSY_EXH ? OP_SIZE_EXH : OP_SIZE_MAIN;
-assign OP_SIZE_BUS = DATA_WR_MAIN ? OP_SIZE_WB : OP_SIZE;
+assign OP_SIZE_BUS = BURST_PREFETCH_DATA_REQ ? LONG :
+                     DATA_WR_MAIN ? OP_SIZE_WB : OP_SIZE;
 
 // ========================================================================
 // PC-related signals
@@ -1171,22 +1482,146 @@ assign AR_SEL_RD_1 = BUSY_EXH ? 3'b111 : AR_SEL_RD_1_MAIN; // ISP during excepti
 assign DATA_RD = DATA_RD_EXH || DATA_RD_MAIN;
 assign DATA_WR = DATA_WR_EXH || DATA_WR_MAIN;
 
+always_comb begin : burst_prefetch_select
+    BURST_PREFETCH_OP_REQ = 1'b0;
+    BURST_PREFETCH_DATA_REQ = 1'b0;
+    BURST_PREFETCH_OP_WORD = 3'b000;
+    BURST_PREFETCH_DATA_ENTRY = 2'b00;
+    BURST_PREFETCH_ADDR = 32'h0000_0000;
+    BURST_PREFETCH_FC = FC_USER_PROG;
+
+    if (!BUS_BSY && !DATA_WR && !DATA_RD_BUS && !OPCODE_REQ_CORE_MISS && !BUSY_EXH) begin
+        if (ICACHE_BURST_FILL_VALID && ICACHE_BURST_FILL_PENDING != 8'h00) begin
+            if (ICACHE_BURST_FILL_PENDING[0])       BURST_PREFETCH_OP_WORD = 3'd0;
+            else if (ICACHE_BURST_FILL_PENDING[1])  BURST_PREFETCH_OP_WORD = 3'd1;
+            else if (ICACHE_BURST_FILL_PENDING[2])  BURST_PREFETCH_OP_WORD = 3'd2;
+            else if (ICACHE_BURST_FILL_PENDING[3])  BURST_PREFETCH_OP_WORD = 3'd3;
+            else if (ICACHE_BURST_FILL_PENDING[4])  BURST_PREFETCH_OP_WORD = 3'd4;
+            else if (ICACHE_BURST_FILL_PENDING[5])  BURST_PREFETCH_OP_WORD = 3'd5;
+            else if (ICACHE_BURST_FILL_PENDING[6])  BURST_PREFETCH_OP_WORD = 3'd6;
+            else                                    BURST_PREFETCH_OP_WORD = 3'd7;
+            BURST_PREFETCH_OP_REQ = 1'b1;
+            BURST_PREFETCH_ADDR = {
+                ICACHE_BURST_FILL_TAG,
+                ICACHE_BURST_FILL_LINE,
+                BURST_PREFETCH_OP_WORD,
+                1'b0
+            };
+            BURST_PREFETCH_FC = ICACHE_BURST_FILL_FC;
+        end else if (DCACHE_BURST_FILL_VALID && DCACHE_BURST_FILL_PENDING != 4'h0) begin
+            if (DCACHE_BURST_FILL_PENDING[0])       BURST_PREFETCH_DATA_ENTRY = 2'd0;
+            else if (DCACHE_BURST_FILL_PENDING[1])  BURST_PREFETCH_DATA_ENTRY = 2'd1;
+            else if (DCACHE_BURST_FILL_PENDING[2])  BURST_PREFETCH_DATA_ENTRY = 2'd2;
+            else                                    BURST_PREFETCH_DATA_ENTRY = 2'd3;
+            BURST_PREFETCH_DATA_REQ = 1'b1;
+            BURST_PREFETCH_ADDR = {
+                DCACHE_BURST_FILL_TAG,
+                DCACHE_BURST_FILL_LINE,
+                BURST_PREFETCH_DATA_ENTRY,
+                2'b00
+            };
+            BURST_PREFETCH_FC = DCACHE_BURST_FILL_FC;
+        end
+    end
+end
+
 always_ff @(posedge CLK) begin : bus_req_latch
     // Flip-flops break combinatorial loops between core requests and bus controller.
     // Requests are valid until the bus controller enters START_CYCLE and asserts BUS_BSY.
-    if (!BUS_BSY) begin
-        RD_REQ_I <= DATA_RD_BUS;
-        WR_REQ_I <= DATA_WR;
-        OPCODE_REQ_I <= OPCODE_RD;
+    if (RESET_CPU) begin
+        RD_REQ_I <= 1'b0;
+        WR_REQ_I <= 1'b0;
+        OPCODE_REQ_I <= 1'b0;
+        MMU_FAULT_DATA_ACK <= 1'b0;
+        MMU_FAULT_OPCODE_ACK <= 1'b0;
+        BUS_CYCLE_BURST <= 1'b0;
+        BUS_CYCLE_BURST_IS_OP <= 1'b0;
+    end else if (!BUS_BSY) begin
+        MMU_FAULT_DATA_ACK <= MMU_RUNTIME_FAULT && (DATA_RD_BUS || DATA_WR);
+        MMU_FAULT_OPCODE_ACK <= MMU_RUNTIME_FAULT && OPCODE_REQ_CORE_MISS && !DATA_RD_BUS && !DATA_WR;
+        RD_REQ_I <= (DATA_RD_BUS && !MMU_RUNTIME_FAULT) || BURST_PREFETCH_DATA_REQ;
+        WR_REQ_I <= DATA_WR && !MMU_RUNTIME_FAULT;
+        OPCODE_REQ_I <= (OPCODE_REQ_CORE_MISS && !MMU_RUNTIME_FAULT) || BURST_PREFETCH_OP_REQ;
+        if (BURST_PREFETCH_OP_REQ) begin
+            BUS_CYCLE_BURST <= 1'b1;
+            BUS_CYCLE_BURST_IS_OP <= 1'b1;
+        end else if (BURST_PREFETCH_DATA_REQ) begin
+            BUS_CYCLE_BURST <= 1'b1;
+            BUS_CYCLE_BURST_IS_OP <= 1'b0;
+        end else begin
+            BUS_CYCLE_BURST <= 1'b0;
+            BUS_CYCLE_BURST_IS_OP <= 1'b0;
+        end
     end else if (BUS_BSY) begin
         RD_REQ_I <= 1'b0;
         WR_REQ_I <= 1'b0;
         OPCODE_REQ_I <= 1'b0;
+        MMU_FAULT_DATA_ACK <= 1'b0;
+        MMU_FAULT_OPCODE_ACK <= 1'b0;
     end
 end
 
-assign RD_REQ = !BUS_BSY ? DATA_RD_BUS : RD_REQ_I;
-assign WR_REQ = !BUS_BSY ? DATA_WR : WR_REQ_I;
+always_ff @(posedge CLK) begin : mmu_desc_shadow_update
+    logic [31:0] shadow_addr;
+    logic [31:0] shadow_data;
+    logic        hit;
+    logic        free;
+    logic [$clog2(MMU_DESC_SHADOW_LINES)-1:0] hit_idx;
+    logic [$clog2(MMU_DESC_SHADOW_LINES)-1:0] free_idx;
+    logic [$clog2(MMU_DESC_SHADOW_LINES)-1:0] ins_idx;
+    integer i;
+    if (RESET_CPU) begin
+        MMU_DESC_SHADOW_V <= '0;
+        MMU_DESC_SHADOW_REPL_PTR <= '0;
+        MMU_DESC_SHADOW_PENDING <= 1'b0;
+        MMU_DESC_SHADOW_PENDING_ADDR <= 32'h0;
+        MMU_DESC_SHADOW_PENDING_WR <= 1'b0;
+        for (i = 0; i < MMU_DESC_SHADOW_LINES; i = i + 1) begin
+            MMU_DESC_SHADOW_ADDR[i] <= 32'h0;
+            MMU_DESC_SHADOW_DATA[i] <= 32'h0;
+        end
+    end else begin
+        if (!BUS_BSY && (DATA_RD_BUS || DATA_WR) && !MMU_RUNTIME_FAULT) begin
+            MMU_DESC_SHADOW_PENDING <= 1'b1;
+            MMU_DESC_SHADOW_PENDING_ADDR <= ADR_P_PHYS;
+            MMU_DESC_SHADOW_PENDING_WR <= DATA_WR;
+        end
+
+        if (DATA_RDY_BUSIF_CORE && MMU_DESC_SHADOW_PENDING) begin
+            // Capture data accesses at completion using the request-latched address.
+            shadow_addr = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00};
+            shadow_data = MMU_DESC_SHADOW_PENDING_WR ? DATA_OUT : DATA_TO_CORE_BUSIF;
+
+            hit = 1'b0;
+            free = 1'b0;
+            hit_idx = '0;
+            free_idx = '0;
+            for (i = 0; i < MMU_DESC_SHADOW_LINES; i = i + 1) begin
+                if (!hit && MMU_DESC_SHADOW_V[i] && MMU_DESC_SHADOW_ADDR[i] == shadow_addr) begin
+                    hit = 1'b1;
+                    hit_idx = i[$clog2(MMU_DESC_SHADOW_LINES)-1:0];
+                end
+                if (!free && !MMU_DESC_SHADOW_V[i]) begin
+                    free = 1'b1;
+                    free_idx = i[$clog2(MMU_DESC_SHADOW_LINES)-1:0];
+                end
+            end
+
+            ins_idx = hit ? hit_idx : (free ? free_idx : MMU_DESC_SHADOW_REPL_PTR);
+            MMU_DESC_SHADOW_V[ins_idx] <= 1'b1;
+            MMU_DESC_SHADOW_ADDR[ins_idx] <= shadow_addr;
+            MMU_DESC_SHADOW_DATA[ins_idx] <= shadow_data;
+            if (!hit && !free)
+                MMU_DESC_SHADOW_REPL_PTR <= MMU_DESC_SHADOW_REPL_PTR + 1'b1;
+            MMU_DESC_SHADOW_PENDING <= 1'b0;
+        end else if (!BUS_BSY && MMU_RUNTIME_FAULT) begin
+            MMU_DESC_SHADOW_PENDING <= 1'b0;
+        end
+    end
+end
+
+assign RD_REQ = !BUS_BSY ? ((DATA_RD_BUS && !MMU_RUNTIME_FAULT) || BURST_PREFETCH_DATA_REQ) : RD_REQ_I;
+assign WR_REQ = !BUS_BSY ? (DATA_WR && !MMU_RUNTIME_FAULT) : WR_REQ_I;
 assign OPCODE_REQ_CORE = !BUS_BSY ? OPCODE_RD : OPCODE_REQ_I;
 
 // Minimal instruction-cache lookup on opcode requests.
@@ -1206,8 +1641,10 @@ always_comb begin : icache_lookup
     end
 end
 
+assign OPCODE_REQ_CORE_MISS = OPCODE_REQ_CORE && !ICACHE_HIT_NOW;
+
 // On an instruction-cache hit, satisfy the opcode fetch internally.
-assign OPCODE_REQ = OPCODE_REQ_CORE && !ICACHE_HIT_NOW;
+assign OPCODE_REQ = (OPCODE_REQ_CORE_MISS && !MMU_RUNTIME_FAULT) || BURST_PREFETCH_OP_REQ;
 
 // Minimal data-cache lookup on data read requests.
 always_comb begin : dcache_lookup
@@ -1293,29 +1730,236 @@ always_comb begin : mmu_address_translate
     logic        read_access;
     logic        write_access;
     logic        rmw_access;
+    logic        mmu_req_now;
     logic        tt_hit;
+    logic        atc_hit;
+    logic        atc_fault;
+    logic [2:0]  atc_fc;
+    logic [31:0] atc_logical;
+    logic [31:0] atc_tag;
+    logic [31:0] atc_phys;
+    logic [31:0] atc_ptag;
+    logic        atc_b;
+    logic        atc_w;
+    logic        atc_m;
+    logic [4:0]  page_shift;
+    logic [31:0] page_mask;
+    logic        root_valid;
+    logic        root_short_table;
     logic [63:0] root_ptr;
     logic [31:0] root_offs;
+    logic [14:0] root_limit;
+    logic        root_limit_lower;
+    logic [31:0] walk_table_base;
+    logic [31:0] walk_desc_addr;
+    logic [31:0] walk_desc;
+    logic [31:0] walk_page_desc;
+    logic [31:0] walk_index;
+    logic [31:0] walk_phys;
+    logic [5:0]  walk_consumed;
+    logic [3:0]  walk_width;
+    logic        walk_has_next;
+    logic        walk_done;
+    logic        walk_fault;
+    logic        walk_wp_accum;
+    logic        walk_page_m;
+    logic [32:0] walk_lookup;
+    logic [3:0]  level;
+    integer      i;
 
     read_access = OPCODE_RD || DATA_RD;
     write_access = DATA_WR;
     rmw_access = RMC;
+    mmu_req_now = !BUS_BSY && (DATA_WR || DATA_RD_BUS || OPCODE_REQ_CORE_MISS);
 
     root_ptr = (MMU_TC[25] && FC_I[2]) ? MMU_SRP : MMU_CRP; // SRE + supervisor access.
     root_offs = {root_ptr[31:4], 4'b0000}; // DT=1 constant offset.
+    root_valid = (root_ptr[33:32] == 2'b01);
+    root_short_table = (root_ptr[33:32] == 2'b10);
+    root_limit = root_ptr[62:48];
+    root_limit_lower = root_ptr[63];
+    page_shift = mmu_page_shift(MMU_TC);
+    if (page_shift == 5'd0)
+        page_mask = 32'h0000_0000;
+    else
+        page_mask = 32'hFFFF_FFFF >> (6'd32 - {1'b0, page_shift});
+
+    atc_fc = FC_I;
+    atc_logical = ADR_P;
+    atc_tag = mmu_page_tag(MMU_TC, atc_logical);
+    atc_hit = 1'b0;
+    atc_fault = 1'b0;
+    atc_phys = ADR_P;
+    atc_ptag = 32'h0;
+    atc_b = 1'b0;
+    atc_w = 1'b0;
+    atc_m = write_access;
+    for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
+        if (!atc_hit &&
+            MMU_ATC_V[i] &&
+            MMU_ATC_FC[i] == atc_fc &&
+            MMU_ATC_TAG[i] == atc_tag) begin
+            atc_hit = 1'b1;
+            atc_ptag = MMU_ATC_PTAG[i];
+            atc_b = MMU_ATC_B[i];
+            atc_w = MMU_ATC_W[i];
+            atc_m = MMU_ATC_M[i] || write_access;
+        end
+    end
+    if (atc_hit) begin
+        atc_fault = atc_b || (write_access && atc_w);
+        atc_phys = mmu_page_compose_addr(MMU_TC, atc_ptag, atc_logical);
+    end
 
     tt_hit = mmu_tt_match(MMU_TT0, FC_I, ADR_P, read_access, write_access, rmw_access) ||
              mmu_tt_match(MMU_TT1, FC_I, ADR_P, read_access, write_access, rmw_access);
 
-    if (tt_hit)
+    MMU_RUNTIME_REQ = mmu_req_now;
+    MMU_RUNTIME_FAULT = 1'b0;
+    MMU_RUNTIME_ATC_REFILL = 1'b0;
+    MMU_RUNTIME_ATC_FC = atc_fc;
+    MMU_RUNTIME_ATC_TAG = atc_tag;
+    MMU_RUNTIME_ATC_PTAG = 32'h0;
+    MMU_RUNTIME_ATC_B = 1'b0;
+    MMU_RUNTIME_ATC_W = 1'b0;
+    MMU_RUNTIME_ATC_M = write_access;
+
+    if (tt_hit) begin
         ADR_P_PHYS_CALC = ADR_P;
-    else if (MMU_TC[31] && FC_I != FC_CPU_SPACE && root_ptr[33:32] == 2'b01)
-        ADR_P_PHYS_CALC = ADR_P + root_offs;
-    else
+    end else if (MMU_TC[31] && FC_I != FC_CPU_SPACE) begin
+        if (atc_hit && !atc_fault) begin
+            ADR_P_PHYS_CALC = atc_phys;
+            MMU_RUNTIME_ATC_M = atc_m;
+        end else if (atc_hit && atc_fault) begin
+            ADR_P_PHYS_CALC = ADR_P;
+            MMU_RUNTIME_FAULT = mmu_req_now;
+        end else if (root_valid) begin
+            ADR_P_PHYS_CALC = ADR_P + root_offs;
+            MMU_RUNTIME_ATC_REFILL = mmu_req_now;
+            MMU_RUNTIME_ATC_PTAG = mmu_page_tag(MMU_TC, ADR_P + root_offs);
+            MMU_RUNTIME_ATC_M = write_access;
+        end else if (root_short_table) begin
+            walk_table_base = {root_ptr[31:4], 4'b0000};
+            walk_page_desc = 32'h0;
+            walk_phys = ADR_P;
+            walk_consumed = 6'd0;
+            walk_done = 1'b0;
+            walk_fault = 1'b0;
+            walk_wp_accum = 1'b0;
+            walk_page_m = write_access;
+
+            for (level = 0; level < 4; level = level + 1) begin
+                if (!walk_done && !walk_fault) begin
+                    case (level)
+                        4'd0: begin
+                            walk_width = MMU_TC[15:12];
+                            walk_has_next = MMU_TC[11:8] != 4'h0;
+                        end
+                        4'd1: begin
+                            walk_width = MMU_TC[11:8];
+                            walk_has_next = MMU_TC[7:4] != 4'h0;
+                        end
+                        4'd2: begin
+                            walk_width = MMU_TC[7:4];
+                            walk_has_next = MMU_TC[3:0] != 4'h0;
+                        end
+                        default: begin
+                            walk_width = MMU_TC[3:0];
+                            walk_has_next = 1'b0;
+                        end
+                    endcase
+
+                    if (walk_width == 4'h0) begin
+                        walk_fault = 1'b1;
+                    end else begin
+                        walk_index = mmu_index_extract(ADR_P, MMU_TC[19:16], walk_consumed, walk_width);
+                        walk_consumed = walk_consumed + {2'b00, walk_width};
+
+                        if (level == 4'd0) begin
+                            if (MMU_TC[24]) begin
+                                // FCL table-lookup level is deferred in this model.
+                                walk_fault = 1'b1;
+                            end else if ((root_limit_lower && walk_index[14:0] < root_limit) ||
+                                         (!root_limit_lower && walk_index[14:0] > root_limit)) begin
+                                walk_fault = 1'b1;
+                            end
+                        end
+
+                        if (!walk_fault) begin
+                            walk_desc_addr = walk_table_base + {walk_index[29:0], 2'b00};
+                            walk_lookup = mmu_desc_shadow_read(walk_desc_addr);
+                            if (!walk_lookup[32]) begin
+                                walk_fault = 1'b1;
+                            end else begin
+                                walk_desc = walk_lookup[31:0];
+                                case (walk_desc[1:0])
+                                    2'b00: begin
+                                        walk_fault = 1'b1;
+                                    end
+                                    2'b01: begin
+                                        walk_page_desc = walk_desc;
+                                        walk_wp_accum = walk_wp_accum || walk_desc[2];
+                                        walk_done = 1'b1;
+                                    end
+                                    2'b10: begin
+                                        if (walk_has_next) begin
+                                            walk_wp_accum = walk_wp_accum || walk_desc[2];
+                                            walk_table_base = {walk_desc[31:4], 4'b0000};
+                                        end else begin
+                                            // Short-format indirect page descriptor.
+                                            walk_lookup = mmu_desc_shadow_read({walk_desc[31:2], 2'b00});
+                                            if (!walk_lookup[32] || walk_lookup[1:0] != 2'b01) begin
+                                                walk_fault = 1'b1;
+                                            end else begin
+                                                walk_page_desc = walk_lookup[31:0];
+                                                walk_wp_accum = walk_wp_accum || walk_desc[2] || walk_lookup[2];
+                                                walk_done = 1'b1;
+                                            end
+                                        end
+                                    end
+                                    default: begin
+                                        // Long-format descriptors are deferred in this model.
+                                        walk_fault = 1'b1;
+                                    end
+                                endcase
+                            end
+                        end
+                    end
+                end
+            end
+
+            if (!walk_fault && !walk_done)
+                walk_fault = 1'b1;
+
+            if (!walk_fault) begin
+                walk_phys = (walk_page_desc & ~page_mask) | (ADR_P & page_mask);
+                walk_page_m = walk_page_desc[4] || write_access;
+                if (write_access && walk_wp_accum)
+                    walk_fault = 1'b1;
+            end
+
+            if (walk_fault) begin
+                ADR_P_PHYS_CALC = ADR_P;
+                MMU_RUNTIME_FAULT = mmu_req_now;
+            end else begin
+                ADR_P_PHYS_CALC = walk_phys;
+                MMU_RUNTIME_ATC_REFILL = mmu_req_now;
+                MMU_RUNTIME_ATC_PTAG = mmu_page_tag(MMU_TC, walk_phys);
+                MMU_RUNTIME_ATC_W = walk_wp_accum;
+                MMU_RUNTIME_ATC_M = walk_page_m;
+            end
+        end else begin
+            ADR_P_PHYS_CALC = ADR_P;
+            MMU_RUNTIME_FAULT = mmu_req_now;
+        end
+    end else begin
         ADR_P_PHYS_CALC = ADR_P;
+    end
 end
 
 assign ADR_P_PHYS = BUS_BSY ? ADR_P_PHYS_LATCH : ADR_P_PHYS_CALC;
+assign ADR_BUS_REQ_PHYS = (BURST_PREFETCH_OP_REQ || BURST_PREFETCH_DATA_REQ) ?
+                          BURST_PREFETCH_ADDR : ADR_P_PHYS;
 
 // Address and fault address latches.
 always_ff @(posedge CLK) begin : adr_latches
@@ -1347,6 +1991,70 @@ always_comb begin : fc_generation
     else
         FC_I = FC_USER_PROG;
 end
+
+assign FC_BUS_REQ = (BURST_PREFETCH_OP_REQ || BURST_PREFETCH_DATA_REQ) ?
+                    BURST_PREFETCH_FC : FC_I;
+
+// External CIOUT reflects MMU CI status for bus cycles that reach the external bus.
+always_comb begin : ciout_generation
+    logic read_access;
+    logic write_access;
+    logic rmw_access;
+
+    read_access = RD_REQ || OPCODE_REQ;
+    write_access = WR_REQ;
+    rmw_access = RMC;
+
+    CIOUT_ASSERT = mmu_ci_out(FC_I, ADR_P, read_access, write_access, rmw_access, MMU_TT0, MMU_TT1);
+end
+
+assign CIOUTn = (ASn == 1'b0) ? !CIOUT_ASSERT : 1'b1;
+
+// External burst request semantics (phase 5/7):
+// Request burst fills for cacheable miss cycles when burst-enable bits are set.
+// Once a line has been burst-acknowledged (CBACKn low), suppress redundant
+// requests for follow-on misses in that same line/tag context.
+always_comb begin : cbreq_generation
+    logic icache_same_burst_line;
+    logic dcache_same_burst_line;
+    CBREQ_INST_REQ_NOW = 1'b0;
+    CBREQ_DATA_REQ_NOW = 1'b0;
+    icache_same_burst_line = ICACHE_BURST_TRACK_VALID &&
+                             ICACHE_BURST_TRACK_LINE == ADR_P_PHYS[7:4] &&
+                             ICACHE_BURST_TRACK_TAG == ADR_P_PHYS[31:8];
+    dcache_same_burst_line = DCACHE_BURST_TRACK_VALID &&
+                             DCACHE_BURST_TRACK_LINE == ADR_P_PHYS[7:4] &&
+                             DCACHE_BURST_TRACK_TAG == ADR_P_PHYS[31:8];
+
+    // Instruction burst-request candidate: I-cache enabled + burst enabled + miss fillable.
+    if (!BUS_BSY && !MMU_RUNTIME_FAULT && OPCODE_REQ_CORE_MISS && CACR[0] && CACR[4] && !CACR[1]) begin
+        CBREQ_INST_REQ_NOW = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1) &&
+                             !icache_same_burst_line;
+    end
+
+    // Data burst-request candidate: D-cache read miss fill on aligned longword access.
+    if (!BUS_BSY && !MMU_RUNTIME_FAULT && DATA_RD_BUS && CACR[8] && CACR[12] && !CACR[9] && !RMC &&
+        OP_SIZE_BUS == LONG && ADR_P_PHYS[1:0] == 2'b00) begin
+        CBREQ_DATA_REQ_NOW = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1) &&
+                             !dcache_same_burst_line;
+    end
+
+    CBREQ_REQ_NOW = CBREQ_INST_REQ_NOW || CBREQ_DATA_REQ_NOW;
+end
+
+always_ff @(posedge CLK) begin : cbreq_latch
+    if (RESET_CPU) begin
+        CBREQ_REQ_LATCH <= 1'b0;
+    end else if (!BUS_BSY) begin
+        CBREQ_REQ_LATCH <= CBREQ_REQ_NOW;
+    end else if (!CBACKn) begin
+        // In this surface model, a burst acknowledge consumes the request.
+        CBREQ_REQ_LATCH <= 1'b0;
+    end
+end
+
+assign CBREQ_ASSERT = BUS_BSY ? CBREQ_REQ_LATCH : CBREQ_REQ_NOW;
+assign CBREQn = (ASn == 1'b0 && CBREQ_ASSERT) ? 1'b0 : 1'b1;
 
 // ========================================================================
 // Submodule instantiations
@@ -1458,10 +2166,10 @@ end
     WF68K30L_BUS_INTERFACE I_BUS_IF (
         .CLK                (CLK),
 
-        .ADR_IN_P           (ADR_P_PHYS),
+        .ADR_IN_P           (ADR_BUS_REQ_PHYS),
         .ADR_OUT_P          (ADR_OUT),
 
-        .FC_IN              (FC_I),
+        .FC_IN              (FC_BUS_REQ),
         .FC_OUT             (FC_OUT),
 
         .DATA_PORT_IN       (DATA_IN),
@@ -1517,17 +2225,26 @@ end
         .BUS_BSY            (BUS_BSY)
     );
 
+    assign DATA_RDY_BUSIF_CORE = DATA_RDY_BUSIF &&
+                                 !(BUS_CYCLE_BURST && !BUS_CYCLE_BURST_IS_OP);
+    assign OPCODE_RDY_BUSIF_CORE = OPCODE_RDY_BUSIF &&
+                                   !(BUS_CYCLE_BURST && BUS_CYCLE_BURST_IS_OP);
+
     // Data source mux: bus interface or data-cache hit path.
-    assign DATA_RDY = DATA_RDY_BUSIF || DATA_RDY_CACHE;
-    assign DATA_VALID = DATA_RDY_CACHE ? DATA_VALID_CACHE : DATA_VALID_BUSIF;
+    assign DATA_RDY = DATA_RDY_BUSIF_CORE || DATA_RDY_CACHE || MMU_FAULT_DATA_ACK;
+    assign DATA_VALID = DATA_RDY_CACHE ? DATA_VALID_CACHE :
+                        MMU_FAULT_DATA_ACK ? 1'b1 : DATA_VALID_BUSIF;
     assign DATA_TO_CORE = DATA_RDY_CACHE ? DATA_TO_CORE_CACHE :
-                          DATA_RDY_BUSIF ? DATA_TO_CORE_BUSIF :
+                          MMU_FAULT_DATA_ACK ? 32'h00000000 :
+                          DATA_RDY_BUSIF_CORE ? DATA_TO_CORE_BUSIF :
                           DATA_LAST_FROM_CACHE ? DATA_TO_CORE_CACHE : DATA_TO_CORE_BUSIF;
 
     // Opcode source mux: bus interface or instruction-cache hit path.
-    assign OPCODE_RDY = OPCODE_RDY_BUSIF || ICACHE_RDY;
-    assign OPCODE_VALID = ICACHE_RDY ? 1'b1 : OPCODE_VALID_BUSIF;
-    assign OPCODE_TO_CORE = ICACHE_RDY ? ICACHE_OPCODE_WORD : OPCODE_TO_CORE_BUSIF;
+    assign OPCODE_RDY = OPCODE_RDY_BUSIF_CORE || ICACHE_RDY || MMU_FAULT_OPCODE_ACK;
+    assign OPCODE_VALID = ICACHE_RDY ? 1'b1 :
+                          MMU_FAULT_OPCODE_ACK ? 1'b1 : OPCODE_VALID_BUSIF;
+    assign OPCODE_TO_CORE = ICACHE_RDY ? ICACHE_OPCODE_WORD :
+                            MMU_FAULT_OPCODE_ACK ? 16'h4E71 : OPCODE_TO_CORE_BUSIF;
 
     WF68K30L_CONTROL #(
         .NO_PIPELINE(NO_PIPELINE)
