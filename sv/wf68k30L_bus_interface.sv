@@ -246,7 +246,7 @@ assign BUS_BSY = (BUS_CTRL_STATE != BUS_IDLE);
 always_ff @(posedge CLK) begin : partitioning
     if (RESET_CPU_I || (BUS_FLT && HALT_In))
         SIZE_RESTORE <= 3'b000;
-    else if (!RETRY && BUS_CTRL_STATE == DATA_C1C4 && (T_SLICE == S1 || (T_SLICE == S3 && !WAITSTATES)))
+    else if (BUS_CTRL_STATE == DATA_C1C4 && (T_SLICE == S1 || (T_SLICE == S3 && !WAITSTATES)))
         SIZE_RESTORE <= SIZE_N;
 
     if (RESET_CPU_I) begin
@@ -524,6 +524,8 @@ end
 always_ff @(posedge CLK) begin : validation
     if (RESET_CPU_I)
         OPCODE_VALID <= 1'b1;
+    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT && !HALT_In)
+        ; // RETRY condition: no opcode bus error.
     else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT)
         OPCODE_VALID <= 1'b0;
     else if (OPCODE_RDY_I)
@@ -531,7 +533,7 @@ always_ff @(posedge CLK) begin : validation
 
     if (RESET_CPU_I)
         DATA_VALID <= 1'b1;
-    else if (READ_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT && !HALT_In)
+    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT && !HALT_In)
         ; // RETRY condition: no bus error.
     else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT)
         DATA_VALID <= 1'b0;
