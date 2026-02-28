@@ -6,11 +6,6 @@ results via memory writes. Each test loads a short program that
 performs an operation and writes the result to RESULT_BASE, then
 writes the sentinel to SENTINEL_ADDR to signal completion.
 
-NOTE: These tests require a working CPU write bus cycle path.
-As of initial development, the write path may need additional
-bus model timing work. The test infrastructure (encoder, harness,
-reference model) is validated independently.
-
 These tests validate that the CPU correctly fetches, decodes, and
 executes fundamental instructions.
 """
@@ -88,12 +83,7 @@ async def test_moveq_d0(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning(
-            "Sentinel not reached -- CPU write path may not be functional yet. "
-            "This is a known issue under investigation."
-        )
-        return  # Skip assertion -- infrastructure is correct, CPU write path needs work
+    assert found, "Sentinel not reached in test_moveq_d0"
 
     result = h.read_result_long(0)
     assert result == 42, f"Expected D0=42, got D0=0x{result:08X}"
@@ -113,9 +103,7 @@ async def test_moveq_negative(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_moveq_negative"
 
     result = h.read_result_long(0)
     assert result == 0xFFFFFFFF, f"Expected D1=0xFFFFFFFF, got 0x{result:08X}"
@@ -138,9 +126,7 @@ async def test_addq_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_addq_long"
 
     result = h.read_result_long(0)
     assert result == 15, f"Expected D0=15, got D0=0x{result:08X}"
@@ -163,9 +149,7 @@ async def test_subq_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_subq_long"
 
     result = h.read_result_long(0)
     assert result == 17, f"Expected D0=17, got D0=0x{result:08X}"
@@ -190,9 +174,7 @@ async def test_swap(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_swap"
 
     result = h.read_result_long(0)
     assert result == 0x56781234, f"Expected 0x56781234, got 0x{result:08X}"
@@ -213,9 +195,7 @@ async def test_clr_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_clr_long"
 
     result = h.read_result_long(0)
     assert result == 0, f"Expected D2=0, got 0x{result:08X}"
@@ -238,9 +218,7 @@ async def test_not_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_not_long"
 
     result = h.read_result_long(0)
     assert result == 0xFFFFFFFF, f"Expected 0xFFFFFFFF, got 0x{result:08X}"
@@ -263,9 +241,7 @@ async def test_neg_long(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_neg_long"
 
     result = h.read_result_long(0)
     assert result == 0xFFFFFFFF, f"Expected 0xFFFFFFFF, got 0x{result:08X}"
@@ -288,9 +264,7 @@ async def test_move_between_regs(dut):
     ]
     await h.setup(program)
     found = await h.run_until_sentinel()
-    if not found:
-        dut._log.warning("Sentinel not reached -- CPU write path issue (known)")
-        return
+    assert found, "Sentinel not reached in test_move_between_regs"
 
     result = h.read_result_long(0)
     assert result == 77, f"Expected D3=77, got 0x{result:08X}"

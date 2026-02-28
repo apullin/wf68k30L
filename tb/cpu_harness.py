@@ -127,6 +127,7 @@ class CPUTestHarness:
         self.dut.AVECn.value = 1       # No auto-vector
         self.dut.DATA_IN.value = 0
         self.dut.STERMn.value = 1      # No synchronous termination
+        self.dut.CBACKn.value = 1      # No burst acknowledge
         self.dut.BRn.value = 1         # No bus request
         self.dut.BGACKn.value = 1      # No bus grant acknowledge
 
