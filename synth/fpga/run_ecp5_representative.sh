@@ -16,8 +16,8 @@ DEVICE=${DEVICE:-45k}          # 12k, 25k, 45k, 85k, um-*, um5g-*
 PACKAGE=${PACKAGE:-CABGA381}
 SPEED=${SPEED:-8}
 FREQ_MHZ=${FREQ_MHZ:-25}
-LPF=${LPF:-constraints/wf68k30l_representative_25mhz.lpf}
-SDC=${SDC:-wf68K30L.sdc}
+LPF=${LPF:-synth/constraints/wf68k30l_representative_25mhz.lpf}
+SDC=${SDC:-synth/constraints/wf68K30L.sdc}
 # Default to ABC9; set USE_ABC9=0 as a temporary fallback until older toolchains are retired.
 USE_ABC9=${USE_ABC9:-1}
 
@@ -25,11 +25,11 @@ mkdir -p "${BUILD_DIR}"
 
 echo "[1/3] Synthesizing ${TOP} with Yosys..."
 if [[ "${USE_ABC9}" == "1" ]]; then
-  SYNTH_CMD="read_verilog -sv wf68k30L_*.sv; synth_ecp5 -top ${TOP}; write_json ${BUILD_DIR}/${TOP}.json"
+  SYNTH_CMD="read_verilog -sv -I sv sv/wf68k30L_*.sv; synth_ecp5 -top ${TOP}; write_json ${BUILD_DIR}/${TOP}.json"
   echo "      using ABC9 flow (default)"
 else
   # Fallback if a specific Yosys/nextpnr combination still reports ABC9 loop issues.
-  SYNTH_CMD="read_verilog -sv wf68k30L_*.sv; synth_ecp5 -noabc9 -top ${TOP}; write_json ${BUILD_DIR}/${TOP}.json"
+  SYNTH_CMD="read_verilog -sv -I sv sv/wf68k30L_*.sv; synth_ecp5 -noabc9 -top ${TOP}; write_json ${BUILD_DIR}/${TOP}.json"
   echo "      using non-ABC9 flow (-noabc9)"
 fi
 "${YOSYS_BIN}" -l "${BUILD_DIR}/synth.log" -p "${SYNTH_CMD}"

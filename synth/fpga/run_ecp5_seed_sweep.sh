@@ -15,8 +15,8 @@ DEVICE=${DEVICE:-45k}
 PACKAGE=${PACKAGE:-CABGA381}
 SPEED=${SPEED:-8}
 FREQ_MHZ=${FREQ_MHZ:-25}
-LPF=${LPF:-constraints/wf68k30l_representative_25mhz.lpf}
-SDC=${SDC:-wf68K30L.sdc}
+LPF=${LPF:-synth/constraints/wf68k30l_representative_25mhz.lpf}
+SDC=${SDC:-synth/constraints/wf68K30L.sdc}
 USE_ABC9=${USE_ABC9:-1}
 SEEDS=${SEEDS:-"1 2 3 4 5 6 7 8 9 10"}
 
@@ -33,9 +33,9 @@ CSV_PATH="${BUILD_ROOT}/results.csv"
 
 echo "[1/3] Synthesizing ${TOP} once (USE_ABC9=${USE_ABC9})..."
 if [[ "${USE_ABC9}" == "1" ]]; then
-  SYNTH_CMD="read_verilog -sv wf68k30L_*.sv; synth_ecp5 -top ${TOP}; write_json ${JSON_PATH}"
+  SYNTH_CMD="read_verilog -sv -I sv sv/wf68k30L_*.sv; synth_ecp5 -top ${TOP}; write_json ${JSON_PATH}"
 else
-  SYNTH_CMD="read_verilog -sv wf68k30L_*.sv; synth_ecp5 -noabc9 -top ${TOP}; write_json ${JSON_PATH}"
+  SYNTH_CMD="read_verilog -sv -I sv sv/wf68k30L_*.sv; synth_ecp5 -noabc9 -top ${TOP}; write_json ${JSON_PATH}"
 fi
 "${YOSYS_BIN}" -l "${BUILD_ROOT}/synth.log" -p "${SYNTH_CMD}"
 

@@ -20,11 +20,11 @@ trap "rm -rf $WORKDIR" EXIT
 
 echo "=== Exporting VHDL netlist (gold) ==="
 GHDL_PREFIX="$GHDL_PREFIX" yosys -m ghdl -q \
-    -p "script validation/export_gold.ys; write_verilog $WORKDIR/gold_top.v"
+    -p "script synth/yosys/export_gold.ys; write_verilog $WORKDIR/gold_top.v"
 
 echo "=== Exporting SV netlist (gate) ==="
 yosys -q \
-    -p "script validation/export_gate.ys; write_verilog $WORKDIR/gate_top.v"
+    -p "script synth/yosys/export_gate.ys; write_verilog $WORKDIR/gate_top.v"
 
 echo "=== Adding register initialization for simulation ==="
 python3 -c "
