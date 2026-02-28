@@ -145,7 +145,11 @@ typedef enum logic [6:0] {
     TST          = 7'd102,
     UNLK         = 7'd103,
     UNPK         = 7'd104,
-    UNIMPLEMENTED = 7'd105
+    UNIMPLEMENTED = 7'd105,
+    PFLUSH       = 7'd106,
+    PLOAD        = 7'd107,
+    PMOVE        = 7'd108,
+    PTEST        = 7'd109
 } OP_68K;
 
 typedef enum logic [2:0] {
@@ -203,9 +207,11 @@ parameter logic [7:0] VEC_PRIV        = 8'h08; // Privilege violation
 parameter logic [7:0] VEC_TRACE       = 8'h09; // Trace
 parameter logic [7:0] VEC_LINE_A      = 8'h0A; // Line 1010 emulator
 parameter logic [7:0] VEC_LINE_F      = 8'h0B; // Line 1111 emulator
+parameter logic [7:0] VEC_CP_PROTO    = 8'h0D; // Coprocessor protocol violation
 parameter logic [7:0] VEC_FORMAT      = 8'h0E; // Format error
 parameter logic [7:0] VEC_SPURIOUS    = 8'h18; // Spurious interrupt
 parameter logic [7:0] VEC_TRAP_BASE   = 8'h20; // TRAP #0..#15 base (vector = base + trap#)
+parameter logic [7:0] VEC_MMU_CFG     = 8'h38; // MMU configuration error
 
 // ---- Condition code flags struct ----
 typedef struct packed {

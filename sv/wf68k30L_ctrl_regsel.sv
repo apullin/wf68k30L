@@ -136,7 +136,8 @@ assign AR_SEL_RD_1 = ((OP == ABCD || OP == SBCD) && FETCH_STATE == START_OP) ? B
                      (OP == CAS || OP == CHK || OP == CHK2 || OP == CLR || OP == CMP || OP == CMPA || OP == CMPI || OP == CMPM || OP == CMP2) ? BIW_0[2:0] :
                      (OP == DIVS || OP == DIVU || OP == EOR || OP == EORI || OP == EXG || OP == JMP || OP == JSR || OP == LEA || OP == LINK || OP == LSL || OP == LSR) ? BIW_0[2:0] :
                      (OP == MOVE || OP == MOVEA || OP == MOVE_FROM_CCR || OP == MOVE_FROM_SR || OP == MOVE_TO_CCR || OP == MOVE_TO_SR) ? BIW_0[2:0] :
-                     (OP == MOVE_USP || OP == MOVEM || OP == MOVEP || OP == MOVES || OP == MULS || OP == MULU) ? BIW_0[2:0] :
+                     (OP == MOVE_USP || OP == MOVEM || OP == MOVEP || OP == MOVES || OP == MULS || OP == MULU || OP == PMOVE) ? BIW_0[2:0] :
+                     (OP == PFLUSH || OP == PLOAD || OP == PTEST) ? BIW_0[2:0] :
                      (OP == NBCD || OP == NEG || OP == NEGX || OP == NOT_B || OP == OR_B || OP == ORI || OP == PACK || OP == PEA) ? BIW_0[2:0] :
                      (OP == ROTL || OP == ROTR || OP == ROXL || OP == ROXR || OP == SBCD || OP == Scc || OP == SUB || OP == SUBA) ? BIW_0[2:0] :
                      (OP == SUBI || OP == SUBQ || OP == SUBX || OP == TAS || OP == TST || OP == UNLK || OP == UNPK) ? BIW_0[2:0] : 3'b000;
@@ -286,6 +287,7 @@ assign DR_WR_1 = (OP_WB_I == EXG && EXEC_WB_STATE == WRITEBACK && BIW_0_WB[7:3] 
                  (OP_WB_I == MOVE_TO_CCR || OP_WB_I == MOVE_TO_SR) ? 1'b0 :
                  (OP_WB_I == MOVE_USP) ? 1'b0 : // USP is written.
                  (OP_WB_I == MOVEC && BIW_0_WB[0]) ? 1'b0 : // To control register.
+                 (OP_WB_I == PMOVE && !BIW_1_WB[9]) ? 1'b0 : // To MMU register.
                  (OP_WB_I == STOP) ? 1'b0 : // SR is written but not DR.
                  (EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
 

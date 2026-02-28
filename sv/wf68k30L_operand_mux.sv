@@ -27,6 +27,7 @@ module WF68K30L_OPERAND_MUX (
     input  logic [15:0] BIW_1,
     input  logic [15:0] BIW_2,
     input  logic [2:0]  ADR_MODE,
+    input  logic        PHASE2,
 
     // --- Data sources ---
     input  logic [31:0] DATA_TO_CORE,
@@ -39,8 +40,16 @@ module WF68K30L_OPERAND_MUX (
     input  logic [3:0]  PC_EW_OFFSET,
     input  logic [15:0] STATUS_REG,
     input  logic [31:0] VBR,
+    input  logic [31:0] CACR,
+    input  logic [31:0] CAAR,
     input  logic [2:0]  SFC,
     input  logic [2:0]  DFC,
+    input  logic [63:0] MMU_SRP,
+    input  logic [63:0] MMU_CRP,
+    input  logic [31:0] MMU_TC,
+    input  logic [31:0] MMU_TT0,
+    input  logic [31:0] MMU_TT1,
+    input  logic [31:0] MMU_MMUSR,
     input  logic [63:0] ALU_RESULT,
 
     // --- Immediate data buffer inputs ---
@@ -66,11 +75,19 @@ module WF68K30L_OPERAND_MUX (
     input  logic        FETCH_MEM_ADR,
     input  logic        USE_DREG,
     input  logic        VBR_RD,
+    input  logic        CACR_RD,
+    input  logic        CAAR_RD,
     input  logic        SFC_RD,
     input  logic        DFC_RD,
     input  logic        ISP_RD,
     input  logic        MSP_RD,
     input  logic        USP_RD,
+    input  logic        MMU_SRP_RD,
+    input  logic        MMU_CRP_RD,
+    input  logic        MMU_TC_RD,
+    input  logic        MMU_TT0_RD,
+    input  logic        MMU_TT1_RD,
+    input  logic        MMU_MMUSR_RD,
     input  logic        SR_WR_EXH,
     input  logic        ADn,
     input  int          MOVEP_PNTR,
@@ -235,6 +252,10 @@ always_comb begin : alu_op1_mux
     // MOVEC: source depends on control register being accessed.
     else if (OP == MOVEC && VBR_RD)
         ALU_OP1_IN = VBR;
+    else if (OP == MOVEC && CACR_RD)
+        ALU_OP1_IN = CACR;
+    else if (OP == MOVEC && CAAR_RD)
+        ALU_OP1_IN = CAAR;
     else if (OP == MOVEC && SFC_RD)
         ALU_OP1_IN = {28'h0, 1'b0, SFC};
     else if (OP == MOVEC && DFC_RD)
@@ -245,6 +266,18 @@ always_comb begin : alu_op1_mux
         ALU_OP1_IN = AR_OUT_1;
     else if (OP == MOVEC)
         ALU_OP1_IN = DR_OUT_1;
+    else if (OP == PMOVE && MMU_SRP_RD)
+        ALU_OP1_IN = !PHASE2 ? MMU_SRP[63:32] : MMU_SRP[31:0];
+    else if (OP == PMOVE && MMU_CRP_RD)
+        ALU_OP1_IN = !PHASE2 ? MMU_CRP[63:32] : MMU_CRP[31:0];
+    else if (OP == PMOVE && MMU_TC_RD)
+        ALU_OP1_IN = MMU_TC;
+    else if (OP == PMOVE && MMU_TT0_RD)
+        ALU_OP1_IN = MMU_TT0;
+    else if (OP == PMOVE && MMU_TT1_RD)
+        ALU_OP1_IN = MMU_TT1;
+    else if (OP == PMOVE && MMU_MMUSR_RD)
+        ALU_OP1_IN = {16'h0, MMU_MMUSR[15:0]};
     // MOVEM: register to memory.
     else if (OP == MOVEM && !BIW_0[10] && !ADn)
         ALU_OP1_IN = DR_OUT_1;

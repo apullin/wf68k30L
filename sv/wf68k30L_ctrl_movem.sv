@@ -27,6 +27,7 @@ module WF68K30L_CTRL_MOVEM (
     // Internal signals
     input  logic [2:0]  ADR_MODE_I,
     input  logic [1:0]  OP_SIZE_I,
+    input  logic        PHASE2,
     input  logic        ALU_BSY,
     input  logic        ALU_INIT_I,
     input  logic        RD_RDY,
@@ -128,6 +129,16 @@ always_ff @(posedge CLK) begin
             MOVEP: begin
                 if (FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) begin
                     ADR_OFFS_VAR = ADR_OFFS_VAR + 6'b000010;
+                end
+            end
+            PMOVE: begin
+                if (BIW_1[15:13] == 3'b010 && BIW_1[12:10] >= 3'b010 && BIW_1[12:10] <= 3'b011) begin
+                    // PMOVE SRP/CRP transfers are quadword and use two longword accesses.
+                    if (!BIW_1[9] && FETCH_STATE == FETCH_OPERAND && RD_RDY && !PHASE2) begin
+                        ADR_OFFS_VAR = ADR_OFFS_VAR + 6'b000100; // Second source longword.
+                    end else if (BIW_1[9] && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY && !PHASE2) begin
+                        ADR_OFFS_VAR = ADR_OFFS_VAR + 6'b000100; // Second destination longword.
+                    end
                 end
             end
             default: begin

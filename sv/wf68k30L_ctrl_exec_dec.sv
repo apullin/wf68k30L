@@ -158,6 +158,13 @@ always_comb begin : exec_wb_dec
                             NEXT_EXEC_WB_STATE = WRITE_DEST; // Destination is in memory.
                         end
                     end
+                    PMOVE: begin
+                        if (!BIW_1_WB[9]) begin
+                            NEXT_EXEC_WB_STATE = WRITEBACK;  // <ea> -> MMU register.
+                        end else begin
+                            NEXT_EXEC_WB_STATE = WRITE_DEST; // MMU register -> <ea>.
+                        end
+                    end
                     // Default is for:
                     // ANDI_TO_CCR, Bcc, BFTST, BTST, CHK, CHK2,
                     // CMP, CMP2, CMPA, CMPI, CMPM, EORI_TO_CCR,

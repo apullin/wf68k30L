@@ -128,6 +128,15 @@ always_comb begin : other_states_dec
                         NEXT_FETCH_STATE = FETCH_DISPL;
                     end
                 end
+                PMOVE: begin
+                    if ((EW_ACK || EW_RDY) && !BIW_1[9] && !AR_IN_USE) begin
+                        NEXT_FETCH_STATE = CALC_AEFF;   // <ea> -> MR
+                    end else if ((EW_ACK || EW_RDY) && BIW_1[9] && !AR_IN_USE) begin
+                        NEXT_FETCH_STATE = INIT_EXEC_WB; // MR -> <ea>
+                    end else begin
+                        NEXT_FETCH_STATE = FETCH_DISPL;
+                    end
+                end
                 LEA, PEA: begin
                     if ((EW_ACK || EW_RDY) && !AR_IN_USE) begin // ADH.
                         NEXT_FETCH_STATE = SWITCH_STATE;
@@ -185,6 +194,17 @@ always_comb begin : other_states_dec
                                 NEXT_FETCH_STATE = CALC_AEFF;
                             end else begin
                                 NEXT_FETCH_STATE = INIT_EXEC_WB;
+                            end
+                        end else begin
+                            NEXT_FETCH_STATE = FETCH_EXWORD_1;
+                        end
+                    end
+                    PMOVE: begin
+                        if ((!BIW_1[15] && !AR_IN_USE && !DR_IN_USE) || (BIW_1[15] && !AR_IN_USE)) begin
+                            if (!BIW_1[9]) begin
+                                NEXT_FETCH_STATE = CALC_AEFF;   // <ea> -> MR
+                            end else begin
+                                NEXT_FETCH_STATE = INIT_EXEC_WB; // MR -> <ea>
                             end
                         end else begin
                             NEXT_FETCH_STATE = FETCH_EXWORD_1;
@@ -257,6 +277,15 @@ always_comb begin : other_states_dec
                             NEXT_FETCH_STATE = INIT_EXEC_WB;
                         end
                     end
+                    PMOVE: begin
+                        if (AR_IN_USE) begin
+                            NEXT_FETCH_STATE = FETCH_D_LO; // Wait, ADH.
+                        end else if (!BIW_1[9]) begin
+                            NEXT_FETCH_STATE = CALC_AEFF;   // <ea> -> MR
+                        end else begin
+                            NEXT_FETCH_STATE = INIT_EXEC_WB; // MR -> <ea>
+                        end
+                    end
                     ADDI, ADDQ, ANDI, CAS, CMPI, EORI, NBCD, NEG, NEGX, NOT_B, ORI, SUBI, SUBQ, TST, TAS, ASL, ASR, LSL, LSR, ROTL, ROTR, ROXL, ROXR: begin
                         if (!AR_IN_USE) begin // ADH.
                             NEXT_FETCH_STATE = CALC_AEFF;
@@ -325,6 +354,15 @@ always_comb begin : other_states_dec
                             NEXT_FETCH_STATE = INIT_EXEC_WB;
                         end
                     end
+                    PMOVE: begin
+                        if (AR_IN_USE) begin
+                            NEXT_FETCH_STATE = FETCH_MEMADR; // Wait, ADH.
+                        end else if (!BIW_1[9]) begin
+                            NEXT_FETCH_STATE = CALC_AEFF;   // <ea> -> MR
+                        end else begin
+                            NEXT_FETCH_STATE = INIT_EXEC_WB; // MR -> <ea>
+                        end
+                    end
                     ADDI, ADDQ, ANDI, CAS, CMPI, EORI, NBCD, NEG, NEGX, NOT_B, ORI, SUBI, SUBQ, TST, TAS, ASL, ASR, LSL, LSR, ROTL, ROTR, ROXL, ROXR: begin
                         if (!AR_IN_USE) begin // ADH.
                             NEXT_FETCH_STATE = CALC_AEFF;
@@ -379,6 +417,13 @@ always_comb begin : other_states_dec
                             NEXT_FETCH_STATE = CALC_AEFF;
                         end else begin
                             NEXT_FETCH_STATE = INIT_EXEC_WB;
+                        end
+                    end
+                    PMOVE: begin
+                        if (!BIW_1[9]) begin
+                            NEXT_FETCH_STATE = CALC_AEFF;   // <ea> -> MR
+                        end else begin
+                            NEXT_FETCH_STATE = INIT_EXEC_WB; // MR -> <ea>
                         end
                     end
                     default: begin
@@ -454,6 +499,14 @@ always_comb begin : other_states_dec
                     MOVE: begin
                         if (BIW_0[8:6] == 3'b100 && ADR_MODE_I == 3'b011) begin // (An)+,-(An).
                             NEXT_FETCH_STATE = SWITCH_STATE;
+                        end else begin
+                            NEXT_FETCH_STATE = INIT_EXEC_WB;
+                        end
+                    end
+                    PMOVE: begin
+                        if (!BIW_1[9] && BIW_1[15:13] == 3'b010 &&
+                            BIW_1[12:10] >= 3'b010 && BIW_1[12:10] <= 3'b011 && !PHASE2) begin
+                            NEXT_FETCH_STATE = CALC_AEFF; // PMOVE <ea>,SRP/CRP second longword.
                         end else begin
                             NEXT_FETCH_STATE = INIT_EXEC_WB;
                         end
@@ -652,6 +705,16 @@ always_comb begin : other_states_dec
                         NEXT_FETCH_STATE = START_OP;
                     end
                 end
+                PMOVE: begin
+                    if (!ALU_BSY && BIW_1[9] && BIW_1[15:13] == 3'b010 &&
+                        BIW_1[12:10] >= 3'b010 && BIW_1[12:10] <= 3'b011) begin
+                        NEXT_FETCH_STATE = SLEEP; // Wait for CRP/SRP destination writes.
+                    end else if (!ALU_BSY) begin
+                        NEXT_FETCH_STATE = START_OP;
+                    end else begin
+                        NEXT_FETCH_STATE = INIT_EXEC_WB;
+                    end
+                end
                 RTR: begin
                     if (!ALU_BSY && !PHASE2) begin
                         NEXT_FETCH_STATE = CALC_AEFF;
@@ -714,6 +777,21 @@ always_comb begin : other_states_dec
                         NEXT_FETCH_STATE = START_OP;
                     end else begin
                         NEXT_FETCH_STATE = SLEEP; // Wait for new processor context.
+                    end
+                end
+                PMOVE: begin
+                    if (BIW_1[9] && BIW_1[15:13] == 3'b010 &&
+                        BIW_1[12:10] >= 3'b010 && BIW_1[12:10] <= 3'b011 &&
+                        EXEC_WB_STATE == WRITE_DEST && WR_RDY && !PHASE2) begin
+                        NEXT_FETCH_STATE = INIT_EXEC_WB; // First longword write completed.
+                    end else if (BIW_1[9] && BIW_1[15:13] == 3'b010 &&
+                                 BIW_1[12:10] >= 3'b010 && BIW_1[12:10] <= 3'b011 &&
+                                 EXEC_WB_STATE == WRITE_DEST && WR_RDY && PHASE2) begin
+                        NEXT_FETCH_STATE = START_OP; // Second longword write completed.
+                    end else if (NEXT_EXEC_WB_STATE == IDLE) begin
+                        NEXT_FETCH_STATE = START_OP;
+                    end else begin
+                        NEXT_FETCH_STATE = SLEEP;
                     end
                 end
                 DBcc: begin

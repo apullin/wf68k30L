@@ -136,12 +136,29 @@ module WF68K30L_CTRL_COMB #(
     output logic        DFC_WR,
     output logic        VBR_RD,
     output logic        VBR_WR,
+    output logic        CACR_RD,
+    output logic        CACR_WR,
+    output logic        CAAR_RD,
+    output logic        CAAR_WR,
     output logic        ISP_RD,
     output logic        ISP_WR,
     output logic        MSP_RD,
     output logic        MSP_WR,
     output logic        USP_RD,
     output logic        USP_WR,
+    output logic        MMU_TC_RD,
+    output logic        MMU_TC_WR,
+    output logic        MMU_SRP_RD,
+    output logic        MMU_SRP_WR,
+    output logic        MMU_CRP_RD,
+    output logic        MMU_CRP_WR,
+    output logic        MMU_TT0_RD,
+    output logic        MMU_TT0_WR,
+    output logic        MMU_TT1_RD,
+    output logic        MMU_TT1_WR,
+    output logic        MMU_MMUSR_RD,
+    output logic        MMU_MMUSR_WR,
+    output logic        MMU_ATC_FLUSH,
 
     // PC / pipe control
     output logic        PC_ADD_DISPL,
@@ -213,6 +230,15 @@ logic        IPIPE_FLUSH_I;
 logic        LOOP_EXIT_I;
 logic [2:0]  ADR_MODE_I;
 logic [1:0]  OP_SIZE_I;
+logic        PMOVE_SRP_SEL;
+logic        PMOVE_CRP_SEL;
+logic        PMOVE_SRP_SEL_WB;
+logic        PMOVE_CRP_SEL_WB;
+
+assign PMOVE_SRP_SEL = (BIW_1[15:13] == 3'b010 && BIW_1[12:10] == 3'b010);
+assign PMOVE_CRP_SEL = (BIW_1[15:13] == 3'b010 && BIW_1[12:10] == 3'b011);
+assign PMOVE_SRP_SEL_WB = (BIW_1_WB[15:13] == 3'b010 && BIW_1_WB[12:10] == 3'b010);
+assign PMOVE_CRP_SEL_WB = (BIW_1_WB[15:13] == 3'b010 && BIW_1_WB[12:10] == 3'b011);
 
 // ====================================================================
 // Top-level control
@@ -323,7 +349,8 @@ assign LOAD_OP1 = (OP == BFINS && INIT_ENTRY) ? 1'b1 : // Load insertion pattern
                   (OP == PEA && ADR_MODE_I == 3'b001 && BIW_0[2:0] == 3'b111) ? 1'b0 :
                   (ALU_INIT_I) ? 1'b1 : 1'b0;
 
-assign LOAD_OP2 = ((OP == ABCD || OP == SBCD) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && !PHASE2) ? 1'b1 :
+assign LOAD_OP2 = (OP == PMOVE && !BIW_1[9] && (PMOVE_SRP_SEL || PMOVE_CRP_SEL) && FETCH_STATE == FETCH_OPERAND && RD_RDY && !PHASE2) ? 1'b1 :
+                  ((OP == ABCD || OP == SBCD) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && !PHASE2) ? 1'b1 :
                   ((OP == ADDX || OP == SUBX) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && !PHASE2) ? 1'b1 :
                   ((OP == ABCD || OP == SBCD) && FETCH_STATE == INIT_EXEC_WB && !BIW_0[3]) ? 1'b1 : // Register direct.
                   ((OP == ADDX || OP == SUBX) && FETCH_STATE == INIT_EXEC_WB && !BIW_0[3]) ? 1'b1 : // Register direct.
@@ -336,6 +363,7 @@ assign LOAD_OP2 = ((OP == ABCD || OP == SBCD) && FETCH_STATE == FETCH_OPERAND &&
                   (OP == ABCD || OP == SBCD || OP == ADDX || OP == SUBX || OP == CMPM) ? 1'b0 :
                   (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) ? 1'b0 :
                   (OP == LINK && BIW_0[2:0] == 3'b111) ? 1'b0 :
+                  (OP == PMOVE && !BIW_1[9] && (PMOVE_SRP_SEL || PMOVE_CRP_SEL) && INIT_ENTRY) ? 1'b0 :
                   (INIT_ENTRY) ? 1'b1 : 1'b0;
 
 assign LOAD_OP3 = ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 :
@@ -403,6 +431,9 @@ assign OP_SIZE_I = (FETCH_STATE == FETCH_MEMADR && !RD_RDY) ? LONG : // (RD_RDY:
                    (OP == CMPM && BIW_0[7:6] == 2'b10) ? LONG :
                    ((OP == MOVE || OP == MOVEA) && BIW_0[13:12] == 2'b10) ? LONG :
                    (OP == MOVEC || OP == MOVEQ || OP == MOVE_USP || OP == RTD || OP == RTS) ? LONG :
+                   (OP == PMOVE && BIW_1[15:13] == 3'b010 && BIW_1[12:10] == 3'b000) ? LONG : // TC
+                   (OP == PMOVE && (PMOVE_SRP_SEL || PMOVE_CRP_SEL)) ? LONG : // SRP/CRP (quadword as two longword cycles)
+                   (OP == PMOVE && BIW_1[15:13] == 3'b000 && BIW_1[12:10] >= 3'b010) ? LONG : // TT0/TT1
                    (OP == MOVEM && BIW_0[6]) ? LONG :
                    (OP == MOVEP && FETCH_STATE == INIT_EXEC_WB && BIW_0[7:6] < 2'b10) ? LONG : // Writeback to registers is long (see top level multiplexer).
                    ((OP == DIVS || OP == DIVU || OP == MULS || OP == MULU) && !BIW_0[7]) ? LONG :
@@ -422,6 +453,7 @@ assign OP_SIZE_I = (FETCH_STATE == FETCH_MEMADR && !RD_RDY) ? LONG : // (RD_RDY:
                    ((OP == MOVE || OP == MOVEA) && BIW_0[13:12] == 2'b11) ? WORD :
                    (OP == MOVE_FROM_CCR || OP == MOVE_TO_CCR) ? WORD :
                    (OP == MOVE_FROM_SR || OP == MOVE_TO_SR) ? WORD :
+                   (OP == PMOVE && BIW_1[15:13] == 3'b011 && BIW_1[12:10] == 3'b000) ? WORD : // MMUSR
                    (OP == MOVEM || OP == RTR) ? WORD :
                    (OP == DIVS || OP == DIVU || OP == MULS || OP == MULU) ? WORD :
                    (OP == PACK && (NEXT_FETCH_STATE == FETCH_OPERAND || FETCH_STATE == FETCH_OPERAND) && !INIT_ENTRY) ? WORD : // Read data is word wide.
@@ -463,7 +495,7 @@ assign BERR = (FETCH_STATE == START_OP && EXEC_WB_STATE == IDLE) ? 1'b0 : // Dis
               (EW_ACK && !OW_VALID) ? 1'b1 : 1'b0;
 
 // ====================================================================
-// System register access (SFC, DFC, VBR, ISP, MSP, USP)
+// System register access (SFC, DFC, VBR, CACR, CAAR, ISP, MSP, USP)
 // ====================================================================
 
 assign SFC_RD = (OP == MOVEC && !BIW_0[0] && BIW_1[11:0] == 12'h000) ? 1'b1 : 1'b0;
@@ -475,6 +507,12 @@ assign DFC_WR = (OP_WB_I == MOVEC && BIW_0_WB[0] && BIW_1_WB[11:0] == 12'h001 &&
 assign VBR_RD = (OP == MOVEC && !BIW_0[0] && BIW_1[11:0] == 12'h801) ? 1'b1 : 1'b0;
 assign VBR_WR = (OP_WB_I == MOVEC && BIW_0_WB[0] && BIW_1_WB[11:0] == 12'h801 && EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
 
+assign CACR_RD = (OP == MOVEC && !BIW_0[0] && BIW_1[11:0] == 12'h002) ? 1'b1 : 1'b0;
+assign CACR_WR = (OP_WB_I == MOVEC && BIW_0_WB[0] && BIW_1_WB[11:0] == 12'h002 && EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
+assign CAAR_RD = (OP == MOVEC && !BIW_0[0] && BIW_1[11:0] == 12'h802) ? 1'b1 : 1'b0;
+assign CAAR_WR = (OP_WB_I == MOVEC && BIW_0_WB[0] && BIW_1_WB[11:0] == 12'h802 && EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
 assign ISP_RD = (OP == MOVEC && !BIW_0[0] && BIW_1[11:0] == 12'h804) ? 1'b1 : 1'b0;
 assign ISP_WR = (OP_WB_I == MOVEC && BIW_0_WB[0] && BIW_1_WB[11:0] == 12'h804 && EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
 
@@ -485,6 +523,37 @@ assign USP_RD = (OP == MOVE_USP && BIW_0[3]) ? 1'b1 :
                 (OP == MOVEC && !BIW_0[0] && BIW_1[11:0] == 12'h800) ? 1'b1 : 1'b0;
 assign USP_WR = (OP_WB_I == MOVE_USP && EXEC_WB_STATE == WRITEBACK && !BIW_0_WB[3]) ? 1'b1 :
                 (OP_WB_I == MOVEC && BIW_0_WB[0] && BIW_1_WB[11:0] == 12'h800 && EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
+assign MMU_TC_RD = (OP == PMOVE && BIW_1[9] && BIW_1[15:13] == 3'b010 && BIW_1[12:10] == 3'b000) ? 1'b1 : 1'b0;
+assign MMU_TC_WR = (OP_WB_I == PMOVE && !BIW_1_WB[9] && BIW_1_WB[15:13] == 3'b010 && BIW_1_WB[12:10] == 3'b000 &&
+                    EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
+assign MMU_SRP_RD = (OP == PMOVE && BIW_1[9] && PMOVE_SRP_SEL) ? 1'b1 : 1'b0;
+assign MMU_SRP_WR = (OP_WB_I == PMOVE && !BIW_1_WB[9] && PMOVE_SRP_SEL_WB &&
+                     EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
+assign MMU_CRP_RD = (OP == PMOVE && BIW_1[9] && PMOVE_CRP_SEL) ? 1'b1 : 1'b0;
+assign MMU_CRP_WR = (OP_WB_I == PMOVE && !BIW_1_WB[9] && PMOVE_CRP_SEL_WB &&
+                     EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
+assign MMU_TT0_RD = (OP == PMOVE && BIW_1[9] && BIW_1[15:13] == 3'b000 && BIW_1[12:10] == 3'b010) ? 1'b1 : 1'b0;
+assign MMU_TT0_WR = (OP_WB_I == PMOVE && !BIW_1_WB[9] && BIW_1_WB[15:13] == 3'b000 && BIW_1_WB[12:10] == 3'b010 &&
+                     EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
+assign MMU_TT1_RD = (OP == PMOVE && BIW_1[9] && BIW_1[15:13] == 3'b000 && BIW_1[12:10] == 3'b011) ? 1'b1 : 1'b0;
+assign MMU_TT1_WR = (OP_WB_I == PMOVE && !BIW_1_WB[9] && BIW_1_WB[15:13] == 3'b000 && BIW_1_WB[12:10] == 3'b011 &&
+                     EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
+assign MMU_MMUSR_RD = (OP == PMOVE && BIW_1[9] && BIW_1[15:13] == 3'b011 && BIW_1[12:10] == 3'b000) ? 1'b1 : 1'b0;
+assign MMU_MMUSR_WR = (OP_WB_I == PMOVE && !BIW_1_WB[9] && BIW_1_WB[15:13] == 3'b011 && BIW_1_WB[12:10] == 3'b000 &&
+                       EXEC_WB_STATE == WRITEBACK) ? 1'b1 : 1'b0;
+
+// PMOVE FD=0 writes to CRP/SRP/TC/TT0/TT1 flush the ATC. PFLUSH always flushes.
+assign MMU_ATC_FLUSH =
+    ((OP_WB_I == PMOVE && !BIW_1_WB[9] && !BIW_1_WB[8] && EXEC_WB_STATE == WRITEBACK) &&
+     ((BIW_1_WB[15:13] == 3'b010 && (BIW_1_WB[12:10] == 3'b000 || BIW_1_WB[12:10] == 3'b010 || BIW_1_WB[12:10] == 3'b011)) ||
+      (BIW_1_WB[15:13] == 3'b000 && (BIW_1_WB[12:10] == 3'b010 || BIW_1_WB[12:10] == 3'b011)))) ||
+    (OP == PFLUSH && FETCH_STATE != START_OP && NEXT_FETCH_STATE == START_OP);
 
 // ====================================================================
 // PC / pipe control
@@ -508,6 +577,11 @@ assign IPIPE_FLUSH_I = ((OP == BRA || OP == BSR) && FETCH_STATE != START_OP && N
                        ((OP == ANDI_TO_SR || OP == EORI_TO_SR || OP == MOVE_TO_SR || OP == ORI_TO_SR) && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 :
                        ((OP == JMP || OP == JSR) && FETCH_STATE != START_OP && NEXT_FETCH_STATE == START_OP) ? 1'b1 :
                        (OP == MOVEC && BIW_0[0] && FETCH_STATE != START_OP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : // Writing control registers.
+                       (OP == PMOVE && !BIW_1[9] &&
+                        ((BIW_1[15:13] == 3'b010 && BIW_1[12:10] == 3'b000) || // TC
+                         (BIW_1[15:13] == 3'b010 && BIW_1[12:10] >= 3'b010 && BIW_1[12:10] <= 3'b011) || // SRP/CRP
+                         (BIW_1[15:13] == 3'b000 && BIW_1[12:10] >= 3'b010)) && // TT0/TT1
+                        FETCH_STATE != START_OP && NEXT_FETCH_STATE == START_OP) ? 1'b1 :
                        ((OP == RTD || OP == RTR || OP == RTS) && FETCH_STATE != START_OP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
 
 assign SP_ADD_DISPL = (OP == LINK && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) ? 1'b1 :
@@ -533,7 +607,8 @@ always_comb begin
         CHK, CHK2, CLR, CMP, CMPA, CMPI, CMPM, CMP2, DBcc, DIVS, DIVU, EOR, EORI, EORI_TO_CCR, EORI_TO_SR,
         EXG, EXT, EXTB, JSR, LEA, LINK, LSL, LSR, MOVE, MOVEA, MOVE_FROM_CCR, MOVE_TO_CCR, MOVE_FROM_SR,
         MOVE_TO_SR, MOVE_USP, MOVEC, MOVEM, MOVEQ, MOVEP, MOVES, MULS, MULU, NBCD, NEG, NEGX, NOT_B, OR_B,
-        ORI, ORI_TO_CCR, ORI_TO_SR, PACK, PEA, ROTL, ROTR, ROXL, ROXR, RTR, SBCD, Scc, SUB, SUBA, SUBI,
+        ORI, ORI_TO_CCR, ORI_TO_SR, PACK, PEA, PFLUSH, PLOAD, PMOVE, PTEST, ROTL, ROTR, ROXL, ROXR, RTR,
+        SBCD, Scc, SUB, SUBA, SUBI,
         SUBQ, SUBX, SWAP, STOP, TAS, TRAPV, TRAPcc, TST, UNLK, UNPK: ALU_INIT_I = ALU_TRIG;
         default: ALU_INIT_I = 1'b0;
     endcase
@@ -577,6 +652,7 @@ assign ADR_MARK_USED_I = (OP == MOVE && FETCH_STATE == INIT_EXEC_WB && PHASE2) ?
                          (OP == MOVEM && !BIW_0[10] && MOVEM_COND) ? 1'b1 : // Register to memory.
                          (OP == MOVEP && BIW_0[7:6] > 2'b01) ? 1'b1 : // Register to Memory.
                          (OP == MOVES && BIW_1[11]) ? 1'b1 : // Register to memory.
+                         (OP == PMOVE && BIW_1[9]) ? 1'b1 : // MMU register to memory.
                          ((OP == PACK || OP == UNPK) && BIW_0[3]) ? 1'b1 : 1'b0;
 
 assign ADR_MARK_USED = ((OP_WB_I == BFCHG || OP_WB_I == BFCLR) && EXEC_WB_STATE == WRITE_DEST && WR_RDY && BF_BYTES == 5) ? 1'b1 :

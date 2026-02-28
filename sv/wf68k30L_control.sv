@@ -247,6 +247,10 @@ module WF68K30L_CONTROL #(
 
     output logic        VBR_WR,
     output logic        VBR_RD,
+    output logic        CACR_RD,
+    output logic        CACR_WR,
+    output logic        CAAR_RD,
+    output logic        CAAR_WR,
 
     output logic        ISP_RD,
     output logic        ISP_WR,
@@ -254,6 +258,19 @@ module WF68K30L_CONTROL #(
     output logic        MSP_WR,
     output logic        USP_RD,
     output logic        USP_WR,
+    output logic        MMU_TC_RD,
+    output logic        MMU_TC_WR,
+    output logic        MMU_SRP_RD,
+    output logic        MMU_SRP_WR,
+    output logic        MMU_CRP_RD,
+    output logic        MMU_CRP_WR,
+    output logic        MMU_TT0_RD,
+    output logic        MMU_TT0_WR,
+    output logic        MMU_TT1_RD,
+    output logic        MMU_TT1_WR,
+    output logic        MMU_MMUSR_RD,
+    output logic        MMU_MMUSR_WR,
+    output logic        MMU_ATC_FLUSH,
 
     output logic        IPIPE_FLUSH,        // Abandon the instruction pipeline.
 
@@ -287,7 +304,8 @@ module WF68K30L_CONTROL #(
     output logic        EX_TRACE,
     output logic        TRAP_cc,
     output logic        TRAP_ILLEGAL,       // Used for BKPT.
-    output logic        TRAP_V
+    output logic        TRAP_V,
+    output logic        PHASE2_O
 );
 
 `include "wf68k30L_pkg.svh"
@@ -443,12 +461,29 @@ WF68K30L_CTRL_COMB #(
     .DFC_WR              (DFC_WR),
     .VBR_RD              (VBR_RD),
     .VBR_WR              (VBR_WR),
+    .CACR_RD             (CACR_RD),
+    .CACR_WR             (CACR_WR),
+    .CAAR_RD             (CAAR_RD),
+    .CAAR_WR             (CAAR_WR),
     .ISP_RD              (ISP_RD),
     .ISP_WR              (ISP_WR),
     .MSP_RD              (MSP_RD),
     .MSP_WR              (MSP_WR),
     .USP_RD              (USP_RD),
     .USP_WR              (USP_WR),
+    .MMU_TC_RD           (MMU_TC_RD),
+    .MMU_TC_WR           (MMU_TC_WR),
+    .MMU_SRP_RD          (MMU_SRP_RD),
+    .MMU_SRP_WR          (MMU_SRP_WR),
+    .MMU_CRP_RD          (MMU_CRP_RD),
+    .MMU_CRP_WR          (MMU_CRP_WR),
+    .MMU_TT0_RD          (MMU_TT0_RD),
+    .MMU_TT0_WR          (MMU_TT0_WR),
+    .MMU_TT1_RD          (MMU_TT1_RD),
+    .MMU_TT1_WR          (MMU_TT1_WR),
+    .MMU_MMUSR_RD        (MMU_MMUSR_RD),
+    .MMU_MMUSR_WR        (MMU_MMUSR_WR),
+    .MMU_ATC_FLUSH       (MMU_ATC_FLUSH),
     .PC_ADD_DISPL        (PC_ADD_DISPL),
     .PC_LOAD             (PC_LOAD),
     .IPIPE_FLUSH         (IPIPE_FLUSH),
@@ -692,6 +727,7 @@ end
         .EXEC_WB_STATE   (EXEC_WB_STATE),
         .ADR_MODE_I      (ADR_MODE),
         .OP_SIZE_I       (OP_SIZE),
+        .PHASE2          (PHASE2),
         .ALU_BSY         (ALU_BSY),
         .ALU_INIT_I      (ALU_INIT),
         .RD_RDY          (RD_RDY),
@@ -734,6 +770,14 @@ end
             PHASE2 <= 1'b1; // Used as a control flow switch.
         end else if ((OP == CHK2 || OP == CMP2 || OP == CMPM) && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) begin
             PHASE2 <= 1'b1; // Used as a control flow switch.
+        end else if (OP == PMOVE && !BIW_1[9] && BIW_1[15:13] == 3'b010 &&
+                     BIW_1[12:10] >= 3'b010 && BIW_1[12:10] <= 3'b011 &&
+                     FETCH_STATE == FETCH_OPERAND && RD_RDY && !PHASE2) begin
+            PHASE2 <= 1'b1; // PMOVE <ea>, SRP/CRP: second longword fetch pending.
+        end else if (OP_WB_I == PMOVE && BIW_1_WB[9] && BIW_1_WB[15:13] == 3'b010 &&
+                     BIW_1_WB[12:10] >= 3'b010 && BIW_1_WB[12:10] <= 3'b011 &&
+                     EXEC_WB_STATE == WRITE_DEST && WR_RDY) begin
+            PHASE2 <= !PHASE2; // PMOVE SRP/CRP,<ea>: toggle high/low longword phase.
         end else if (OP == JSR && FETCH_STATE == SLEEP) begin
             PHASE2 <= 1'b1; // One clock cycle delay for address calculation.
         end else if (OP == PEA && FETCH_STATE == SWITCH_STATE) begin
@@ -853,5 +897,7 @@ end
         .PHASE2              (PHASE2),
         .NEXT_EXEC_WB_STATE  (NEXT_EXEC_WB_STATE)
     );
+
+assign PHASE2_O = PHASE2;
 
 endmodule

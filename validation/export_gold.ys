@@ -1,6 +1,6 @@
 # Synthesize VHDL (gold model) to RTLIL
 # Run from repo root. Caller provides write_verilog via -p flag.
-ghdl --ieee=synopsys -fexplicit wf68k30L_pkg.vhd wf68k30L_address_registers.vhd wf68k30L_data_registers.vhd wf68k30L_alu.vhd wf68k30L_bus_interface.vhd wf68k30L_exception_handler.vhd wf68k30L_opcode_decoder.vhd wf68k30L_control.vhd wf68k30L_top.vhd -e WF68K30L_TOP
+ghdl --ieee=synopsys -fexplicit vhdl/wf68k30L_pkg.vhd vhdl/wf68k30L_address_registers.vhd vhdl/wf68k30L_data_registers.vhd vhdl/wf68k30L_alu.vhd vhdl/wf68k30L_bus_interface.vhd vhdl/wf68k30L_exception_handler.vhd vhdl/wf68k30L_opcode_decoder.vhd vhdl/wf68k30L_control.vhd vhdl/wf68k30L_top.vhd -e WF68K30L_TOP
 prep -top WF68K30L_TOP -flatten
 memory_map
 rename WF68K30L_TOP GOLD_TOP

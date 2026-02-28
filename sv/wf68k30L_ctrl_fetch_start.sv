@@ -311,7 +311,7 @@ always_comb begin : start_op_dec
                     NEXT_FETCH_STATE = START_OP;
                 end
             end
-            CLR, JMP, JSR, LEA, PEA, Scc: begin // No read access required.
+            CLR, JMP, JSR, LEA, PEA, PFLUSH, PLOAD, PTEST, Scc: begin // No read access required.
                 case (BIW_0[5:3])
                     3'b000: begin // CLR, Scc.
                         if (!DR_IN_USE) begin
@@ -347,6 +347,64 @@ always_comb begin : start_op_dec
                         end
                     end
                 endcase
+            end
+            PMOVE: begin
+                if (BIW_1[9]) begin
+                    // PMOVE MR,<ea>: no operand read, destination is memory.
+                    case (BIW_0[5:3])
+                        3'b010, 3'b011, 3'b100: begin
+                            if (AR_IN_USE) begin
+                                NEXT_FETCH_STATE = START_OP; // Wait, ADH.
+                            end else begin
+                                NEXT_FETCH_STATE = INIT_EXEC_WB;
+                            end
+                        end
+                        3'b101: begin
+                            NEXT_FETCH_STATE = FETCH_DISPL;
+                        end
+                        3'b110: begin
+                            NEXT_FETCH_STATE = FETCH_EXWORD_1;
+                        end
+                        default: begin // 3'b111
+                            if (BIW_0[2:0] == 3'b000) begin
+                                NEXT_FETCH_STATE = FETCH_ABS_LO;
+                            end else begin
+                                NEXT_FETCH_STATE = FETCH_ABS_HI;
+                            end
+                        end
+                    endcase
+                end else begin
+                    // PMOVE <ea>,MR: read source from memory.
+                    case (BIW_0[5:3])
+                        3'b010, 3'b011: begin
+                            if (AR_IN_USE) begin
+                                NEXT_FETCH_STATE = START_OP; // Wait, ADH.
+                            end else begin
+                                NEXT_FETCH_STATE = FETCH_OPERAND;
+                            end
+                        end
+                        3'b100: begin
+                            if (AR_IN_USE) begin
+                                NEXT_FETCH_STATE = START_OP; // Wait, ADH.
+                            end else begin
+                                NEXT_FETCH_STATE = CALC_AEFF;
+                            end
+                        end
+                        3'b101: begin
+                            NEXT_FETCH_STATE = FETCH_DISPL;
+                        end
+                        3'b110: begin
+                            NEXT_FETCH_STATE = FETCH_EXWORD_1;
+                        end
+                        default: begin // 3'b111
+                            if (BIW_0[2:0] == 3'b000) begin
+                                NEXT_FETCH_STATE = FETCH_ABS_LO;
+                            end else begin
+                                NEXT_FETCH_STATE = FETCH_ABS_HI;
+                            end
+                        end
+                    endcase
+                end
             end
             LINK, UNLK: begin
                 // We have to wait for the ALU because the registers are written without pipelining

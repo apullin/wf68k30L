@@ -18,16 +18,17 @@ BASELINE_FF=2534
 TOLERANCE_PCT=10  # Allow +/- 10% deviation
 
 # Source files
-SV_PKG="$REPO_DIR/wf68k30L_pkg.sv"
+SV_DIR="$REPO_DIR/sv"
+SV_PKG="$SV_DIR/wf68k30L_pkg.sv"
 SV_FILES=(
-    "$REPO_DIR/wf68k30L_address_registers.sv"
-    "$REPO_DIR/wf68k30L_data_registers.sv"
-    "$REPO_DIR/wf68k30L_alu.sv"
-    "$REPO_DIR/wf68k30L_bus_interface.sv"
-    "$REPO_DIR/wf68k30L_opcode_decoder.sv"
-    "$REPO_DIR/wf68k30L_exception_handler.sv"
-    "$REPO_DIR/wf68k30L_control.sv"
-    "$REPO_DIR/wf68k30L_top.sv"
+    "$SV_DIR/wf68k30L_address_registers.sv"
+    "$SV_DIR/wf68k30L_data_registers.sv"
+    "$SV_DIR/wf68k30L_alu.sv"
+    "$SV_DIR/wf68k30L_bus_interface.sv"
+    "$SV_DIR/wf68k30L_opcode_decoder.sv"
+    "$SV_DIR/wf68k30L_exception_handler.sv"
+    "$SV_DIR/wf68k30L_control.sv"
+    "$SV_DIR/wf68k30L_top.sv"
 )
 
 TOP=WF68K30L_TOP
@@ -40,7 +41,7 @@ echo "Running Yosys ECP5 synthesis..."
 # Build Yosys script -- use read_verilog for SystemVerilog
 # (Falls back to GHDL+VHDL if SV read fails)
 YOSYS_SCRIPT="
-read_verilog -sv -I${REPO_DIR} ${SV_PKG} ${SV_FILES[*]};
+read_verilog -sv -I${REPO_DIR} -I${SV_DIR} ${SV_PKG} ${SV_FILES[*]};
 synth_ecp5 -top ${TOP} -noflatten;
 stat;
 "

@@ -95,6 +95,12 @@ module WF68K30L_OPCODE_DECODER #(
 
     input  logic        IPIPE_FILL,
     input  logic        IPIPE_FLUSH,    // Abandon the instruction pipe.
+    input  logic        RTE_PIPE_LOAD,
+    input  logic [15:0] RTE_PIPE_BIW_0,
+    input  logic [15:0] RTE_PIPE_BIW_1,
+    input  logic [15:0] RTE_PIPE_BIW_2,
+    input  logic        RTE_PIPE_C_FAULT,
+    input  logic        RTE_PIPE_B_FAULT,
 
     // Fault logic:
     output logic        OW_VALID,       // Operation words valid.
@@ -213,7 +219,16 @@ assign BUSY_OPD = (EXH_REQ && !BUSY_MAIN && IPIPE_PNTR > 2'd0 && !OPCODE_RD_I) ?
 // INSTRUCTION_PIPE
 always_ff @(posedge CLK) begin : instruction_pipe
     reg [15:0] IPIPE_D_VAR;
-    if (IPIPE_FLUSH) begin
+    if (RTE_PIPE_LOAD) begin
+        // RTE format A/B restore can resume directly from stack-frame pipe image.
+        IPIPE_D <= RTE_PIPE_BIW_0;
+        IPIPE_C <= RTE_PIPE_BIW_1;
+        IPIPE_B <= RTE_PIPE_BIW_2;
+        IPIPE_D_FAULT <= 1'b0;
+        IPIPE_C_FAULT <= RTE_PIPE_C_FAULT;
+        IPIPE_B_FAULT <= RTE_PIPE_B_FAULT;
+        IPIPE_PNTR <= 2'd3;
+    end else if (IPIPE_FLUSH) begin
         IPIPE_D <= 16'h0;
         IPIPE_C <= 16'h0;
         IPIPE_B <= 16'h0;
@@ -640,14 +655,53 @@ assign INSTR_LVL = (TRAP_CODE_I == T_PRIV) ? LVL_D : // Points to the first word
                    (OP_I == EORI || OP_I == EORI_TO_CCR || OP_I == EORI_TO_SR) ? LVL_C :
                    (OP_I == LINK || OP_I == MOVEC) ? LVL_C :
                    (OP_I == MOVEM || OP_I == MOVEP || OP_I == MOVES) ? LVL_C :
+                   (OP_I == PFLUSH || OP_I == PLOAD || OP_I == PMOVE || OP_I == PTEST) ? LVL_C :
                    ((OP_I == MULS || OP_I == MULU) && IPIPE_D[8:6] == 3'b000) ? LVL_C :
                    (OP_I == ORI_TO_CCR || OP_I == ORI_TO_SR || OP_I == ORI) ? LVL_C :
                    (OP_I == PACK || OP_I == RTD || OP_I == SUBI || OP_I == STOP) ? LVL_C :
                    (OP_I == TRAPcc && IPIPE_D[2:0] == 3'b010) ? LVL_C :
                    (OP_I == UNPK) ? LVL_C : LVL_D;
 
+// cpSAVE valid EA: (An), -(An), (d16,An), (d8,An,Xn), (xxx).W, (xxx).L
+function automatic logic is_cpsave_ea_valid(input logic [2:0] mode, input logic [2:0] reg_fld);
+    if (mode == 3'b111)
+        is_cpsave_ea_valid = reg_fld < 3'b010;
+    else
+        is_cpsave_ea_valid = mode == 3'b010 || mode == 3'b100 || mode == 3'b101 || mode == 3'b110;
+endfunction
+
+// cpRESTORE valid EA: memory modes except predecrement and immediate
+// ((An), (An)+, (d16,An), (d8,An,Xn), (xxx).W, (xxx).L, PC-relative forms).
+function automatic logic is_cprestore_ea_valid(input logic [2:0] mode, input logic [2:0] reg_fld);
+    if (mode == 3'b111)
+        is_cprestore_ea_valid = reg_fld < 3'b100;
+    else
+        is_cprestore_ea_valid = mode == 3'b010 || mode == 3'b011 || mode == 3'b101 || mode == 3'b110;
+endfunction
+
+// User-mode privilege trap classification for cpSAVE/cpRESTORE.
+// CpID==000 is reserved for MMU space on MC68030 and is treated as line-F.
+function automatic logic is_user_cpsave_restore_priv(input logic [15:0] iw, input logic sbit);
+    logic [2:0] cpid, cp_type, mode, reg_fld;
+    cpid    = iw[11:9];
+    cp_type = iw[8:6];
+    mode    = iw[5:3];
+    reg_fld = iw[2:0];
+
+    is_user_cpsave_restore_priv = 1'b0;
+    if (iw[15:12] == 4'hF && !sbit && cpid != 3'b000) begin
+        if (cp_type == 3'b100)
+            is_user_cpsave_restore_priv = is_cpsave_ea_valid(mode, reg_fld);
+        else if (cp_type == 3'b101)
+            is_user_cpsave_restore_priv = is_cprestore_ea_valid(mode, reg_fld);
+    end
+endfunction
+
 // TRAP_CODE_I
 assign TRAP_CODE_I = (OP_I == UNIMPLEMENTED && IPIPE_D[15:12] == 4'hA) ? T_1010 :
+                     // cpSAVE/cpRESTORE privilege is only for valid nonzero-CpID forms.
+                     // Other F-line coprocessor forms remain line-F.
+                     (is_user_cpsave_restore_priv(IPIPE_D, SBIT)) ? T_PRIV :
                      (OP_I == UNIMPLEMENTED && IPIPE_D[15:12] == 4'hF) ? T_1111 :
                      (OP_I == ILLEGAL) ? T_ILLEGAL :
                      (OP_I == RTE && SBIT) ? T_RTE : // Handled like a trap simplifies the code.
@@ -656,6 +710,7 @@ assign TRAP_CODE_I = (OP_I == UNIMPLEMENTED && IPIPE_D[15:12] == 4'hA) ? T_1010 
                      (OP_I == EORI_TO_SR && !SBIT) ? T_PRIV :
                      ((OP_I == MOVE_FROM_SR || OP_I == MOVE_TO_SR) && !SBIT) ? T_PRIV :
                      ((OP_I == MOVE_USP || OP_I == MOVEC || OP_I == MOVES) && !SBIT) ? T_PRIV :
+                     ((OP_I == PFLUSH || OP_I == PLOAD || OP_I == PMOVE || OP_I == PTEST) && !SBIT) ? T_PRIV :
                      (OP_I == ORI_TO_SR && !SBIT) ? T_PRIV :
                      ((OP_I == OP_RESET || OP_I == RTE) && !SBIT) ? T_PRIV :
                      (OP_I == STOP && !SBIT) ? T_PRIV : NONE;
@@ -688,7 +743,7 @@ always_comb begin : op_decode
         4'hC:    OP_I = decode_Cxxx(IPIPE_D);
         4'hD:    OP_I = decode_Dxxx(IPIPE_D);
         4'hE:    OP_I = decode_Exxx(IPIPE_D);
-        4'hF:    OP_I = UNIMPLEMENTED;
+        4'hF:    OP_I = decode_Fxxx(IPIPE_D, IPIPE_C);
         default: OP_I = ILLEGAL;
     endcase
 end
