@@ -153,6 +153,85 @@ def _handler_code_read_frame(h, marker_val):
     ]
 
 
+def _load_bus_fault_frame(
+    h,
+    sp_addr,
+    frame_format,
+    resume_pc,
+    *,
+    saved_sr=0x2700,
+    ssw=0x0000,
+    stage_d=0x4E71,
+    stage_c=0x4E71,
+    stage_b=0x4E71,
+    version=0x1904,
+):
+    """Load a synthetic format-A/B bus-fault frame at sp_addr."""
+    if frame_format not in (0xA, 0xB):
+        raise ValueError(f"Unsupported frame format 0x{frame_format:X}")
+
+    word_count = 16 if frame_format == 0xA else 46
+    frame = [0x0000] * word_count
+
+    frame[0x00 // 2] = saved_sr & 0xFFFF
+    frame[0x02 // 2] = (resume_pc >> 16) & 0xFFFF
+    frame[0x04 // 2] = resume_pc & 0xFFFF
+    frame[0x06 // 2] = (frame_format << 12) & 0xF000
+    frame[0x08 // 2] = stage_d & 0xFFFF
+    frame[0x0A // 2] = ssw & 0xFFFF
+    frame[0x0C // 2] = stage_c & 0xFFFF
+    frame[0x0E // 2] = stage_b & 0xFFFF
+
+    if frame_format == 0xB:
+        stage_b_addr = (resume_pc + 4) & 0xFFFFFFFF
+        frame[0x24 // 2] = (stage_b_addr >> 16) & 0xFFFF
+        frame[0x26 // 2] = stage_b_addr & 0xFFFF
+        frame[0x36 // 2] = version & 0xFFFF
+
+    h.mem.load_words(sp_addr, frame)
+
+
+async def _run_until_sentinel_capture_reads(
+    h,
+    dut,
+    *,
+    max_cycles=8000,
+    addr_lo=0x00000000,
+    addr_hi=0xFFFFFFFF,
+    stop_on_sentinel=True,
+):
+    """Run until sentinel while capturing read bus-cycle start addresses."""
+    addrs = []
+    pipe_load_seen = False
+    sentinel_seen = False
+    prev_as_n = 1
+
+    for _ in range(max_cycles):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            adr = int(dut.ADR_OUT.value) & 0xFFFFFFFF
+            pipe_load = int(dut.RTE_PIPE_LOAD.value)
+        except ValueError:
+            prev_as_n = 1
+            continue
+
+        if pipe_load == 1:
+            pipe_load_seen = True
+
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr_lo <= adr <= addr_hi:
+            addrs.append(adr)
+        prev_as_n = as_n
+
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            sentinel_seen = True
+            if stop_on_sentinel:
+                return True, addrs, pipe_load_seen
+
+    return sentinel_seen, addrs, pipe_load_seen
+
+
 # =========================================================================
 # Illegal instruction tests (vector 4)
 # =========================================================================
@@ -1434,6 +1513,241 @@ async def test_line_f_vector_offset_in_frame(dut):
     assert vec_offset == 0x02C, (
         f"Line-F vector offset should be 0x02C (vector 11): got 0x{vec_offset:03X}"
     )
+    h.cleanup()
+
+
+# =========================================================================
+# RTE bus-fault frame restore semantics (HW-004)
+# =========================================================================
+
+@cocotb.test()
+async def test_rte_format_a_skips_long_version_check(dut):
+    """RTE format A must not read/check long-frame version word at SP+0x36."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001800
+    target_pc = 0x00000400
+    format_handler_addr = HANDLER_BASE + 0x880
+    format_vector_addr = 14 * 4
+
+    target_code = _handler_code(h, 1, 0x5A)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    h.mem.load_long(format_vector_addr, format_handler_addr)
+    h.mem.load_words(format_handler_addr, _handler_code(h, 1, 0x0E))
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xA,
+        target_pc,
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+    )
+    # Poison long-format version location; format A must ignore it.
+    h.mem.write(frame_sp + 0x36, 2, 0xBEEF)
+
+    _found, read_addrs, _pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=2000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+        stop_on_sentinel=False,
+    )
+    assert (frame_sp + 0x1E) in read_addrs, "Format-A RTE should validate bottom word at SP+0x1E"
+    assert (frame_sp + 0x36) not in read_addrs, "Format-A RTE must not read long-frame version at SP+0x36"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_rte_format_b_invalid_version_traps_format_error(dut):
+    """RTE format B with wrong version should trap format error (vector 14)."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001A00
+    target_pc = 0x00000480
+    format_handler_addr = HANDLER_BASE + 0x8A0
+    format_vector_addr = 14 * 4
+
+    target_code = _handler_code(h, 1, 0x5B)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    h.mem.load_long(format_vector_addr, format_handler_addr)
+    h.mem.load_words(format_handler_addr, _handler_code(h, 1, 0x0E))
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xB,
+        target_pc,
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+        version=0x0000,  # invalid on purpose
+    )
+
+    found, read_addrs, _pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=8000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+    )
+    assert found, "Sentinel not reached"
+
+    marker = h.read_result_long(0)
+    assert marker == 0x0E, (
+        f"Invalid long-frame version should trigger format-error handler marker 0x0E: got 0x{marker:08X}"
+    )
+    assert (frame_sp + 0x36) in read_addrs, "Format-B RTE should read/check version word at SP+0x36"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_rte_format_a_valid_frame_returns_via_pipe_restore(dut):
+    """RTE format A valid frame should assert pipe-restore load and avoid format error."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001C00
+    target_pc = 0x00000500
+    format_handler_addr = HANDLER_BASE + 0x8C0
+    format_vector_addr = 14 * 4
+
+    target_code = _handler_code(h, 1, 0x5C)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    h.mem.load_long(format_vector_addr, format_handler_addr)
+    h.mem.load_words(format_handler_addr, _handler_code(h, 1, 0x0E))
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xA,
+        target_pc,
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+    )
+
+    _found, read_addrs, pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=4000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+        stop_on_sentinel=False,
+    )
+    assert pipe_load_seen, "Expected RTE pipe restore load for valid format-A frame"
+    marker = h.read_result_long(0)
+    assert marker != 0x0E, "Valid format-A frame must not trap format error"
+    assert (frame_sp + 0x1E) in read_addrs, "Format-A RTE should validate bottom word at SP+0x1E"
+    assert (frame_sp + 0x36) not in read_addrs, "Format-A RTE must not read long-frame version at SP+0x36"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_rte_format_b_valid_frame_returns_via_pipe_restore(dut):
+    """RTE format B valid frame should assert pipe-restore load and avoid format error."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001E00
+    target_pc = 0x00000580
+    format_handler_addr = HANDLER_BASE + 0x8E0
+    format_vector_addr = 14 * 4
+
+    target_code = _handler_code(h, 1, 0x5D)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    h.mem.load_long(format_vector_addr, format_handler_addr)
+    h.mem.load_words(format_handler_addr, _handler_code(h, 1, 0x0E))
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xB,
+        target_pc,
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+        version=0x1904,
+    )
+
+    _found, read_addrs, pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=5000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+        stop_on_sentinel=False,
+    )
+    marker = h.read_result_long(0)
+    assert marker != 0x0E, "Valid format-B frame must not trap format error"
+    # Depending on stacked SSW semantics this path may choose restore-load or refill.
+    assert (frame_sp + 0x36) in read_addrs, "Format-B RTE should read/check version word at SP+0x36"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_rte_format_a_rerun_ssw_uses_refill_path(dut):
+    """RTE format A with rerun requested in SSW should skip pipe-restore load."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00002000
+    target_pc = 0x00000600
+
+    target_code = _handler_code(h, 1, 0x5E)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    _load_bus_fault_frame(
+        h,
+        frame_sp,
+        0xA,
+        target_pc,
+        ssw=0x0100,  # FB set: force rerun/refill behavior
+        stage_d=target_code[0],
+        stage_c=target_code[1],
+        stage_b=target_code[2],
+    )
+
+    found, _read_addrs, pipe_load_seen = await _run_until_sentinel_capture_reads(
+        h,
+        dut,
+        max_cycles=8000,
+        addr_lo=frame_sp,
+        addr_hi=frame_sp + 0x80,
+    )
+    assert found, "Sentinel not reached"
+    assert not pipe_load_seen, "RTE pipe restore load must be suppressed when SSW requests rerun"
+    marker = h.read_result_long(0)
+    assert marker == 0x5E, f"Expected marker 0x5E after rerun/refill path, got 0x{marker:08X}"
     h.cleanup()
 
 
