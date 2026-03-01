@@ -13,6 +13,7 @@ Coverage in this phase:
 """
 
 import cocotb
+from cocotb.triggers import RisingEdge
 
 from cpu_harness import CPUTestHarness
 from m68k_encode import (
@@ -1815,13 +1816,28 @@ async def test_mmu_flush_side_effect_fd_and_pflush(dut):
     h.mem.load_long(tt0_src, tt0_val)
     h.mem.load_long(tt1_src, tt1_val)
 
-    flush_before = int(dut.MMU_ATC_FLUSH_COUNT.value)
-    found = await h.run_until_sentinel(max_cycles=14000)
-    assert found, "MMU flush side-effect test did not complete"
-    flush_after = int(dut.MMU_ATC_FLUSH_COUNT.value)
+    flush_edges = 0
+    monitor_done = False
 
-    assert flush_after - flush_before == 2, (
-        f"Expected exactly 2 flush strobes (PMOVE FD=0 + PFLUSHA), got {flush_after - flush_before}"
+    async def monitor_flush_strobe():
+        nonlocal flush_edges
+        prev = 0
+        while not monitor_done:
+            await RisingEdge(dut.CLK)
+            curr = int(dut.MMU_ATC_FLUSH.value)
+            if curr and not prev:
+                flush_edges += 1
+            prev = curr
+
+    monitor_task = cocotb.start_soon(monitor_flush_strobe())
+    found = await h.run_until_sentinel(max_cycles=14000)
+    monitor_done = True
+    await RisingEdge(dut.CLK)
+    await monitor_task
+    assert found, "MMU flush side-effect test did not complete"
+
+    assert flush_edges == 2, (
+        f"Expected exactly 2 flush strobes (PMOVE FD=0 + PFLUSHA), got {flush_edges}"
     )
     h.cleanup()
 

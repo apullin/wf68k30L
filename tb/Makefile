@@ -26,6 +26,7 @@ VERILOG_SOURCES = \
     $(SV_DIR)/wf68k30L_exception_handler.sv \
     $(SV_DIR)/wf68k30L_operand_mux.sv \
     $(SV_DIR)/wf68k30L_shifter.sv \
+    $(SV_DIR)/wf68k30L_sync_ram_1r1w.sv \
     $(SV_DIR)/wf68k30L_divider.sv \
     $(SV_DIR)/wf68k30L_control.sv \
     $(SV_DIR)/wf68k30L_ctrl_comb.sv \

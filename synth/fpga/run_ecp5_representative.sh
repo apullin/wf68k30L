@@ -12,7 +12,7 @@ YOSYS_BIN=${YOSYS_BIN:-yosys}
 NEXTPNR_BIN=${NEXTPNR_BIN:-nextpnr-ecp5}
 ECPPACK_BIN=${ECPPACK_BIN:-ecppack}
 
-DEVICE=${DEVICE:-45k}          # 12k, 25k, 45k, 85k, um-*, um5g-*
+DEVICE=${DEVICE:-85k}          # 12k, 25k, 45k, 85k, um-*, um5g-*
 PACKAGE=${PACKAGE:-CABGA381}
 SPEED=${SPEED:-8}
 FREQ_MHZ=${FREQ_MHZ:-25}
