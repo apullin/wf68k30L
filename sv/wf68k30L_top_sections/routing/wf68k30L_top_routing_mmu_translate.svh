@@ -32,7 +32,7 @@ always_comb begin : mmu_address_translate
     logic [31:0] first_index;
     logic        root_limit_fault;
     logic [35:0] walk_eval;
-    integer      i;
+    logic [35:0] atc_lookup;
 
     read_access = OPCODE_RD || DATA_RD;
     write_access = DATA_WR;
@@ -69,18 +69,12 @@ always_comb begin : mmu_address_translate
     atc_b = 1'b0;
     atc_w = 1'b0;
     atc_m = write_access;
-    for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-        if (!atc_hit &&
-            MMU_ATC_V[i] &&
-            MMU_ATC_FC[i] == atc_fc &&
-            MMU_ATC_TAG[i] == atc_tag) begin
-            atc_hit = 1'b1;
-            atc_ptag = MMU_ATC_PTAG[i];
-            atc_b = MMU_ATC_B[i];
-            atc_w = MMU_ATC_W[i];
-            atc_m = MMU_ATC_M[i] || write_access;
-        end
-    end
+    atc_lookup = mmu_atc_lookup(atc_fc, atc_tag, write_access);
+    atc_hit = atc_lookup[35];
+    atc_b = atc_lookup[34];
+    atc_w = atc_lookup[33];
+    atc_m = atc_lookup[32];
+    atc_ptag = atc_lookup[31:0];
     if (atc_hit) begin
         atc_fault = atc_b || (write_access && atc_w);
         atc_phys = mmu_page_compose_addr(MMU_TC, atc_ptag, atc_logical);

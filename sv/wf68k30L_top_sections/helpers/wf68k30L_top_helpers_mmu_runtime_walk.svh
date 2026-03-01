@@ -41,8 +41,9 @@ function automatic logic [35:0] mmu_runtime_table_walk(
     logic        walk_wp_accum;
     logic        walk_page_m;
     logic [32:0] walk_lookup;
+    logic [65:0] walk_desc_entry;
     logic [32:0] walk_lookup_hi;
-    logic [2:0]  walk_desc_size;
+    logic [3:0]  walk_desc_size;
     logic [1:0]  walk_desc_dt;
     logic [2:0]  walk_tlx_level;
     logic        walk_fc_level;
@@ -84,8 +85,9 @@ begin
         walk_desc = 32'h0;
         walk_desc_hi = 32'h0;
         walk_desc_ptr = 32'h0;
+        walk_desc_entry = 66'h0;
         walk_lookup_hi = 33'h0;
-        walk_desc_size = root_long_table ? 3'd8 : 3'd4;
+        walk_desc_size = root_long_table ? 4'd8 : 4'd4;
         walk_desc_dt = 2'b00;
         walk_tlx_level = 3'd0;
         walk_fc_level = tc_in[24];
@@ -125,8 +127,7 @@ begin
                         end
 
                         if (walk_levels == 3'd0 && !tc_in[24] &&
-                            ((root_limit_lower && walk_index[14:0] < root_limit) ||
-                             (!root_limit_lower && walk_index[14:0] > root_limit))) begin
+                            mmu_limit_violation(root_limit_lower, root_limit, walk_index)) begin
                             walk_fault = 1'b1;
                             walk_limit_fault = 1'b1;
                         end
@@ -134,26 +135,12 @@ begin
                 end
 
                 if (!walk_fault) begin
-                    if (walk_desc_size == 3'd8)
-                        walk_desc_addr = walk_table_base + (walk_index << 3);
-                    else
-                        walk_desc_addr = walk_table_base + (walk_index << 2);
-
-                    walk_lookup = mmu_desc_shadow_read(walk_desc_addr);
-                    walk_desc = 32'h0;
-                    walk_desc_hi = 32'h0;
-                    if (!walk_lookup[32]) begin
+                    walk_desc_addr = mmu_desc_addr(walk_table_base, walk_index, walk_desc_size);
+                    walk_desc_entry = mmu_desc_shadow_read_entry(walk_desc_addr, walk_desc_size);
+                    walk_desc = walk_desc_entry[63:32];
+                    walk_desc_hi = walk_desc_entry[31:0];
+                    if (!walk_desc_entry[65] || !walk_desc_entry[64]) begin
                         walk_fault = 1'b1;
-                    end else begin
-                        walk_desc = walk_lookup[31:0];
-                        if (walk_desc_size == 3'd8) begin
-                            walk_lookup_hi = mmu_desc_shadow_read(walk_desc_addr + 32'd4);
-                            if (!walk_lookup_hi[32]) begin
-                                walk_fault = 1'b1;
-                            end else begin
-                                walk_desc_hi = walk_lookup_hi[31:0];
-                            end
-                        end
                     end
                 end
 
@@ -162,7 +149,7 @@ begin
                     walk_desc_dt = walk_desc[1:0];
                     walk_wp_accum = walk_wp_accum || walk_desc[2];
 
-                    if (walk_desc_size == 3'd8 && !fc_in[2] && walk_desc[8]) begin
+                    if (walk_desc_size == 4'd8 && !fc_in[2] && walk_desc[8]) begin
                         walk_super_fault = 1'b1;
                         walk_fault = 1'b1;
                     end
@@ -172,7 +159,7 @@ begin
                             walk_fault = 1'b1;
                         end
                         2'b01: begin
-                            if (walk_desc_size == 3'd8 && walk_has_next && walk_next_width != 4'h0) begin
+                            if (walk_desc_size == 4'd8 && walk_has_next && walk_next_width != 4'h0) begin
                                 walk_limit_lower = walk_desc[31];
                                 walk_limit = walk_desc[30:16];
                                 walk_limit_index = mmu_index_extract(
@@ -181,8 +168,7 @@ begin
                                     walk_consumed,
                                     walk_next_width
                                 );
-                                if ((walk_limit_lower && walk_limit_index[14:0] < walk_limit) ||
-                                    (!walk_limit_lower && walk_limit_index[14:0] > walk_limit)) begin
+                                if (mmu_limit_violation(walk_limit_lower, walk_limit, walk_limit_index)) begin
                                     walk_fault = 1'b1;
                                     walk_limit_fault = 1'b1;
                                 end
@@ -190,7 +176,7 @@ begin
 
                             if (!walk_fault) begin
                                 walk_page_desc = walk_desc;
-                                walk_page_base = (walk_desc_size == 3'd8) ?
+                                walk_page_base = (walk_desc_size == 4'd8) ?
                                                  {walk_desc_hi[31:8], 8'h00} :
                                                  {walk_desc[31:8], 8'h00};
                                 walk_page_m = walk_desc[4] || write_access;
@@ -199,7 +185,7 @@ begin
                         end
                         default: begin
                             if (walk_has_next) begin
-                                if (walk_desc_size == 3'd8 && walk_next_width != 4'h0) begin
+                                if (walk_desc_size == 4'd8 && walk_next_width != 4'h0) begin
                                     walk_limit_lower = walk_desc[31];
                                     walk_limit = walk_desc[30:16];
                                     walk_limit_index = mmu_index_extract(
@@ -208,22 +194,21 @@ begin
                                         walk_consumed,
                                         walk_next_width
                                     );
-                                    if ((walk_limit_lower && walk_limit_index[14:0] < walk_limit) ||
-                                        (!walk_limit_lower && walk_limit_index[14:0] > walk_limit)) begin
+                                    if (mmu_limit_violation(walk_limit_lower, walk_limit, walk_limit_index)) begin
                                         walk_fault = 1'b1;
                                         walk_limit_fault = 1'b1;
                                     end
                                 end
 
                                 if (!walk_fault) begin
-                                    walk_table_base = (walk_desc_size == 3'd8) ?
+                                    walk_table_base = (walk_desc_size == 4'd8) ?
                                                       {walk_desc_hi[31:4], 4'b0000} :
                                                       {walk_desc[31:4], 4'b0000};
-                                    walk_desc_size = (walk_desc_dt == 2'b10) ? 3'd4 : 3'd8;
+                                    walk_desc_size = (walk_desc_dt == 2'b10) ? 4'd4 : 4'd8;
                                 end
                             end else begin
                                 // Bottom-level table descriptor encodes indirection.
-                                walk_desc_ptr = (walk_desc_size == 3'd8) ? walk_desc_hi : walk_desc;
+                                walk_desc_ptr = (walk_desc_size == 4'd8) ? walk_desc_hi : walk_desc;
                                 if (walk_desc_dt == 2'b10) begin
                                     walk_lookup = mmu_desc_shadow_read({walk_desc_ptr[31:2], 2'b00});
                                     if (!walk_lookup[32] || walk_lookup[1:0] != 2'b01) begin

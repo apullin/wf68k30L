@@ -112,7 +112,13 @@ always_ff @(posedge CLK) begin : cache_registers
             DATA_VALID_CACHE <= 1'b1;
             DCACHE_HIT_PENDING <= 1'b0;
         end else if (!BUS_BSY && DATA_RD && DCACHE_HIT_NOW && !DATA_RDY_BUSIF_CORE) begin
-            DCACHE_HIT_DATA_PENDING <= DCACHE_HIT_DATA_NOW;
+            dcache_line = ADR_P_PHYS[7:4];
+            dcache_entry = ADR_P_PHYS[3:2];
+            DCACHE_HIT_DATA_PENDING <= dcache_read_extract(
+                DCACHE_DATA[dcache_line][dcache_entry],
+                OP_SIZE_BUS,
+                ADR_P_PHYS[1:0]
+            );
             DCACHE_HIT_PENDING <= 1'b1;
         end
 
@@ -604,10 +610,14 @@ always_ff @(posedge CLK) begin : mmu_registers
     logic        atc_m_result;
     logic        atc_rmw;
     logic [31:0] atc_phys;
-    logic [$clog2(MMU_ATC_LINES)-1:0] atc_hit_idx;
-    logic [$clog2(MMU_ATC_LINES)-1:0] atc_free_idx;
-    logic [$clog2(MMU_ATC_LINES)-1:0] atc_ins_idx;
-    integer i;
+    logic [35:0] atc_lookup;
+    logic [MMU_ATC_SET_BITS-1:0] atc_set_idx;
+    logic [MMU_ATC_WAY_BITS-1:0] atc_hit_way;
+    logic [MMU_ATC_WAY_BITS-1:0] atc_free_way;
+    logic [MMU_ATC_WAY_BITS-1:0] atc_ins_way;
+    logic [2*MMU_ATC_WAY_BITS+1:0] atc_probe;
+    integer set_i;
+    integer way_i;
     if (RESET_CPU) begin
         MMU_SRP <= 64'h0;
         MMU_CRP <= 64'h0;
@@ -617,15 +627,17 @@ always_ff @(posedge CLK) begin : mmu_registers
         MMU_MMUSR <= 32'h0;
         TRAP_MMU_CFG <= 1'b0;
         MMU_ATC_FLUSH_COUNT <= 32'h0;
-        MMU_ATC_V <= '0;
-        MMU_ATC_B <= '0;
-        MMU_ATC_W <= '0;
-        MMU_ATC_M <= '0;
-        MMU_ATC_REPL_PTR <= '0;
-        for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-            MMU_ATC_FC[i] <= 3'b000;
-            MMU_ATC_TAG[i] <= 32'h0;
-            MMU_ATC_PTAG[i] <= 32'h0;
+        for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin
+            MMU_ATC_V[set_i] <= '0;
+            MMU_ATC_B[set_i] <= '0;
+            MMU_ATC_W[set_i] <= '0;
+            MMU_ATC_M[set_i] <= '0;
+            MMU_ATC_REPL_PTR[set_i] <= '0;
+            for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
+                MMU_ATC_FC[set_i][way_i] <= 3'b000;
+                MMU_ATC_TAG[set_i][way_i] <= 32'h0;
+                MMU_ATC_PTAG[set_i][way_i] <= 32'h0;
+            end
         end
     end else begin
         tc_cfg_err = mmu_tc_cfg_error(ALU_RESULT[31:0]);
@@ -662,8 +674,10 @@ always_ff @(posedge CLK) begin : mmu_registers
             MMU_MMUSR <= {16'h0, ALU_RESULT[15:0]};
 
         // PMOVE FD=0 register writes flush all ATC entries.
-        if (pmove_flush_exec)
-            MMU_ATC_V <= '0;
+        if (pmove_flush_exec) begin
+            for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1)
+                MMU_ATC_V[set_i] <= '0;
+        end
 
         // PFLUSH supports all-entries, FC/mask, and FC/mask/EA selection.
         if (pflush_exec) begin
@@ -673,20 +687,27 @@ always_ff @(posedge CLK) begin : mmu_registers
             atc_tag = mmu_page_tag(MMU_TC, atc_logical);
             case (BIW_1[12:10])
                 3'b001: begin
-                    MMU_ATC_V <= '0; // PFLUSHA
+                    // PFLUSHA
+                    for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1)
+                        MMU_ATC_V[set_i] <= '0;
                 end
                 3'b100: begin // PFLUSH FC,MASK
-                    for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-                        if (MMU_ATC_V[i] && (((MMU_ATC_FC[i] ^ atc_fc) & atc_mask) == 3'b000))
-                            MMU_ATC_V[i] <= 1'b0;
+                    for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin
+                        for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
+                            if (MMU_ATC_V[set_i][way_i] &&
+                                (((MMU_ATC_FC[set_i][way_i] ^ atc_fc) & atc_mask) == 3'b000))
+                                MMU_ATC_V[set_i][way_i] <= 1'b0;
+                        end
                     end
                 end
                 3'b110: begin // PFLUSH FC,MASK,<ea>
-                    for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-                        if (MMU_ATC_V[i] &&
-                            (((MMU_ATC_FC[i] ^ atc_fc) & atc_mask) == 3'b000) &&
-                            (MMU_ATC_TAG[i] == atc_tag))
-                            MMU_ATC_V[i] <= 1'b0;
+                    for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin
+                        for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
+                            if (MMU_ATC_V[set_i][way_i] &&
+                                (((MMU_ATC_FC[set_i][way_i] ^ atc_fc) & atc_mask) == 3'b000) &&
+                                (MMU_ATC_TAG[set_i][way_i] == atc_tag))
+                                MMU_ATC_V[set_i][way_i] <= 1'b0;
+                        end
                     end
                 end
                 default: begin
@@ -712,38 +733,32 @@ always_ff @(posedge CLK) begin : mmu_registers
             atc_w_result = 1'b0;
             atc_m_result = !BIW_1[9]; // PLOADW marks modified.
 
-            atc_hit = 1'b0;
-            atc_free = 1'b0;
-            atc_hit_idx = '0;
-            atc_free_idx = '0;
-            for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-                if (!atc_hit && MMU_ATC_V[i] && MMU_ATC_FC[i] == atc_fc && MMU_ATC_TAG[i] == atc_tag) begin
-                    atc_hit = 1'b1;
-                    atc_hit_idx = i[$clog2(MMU_ATC_LINES)-1:0];
-                end
-                if (!atc_free && !MMU_ATC_V[i]) begin
-                    atc_free = 1'b1;
-                    atc_free_idx = i[$clog2(MMU_ATC_LINES)-1:0];
-                end
-            end
+            atc_set_idx = mmu_atc_set_idx(atc_fc, atc_tag);
+            atc_probe = mmu_atc_probe_set(atc_set_idx, atc_fc, atc_tag);
+            atc_hit = atc_probe[2*MMU_ATC_WAY_BITS+1];
+            atc_free = atc_probe[2*MMU_ATC_WAY_BITS];
+            atc_hit_way = atc_probe[2*MMU_ATC_WAY_BITS-1:MMU_ATC_WAY_BITS];
+            atc_free_way = atc_probe[MMU_ATC_WAY_BITS-1:0];
 
-            atc_ins_idx = atc_hit ? atc_hit_idx : (atc_free ? atc_free_idx : MMU_ATC_REPL_PTR);
+            atc_ins_way = atc_hit ? atc_hit_way : (atc_free ? atc_free_way : MMU_ATC_REPL_PTR[atc_set_idx]);
 
             // Keep TT-only mappings out of the ATC model.
             if (!tt_hit) begin
-                for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-                    if (MMU_ATC_V[i] && MMU_ATC_FC[i] == atc_fc && MMU_ATC_TAG[i] == atc_tag)
-                        MMU_ATC_V[i] <= 1'b0;
+                for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
+                    if (MMU_ATC_V[atc_set_idx][way_i] &&
+                        MMU_ATC_FC[atc_set_idx][way_i] == atc_fc &&
+                        MMU_ATC_TAG[atc_set_idx][way_i] == atc_tag)
+                        MMU_ATC_V[atc_set_idx][way_i] <= 1'b0;
                 end
-                MMU_ATC_V[atc_ins_idx] <= 1'b1;
-                MMU_ATC_B[atc_ins_idx] <= atc_b_result;
-                MMU_ATC_W[atc_ins_idx] <= atc_w_result;
-                MMU_ATC_M[atc_ins_idx] <= atc_m_result;
-                MMU_ATC_FC[atc_ins_idx] <= atc_fc;
-                MMU_ATC_TAG[atc_ins_idx] <= atc_tag;
-                MMU_ATC_PTAG[atc_ins_idx] <= atc_ptag;
+                MMU_ATC_V[atc_set_idx][atc_ins_way] <= 1'b1;
+                MMU_ATC_B[atc_set_idx][atc_ins_way] <= atc_b_result;
+                MMU_ATC_W[atc_set_idx][atc_ins_way] <= atc_w_result;
+                MMU_ATC_M[atc_set_idx][atc_ins_way] <= atc_m_result;
+                MMU_ATC_FC[atc_set_idx][atc_ins_way] <= atc_fc;
+                MMU_ATC_TAG[atc_set_idx][atc_ins_way] <= atc_tag;
+                MMU_ATC_PTAG[atc_set_idx][atc_ins_way] <= atc_ptag;
                 if (!atc_hit && !atc_free)
-                    MMU_ATC_REPL_PTR <= MMU_ATC_REPL_PTR + 1'b1;
+                    MMU_ATC_REPL_PTR[atc_set_idx] <= MMU_ATC_REPL_PTR[atc_set_idx] + 1'b1;
             end
         end
 
@@ -756,36 +771,30 @@ always_ff @(posedge CLK) begin : mmu_registers
             atc_w_result = MMU_RUNTIME_ATC_W;
             atc_m_result = MMU_RUNTIME_ATC_M;
 
-            atc_hit = 1'b0;
-            atc_free = 1'b0;
-            atc_hit_idx = '0;
-            atc_free_idx = '0;
-            for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-                if (!atc_hit && MMU_ATC_V[i] && MMU_ATC_FC[i] == atc_fc && MMU_ATC_TAG[i] == atc_tag) begin
-                    atc_hit = 1'b1;
-                    atc_hit_idx = i[$clog2(MMU_ATC_LINES)-1:0];
-                end
-                if (!atc_free && !MMU_ATC_V[i]) begin
-                    atc_free = 1'b1;
-                    atc_free_idx = i[$clog2(MMU_ATC_LINES)-1:0];
-                end
-            end
+            atc_set_idx = mmu_atc_set_idx(atc_fc, atc_tag);
+            atc_probe = mmu_atc_probe_set(atc_set_idx, atc_fc, atc_tag);
+            atc_hit = atc_probe[2*MMU_ATC_WAY_BITS+1];
+            atc_free = atc_probe[2*MMU_ATC_WAY_BITS];
+            atc_hit_way = atc_probe[2*MMU_ATC_WAY_BITS-1:MMU_ATC_WAY_BITS];
+            atc_free_way = atc_probe[MMU_ATC_WAY_BITS-1:0];
 
-            atc_ins_idx = atc_hit ? atc_hit_idx : (atc_free ? atc_free_idx : MMU_ATC_REPL_PTR);
+            atc_ins_way = atc_hit ? atc_hit_way : (atc_free ? atc_free_way : MMU_ATC_REPL_PTR[atc_set_idx]);
 
-            for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-                if (MMU_ATC_V[i] && MMU_ATC_FC[i] == atc_fc && MMU_ATC_TAG[i] == atc_tag)
-                    MMU_ATC_V[i] <= 1'b0;
+            for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
+                if (MMU_ATC_V[atc_set_idx][way_i] &&
+                    MMU_ATC_FC[atc_set_idx][way_i] == atc_fc &&
+                    MMU_ATC_TAG[atc_set_idx][way_i] == atc_tag)
+                    MMU_ATC_V[atc_set_idx][way_i] <= 1'b0;
             end
-            MMU_ATC_V[atc_ins_idx] <= 1'b1;
-            MMU_ATC_B[atc_ins_idx] <= atc_b_result;
-            MMU_ATC_W[atc_ins_idx] <= atc_w_result;
-            MMU_ATC_M[atc_ins_idx] <= atc_m_result;
-            MMU_ATC_FC[atc_ins_idx] <= atc_fc;
-            MMU_ATC_TAG[atc_ins_idx] <= atc_tag;
-            MMU_ATC_PTAG[atc_ins_idx] <= atc_ptag;
+            MMU_ATC_V[atc_set_idx][atc_ins_way] <= 1'b1;
+            MMU_ATC_B[atc_set_idx][atc_ins_way] <= atc_b_result;
+            MMU_ATC_W[atc_set_idx][atc_ins_way] <= atc_w_result;
+            MMU_ATC_M[atc_set_idx][atc_ins_way] <= atc_m_result;
+            MMU_ATC_FC[atc_set_idx][atc_ins_way] <= atc_fc;
+            MMU_ATC_TAG[atc_set_idx][atc_ins_way] <= atc_tag;
+            MMU_ATC_PTAG[atc_set_idx][atc_ins_way] <= atc_ptag;
             if (!atc_hit && !atc_free)
-                MMU_ATC_REPL_PTR <= MMU_ATC_REPL_PTR + 1'b1;
+                MMU_ATC_REPL_PTR[atc_set_idx] <= MMU_ATC_REPL_PTR[atc_set_idx] + 1'b1;
         end
 
         // PTEST writes MMUSR with level-specific status.
@@ -799,20 +808,11 @@ always_ff @(posedge CLK) begin : mmu_registers
             tt_hit = mmu_tt_match(MMU_TT0, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw) ||
                      mmu_tt_match(MMU_TT1, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw);
 
-            atc_hit = 1'b0;
-            atc_hit_idx = '0;
-            atc_b_result = 1'b0;
-            atc_w_result = 1'b0;
-            atc_m_result = 1'b0;
-            for (i = 0; i < MMU_ATC_LINES; i = i + 1) begin
-                if (!atc_hit && MMU_ATC_V[i] && MMU_ATC_FC[i] == atc_fc && MMU_ATC_TAG[i] == atc_tag) begin
-                    atc_hit = 1'b1;
-                    atc_hit_idx = i[$clog2(MMU_ATC_LINES)-1:0];
-                    atc_b_result = MMU_ATC_B[i];
-                    atc_w_result = MMU_ATC_W[i];
-                    atc_m_result = MMU_ATC_M[i];
-                end
-            end
+            atc_lookup = mmu_atc_lookup(atc_fc, atc_tag, 1'b0);
+            atc_hit = atc_lookup[35];
+            atc_b_result = atc_lookup[34];
+            atc_w_result = atc_lookup[33];
+            atc_m_result = atc_lookup[32];
 
             mmusr_value = 16'h0000;
             if (ptest_level == 3'b000) begin

@@ -154,22 +154,169 @@ begin
 end
 endfunction
 
+function automatic logic mmu_limit_violation(
+    input logic        limit_lower,
+    input logic [14:0] limit,
+    input logic [31:0] index
+);
+begin
+    mmu_limit_violation = (limit_lower && index[14:0] < limit) ||
+                          (!limit_lower && index[14:0] > limit);
+end
+endfunction
+
+function automatic logic [31:0] mmu_desc_addr(
+    input logic [31:0] table_base,
+    input logic [31:0] index,
+    input logic [3:0]  desc_size
+);
+begin
+    if (desc_size == 4'd8)
+        mmu_desc_addr = table_base + (index << 3);
+    else
+        mmu_desc_addr = table_base + (index << 2);
+end
+endfunction
+
+function automatic logic [MMU_ATC_SET_BITS-1:0] mmu_atc_set_idx(
+    input logic [2:0]  fc,
+    input logic [31:0] tag
+);
+    logic [MMU_ATC_SET_BITS-1:0] tag_bits;
+    logic [MMU_ATC_SET_BITS-1:0] fc_bits;
+begin
+    tag_bits = tag[MMU_ATC_SET_BITS-1:0];
+    fc_bits = fc[MMU_ATC_SET_BITS-1:0];
+    mmu_atc_set_idx = tag_bits ^ fc_bits;
+end
+endfunction
+
+// Packed ATC lookup return:
+// [35]    hit
+// [34]    B (bus/invalid fault marker)
+// [33]    W (write-protect marker)
+// [32]    M (modified marker after access)
+// [31:0]  physical page tag
+function automatic logic [35:0] mmu_atc_lookup(
+    input logic [2:0]  fc,
+    input logic [31:0] tag,
+    input logic        write_access
+);
+    logic [MMU_ATC_SET_BITS-1:0] set_idx;
+    logic        hit;
+    logic        b;
+    logic        w;
+    logic        m;
+    logic [31:0] ptag;
+    integer way;
+begin
+    set_idx = mmu_atc_set_idx(fc, tag);
+    hit = 1'b0;
+    b = 1'b0;
+    w = 1'b0;
+    m = write_access;
+    ptag = 32'h0;
+
+    for (way = 0; way < MMU_ATC_WAYS; way = way + 1) begin
+        if (!hit &&
+            MMU_ATC_V[set_idx][way] &&
+            MMU_ATC_FC[set_idx][way] == fc &&
+            MMU_ATC_TAG[set_idx][way] == tag) begin
+            hit = 1'b1;
+            ptag = MMU_ATC_PTAG[set_idx][way];
+            b = MMU_ATC_B[set_idx][way];
+            w = MMU_ATC_W[set_idx][way];
+            m = MMU_ATC_M[set_idx][way] || write_access;
+        end
+    end
+
+    mmu_atc_lookup = {hit, b, w, m, ptag};
+end
+endfunction
+
+// Packed ATC probe return:
+// [2*MMU_ATC_WAY_BITS+1]     hit
+// [2*MMU_ATC_WAY_BITS]       free-way-available
+// [2*MMU_ATC_WAY_BITS-1:MMU_ATC_WAY_BITS] hit way index
+// [MMU_ATC_WAY_BITS-1:0]     free way index
+function automatic logic [2*MMU_ATC_WAY_BITS+1:0] mmu_atc_probe_set(
+    input logic [MMU_ATC_SET_BITS-1:0] set_idx,
+    input logic [2:0]                  fc,
+    input logic [31:0]                 tag
+);
+    logic hit;
+    logic free;
+    logic [MMU_ATC_WAY_BITS-1:0] hit_way;
+    logic [MMU_ATC_WAY_BITS-1:0] free_way;
+    integer way;
+begin
+    hit = 1'b0;
+    free = 1'b0;
+    hit_way = '0;
+    free_way = '0;
+    for (way = 0; way < MMU_ATC_WAYS; way = way + 1) begin
+        if (!hit &&
+            MMU_ATC_V[set_idx][way] &&
+            MMU_ATC_FC[set_idx][way] == fc &&
+            MMU_ATC_TAG[set_idx][way] == tag) begin
+            hit = 1'b1;
+            hit_way = way[MMU_ATC_WAY_BITS-1:0];
+        end
+        if (!free && !MMU_ATC_V[set_idx][way]) begin
+            free = 1'b1;
+            free_way = way[MMU_ATC_WAY_BITS-1:0];
+        end
+    end
+    mmu_atc_probe_set = {hit, free, hit_way, free_way};
+end
+endfunction
+
+function automatic logic [MMU_DESC_SHADOW_SET_BITS-1:0] mmu_desc_shadow_set_idx(input logic [31:0] addr);
+    logic [31:0] addr_w;
+begin
+    addr_w = {addr[31:2], 2'b00};
+    mmu_desc_shadow_set_idx = addr_w[MMU_DESC_SHADOW_SET_BITS+1:2];
+end
+endfunction
+
 function automatic logic [32:0] mmu_desc_shadow_read(input logic [31:0] addr);
     logic hit;
     logic [31:0] data;
     logic [31:0] addr_w;
-    integer i;
+    logic [MMU_DESC_SHADOW_SET_BITS-1:0] set_idx;
+    integer way;
 begin
     hit = 1'b0;
     data = 32'h0;
     addr_w = {addr[31:2], 2'b00};
-    for (i = 0; i < MMU_DESC_SHADOW_LINES; i = i + 1) begin
-        if (!hit && MMU_DESC_SHADOW_V[i] && MMU_DESC_SHADOW_ADDR[i] == addr_w) begin
+    set_idx = mmu_desc_shadow_set_idx(addr_w);
+    for (way = 0; way < MMU_DESC_SHADOW_WAYS; way = way + 1) begin
+        if (!hit && MMU_DESC_SHADOW_V[set_idx][way] && MMU_DESC_SHADOW_ADDR[set_idx][way] == addr_w) begin
             hit = 1'b1;
-            data = MMU_DESC_SHADOW_DATA[i];
+            data = MMU_DESC_SHADOW_DATA[set_idx][way];
         end
     end
     mmu_desc_shadow_read = {hit, data};
 end
 endfunction
 
+// Packed descriptor-shadow lookup:
+// [65]    low-word valid
+// [64]    high-word valid (forced high for short descriptors)
+// [63:32] low descriptor word
+// [31:0]  high descriptor word
+function automatic logic [65:0] mmu_desc_shadow_read_entry(
+    input logic [31:0] desc_addr,
+    input logic [3:0]  desc_size
+);
+    logic [32:0] lookup_lo;
+    logic [32:0] lookup_hi;
+begin
+    lookup_lo = mmu_desc_shadow_read(desc_addr);
+    if (desc_size == 4'd8)
+        lookup_hi = mmu_desc_shadow_read(desc_addr + 32'd4);
+    else
+        lookup_hi = {1'b1, 32'h0000_0000};
+    mmu_desc_shadow_read_entry = {lookup_lo[32], lookup_hi[32], lookup_lo[31:0], lookup_hi[31:0]};
+end
+endfunction

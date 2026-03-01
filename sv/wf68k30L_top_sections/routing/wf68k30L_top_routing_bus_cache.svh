@@ -119,19 +119,23 @@ always_ff @(posedge CLK) begin : mmu_desc_shadow_update
     logic [31:0] shadow_data;
     logic        hit;
     logic        free;
-    logic [$clog2(MMU_DESC_SHADOW_LINES)-1:0] hit_idx;
-    logic [$clog2(MMU_DESC_SHADOW_LINES)-1:0] free_idx;
-    logic [$clog2(MMU_DESC_SHADOW_LINES)-1:0] ins_idx;
-    integer i;
+    logic [MMU_DESC_SHADOW_SET_BITS-1:0] set_idx;
+    logic [MMU_DESC_SHADOW_WAY_BITS-1:0] hit_way;
+    logic [MMU_DESC_SHADOW_WAY_BITS-1:0] free_way;
+    logic [MMU_DESC_SHADOW_WAY_BITS-1:0] ins_way;
+    integer set_i;
+    integer way_i;
     if (RESET_CPU) begin
-        MMU_DESC_SHADOW_V <= '0;
-        MMU_DESC_SHADOW_REPL_PTR <= '0;
         MMU_DESC_SHADOW_PENDING <= 1'b0;
         MMU_DESC_SHADOW_PENDING_ADDR <= 32'h0;
         MMU_DESC_SHADOW_PENDING_WR <= 1'b0;
-        for (i = 0; i < MMU_DESC_SHADOW_LINES; i = i + 1) begin
-            MMU_DESC_SHADOW_ADDR[i] <= 32'h0;
-            MMU_DESC_SHADOW_DATA[i] <= 32'h0;
+        for (set_i = 0; set_i < MMU_DESC_SHADOW_SETS; set_i = set_i + 1) begin
+            MMU_DESC_SHADOW_V[set_i] <= '0;
+            MMU_DESC_SHADOW_REPL_PTR[set_i] <= '0;
+            for (way_i = 0; way_i < MMU_DESC_SHADOW_WAYS; way_i = way_i + 1) begin
+                MMU_DESC_SHADOW_ADDR[set_i][way_i] <= 32'h0;
+                MMU_DESC_SHADOW_DATA[set_i][way_i] <= 32'h0;
+            end
         end
     end else begin
         if (!BUS_BSY && (DATA_RD_BUS || DATA_WR) && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) begin
@@ -144,28 +148,29 @@ always_ff @(posedge CLK) begin : mmu_desc_shadow_update
             // Capture data accesses at completion using the request-latched address.
             shadow_addr = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00};
             shadow_data = MMU_DESC_SHADOW_PENDING_WR ? DATA_OUT : DATA_TO_CORE_BUSIF;
+            set_idx = mmu_desc_shadow_set_idx(shadow_addr);
 
             hit = 1'b0;
             free = 1'b0;
-            hit_idx = '0;
-            free_idx = '0;
-            for (i = 0; i < MMU_DESC_SHADOW_LINES; i = i + 1) begin
-                if (!hit && MMU_DESC_SHADOW_V[i] && MMU_DESC_SHADOW_ADDR[i] == shadow_addr) begin
+            hit_way = '0;
+            free_way = '0;
+            for (way_i = 0; way_i < MMU_DESC_SHADOW_WAYS; way_i = way_i + 1) begin
+                if (!hit && MMU_DESC_SHADOW_V[set_idx][way_i] && MMU_DESC_SHADOW_ADDR[set_idx][way_i] == shadow_addr) begin
                     hit = 1'b1;
-                    hit_idx = i[$clog2(MMU_DESC_SHADOW_LINES)-1:0];
+                    hit_way = way_i[MMU_DESC_SHADOW_WAY_BITS-1:0];
                 end
-                if (!free && !MMU_DESC_SHADOW_V[i]) begin
+                if (!free && !MMU_DESC_SHADOW_V[set_idx][way_i]) begin
                     free = 1'b1;
-                    free_idx = i[$clog2(MMU_DESC_SHADOW_LINES)-1:0];
+                    free_way = way_i[MMU_DESC_SHADOW_WAY_BITS-1:0];
                 end
             end
 
-            ins_idx = hit ? hit_idx : (free ? free_idx : MMU_DESC_SHADOW_REPL_PTR);
-            MMU_DESC_SHADOW_V[ins_idx] <= 1'b1;
-            MMU_DESC_SHADOW_ADDR[ins_idx] <= shadow_addr;
-            MMU_DESC_SHADOW_DATA[ins_idx] <= shadow_data;
+            ins_way = hit ? hit_way : (free ? free_way : MMU_DESC_SHADOW_REPL_PTR[set_idx]);
+            MMU_DESC_SHADOW_V[set_idx][ins_way] <= 1'b1;
+            MMU_DESC_SHADOW_ADDR[set_idx][ins_way] <= shadow_addr;
+            MMU_DESC_SHADOW_DATA[set_idx][ins_way] <= shadow_data;
             if (!hit && !free)
-                MMU_DESC_SHADOW_REPL_PTR <= MMU_DESC_SHADOW_REPL_PTR + 1'b1;
+                MMU_DESC_SHADOW_REPL_PTR[set_idx] <= MMU_DESC_SHADOW_REPL_PTR[set_idx] + 1'b1;
             MMU_DESC_SHADOW_PENDING <= 1'b0;
         end else if (!BUS_BSY && MMU_RUNTIME_FAULT) begin
             MMU_DESC_SHADOW_PENDING <= 1'b0;
@@ -207,7 +212,6 @@ always_comb begin : dcache_lookup
     logic [23:0] req_tag;
     logic        req_cacheable;
     DCACHE_HIT_NOW = 1'b0;
-    DCACHE_HIT_DATA_NOW = 32'h0000_0000;
     if (!BUS_BSY && DATA_RD && CACR[8] && !RMC) begin // ED=1 and not RMW read portion.
         req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
         req_line = ADR_P_PHYS[7:4];
@@ -218,11 +222,6 @@ always_comb begin : dcache_lookup
             DCACHE_TAG[req_line] == req_tag &&
             DCACHE_VALID[req_line][req_entry]) begin
             DCACHE_HIT_NOW = 1'b1;
-            DCACHE_HIT_DATA_NOW = dcache_read_extract(
-                DCACHE_DATA[req_line][req_entry],
-                OP_SIZE_BUS,
-                ADR_P_PHYS[1:0]
-            );
         end
     end
 end

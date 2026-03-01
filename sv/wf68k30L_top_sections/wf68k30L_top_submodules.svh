@@ -2,6 +2,36 @@
 // Submodule instantiations
 // ========================================================================
 
+    // Instruction-cache data store (16 lines * 8 words, 16-bit words).
+    WF68K30L_SYNC_RAM_1R1W #(
+        .WIDTH(16),
+        .DEPTH(128),
+        .ADDR_BITS(7)
+    ) I_ICACHE_DATA_RAM (
+        .CLK    (CLK),
+        .RD_EN  (ICACHE_RAM_RD_EN),
+        .RD_ADDR(ICACHE_RAM_RD_ADDR),
+        .RD_DATA(ICACHE_RAM_RD_DATA),
+        .WR_EN  (ICACHE_RAM_WR_EN),
+        .WR_ADDR(ICACHE_RAM_WR_ADDR),
+        .WR_DATA(ICACHE_RAM_WR_DATA)
+    );
+
+    // Data-cache data store (16 lines * 4 entries, 32-bit words).
+    WF68K30L_SYNC_RAM_1R1W #(
+        .WIDTH(32),
+        .DEPTH(64),
+        .ADDR_BITS(6)
+    ) I_DCACHE_DATA_RAM (
+        .CLK    (CLK),
+        .RD_EN  (DCACHE_RAM_RD_EN),
+        .RD_ADDR(DCACHE_RAM_RD_ADDR),
+        .RD_DATA(DCACHE_RAM_RD_DATA),
+        .WR_EN  (DCACHE_RAM_WR_EN),
+        .WR_ADDR(DCACHE_RAM_WR_ADDR),
+        .WR_DATA(DCACHE_RAM_WR_DATA)
+    );
+
     // Architectural state: address registers and effective-address helper path.
     WF68K30L_ADDRESS_REGISTERS I_ADDRESSREGISTERS (
         .CLK                    (CLK),
