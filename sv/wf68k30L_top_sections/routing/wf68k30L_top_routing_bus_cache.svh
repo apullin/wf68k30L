@@ -17,6 +17,7 @@ always_comb begin : burst_prefetch_select
     BURST_PREFETCH_DATA_ENTRY = 2'b00;
     BURST_PREFETCH_ADDR = 32'h0000_0000;
     BURST_PREFETCH_FC = FC_USER_PROG;
+    scan_idx = 0;
     icache_found = 1'b0;
     icache_scan_word = ICACHE_BURST_FILL_NEXT_WORD;
     dcache_found = 1'b0;
@@ -190,6 +191,10 @@ always_comb begin : icache_lookup
     logic [23:0] req_tag;
     logic        req_cacheable;
     ICACHE_HIT_NOW = 1'b0;
+    req_line = 4'h0;
+    req_word = 3'h0;
+    req_tag = 24'h0;
+    req_cacheable = 1'b0;
     if (!BUS_BSY && OPCODE_REQ_CORE && CACR[0]) begin // EI=1
         req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
         req_line = ADR_P_PHYS[7:4];
@@ -212,6 +217,10 @@ always_comb begin : dcache_lookup
     logic [23:0] req_tag;
     logic        req_cacheable;
     DCACHE_HIT_NOW = 1'b0;
+    req_line = 4'h0;
+    req_entry = 2'h0;
+    req_tag = 24'h0;
+    req_cacheable = 1'b0;
     if (!BUS_BSY && DATA_RD && CACR[8] && !RMC) begin // ED=1 and not RMW read portion.
         req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
         req_line = ADR_P_PHYS[7:4];

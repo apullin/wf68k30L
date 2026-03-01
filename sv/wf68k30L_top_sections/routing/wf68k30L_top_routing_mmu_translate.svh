@@ -65,6 +65,7 @@ always_comb begin : mmu_address_translate
     atc_hit = 1'b0;
     atc_fault = 1'b0;
     atc_phys = ADR_P;
+    walk_eval = 36'h0;
     atc_ptag = 32'h0;
     atc_b = 1'b0;
     atc_w = 1'b0;
