@@ -37,7 +37,9 @@ always_comb begin : mmu_address_translate
     read_access = OPCODE_RD || DATA_RD;
     write_access = DATA_WR;
     rmw_access = RMC;
-    mmu_req_now = !BUS_BSY && (DATA_WR || DATA_RD_BUS || OPCODE_REQ_CORE_MISS);
+    // Qualify MMU runtime activity from core-side access intent to avoid
+    // combinational feedback through cache-hit/miss qualification nets.
+    mmu_req_now = !BUS_BSY && (DATA_WR || DATA_RD || OPCODE_RD);
 
     root_ptr = (MMU_TC[25] && FC_I[2]) ? MMU_SRP : MMU_CRP; // SRE + supervisor access.
     root_offs = {root_ptr[31:4], 4'b0000}; // DT=1 constant offset.

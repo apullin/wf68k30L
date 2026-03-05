@@ -71,7 +71,7 @@ always_comb begin : cbreq_generation
 
     // Data burst-request candidate: D-cache read miss fill on aligned longword access.
     if (!BUS_BSY && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && DATA_RD_BUS && CACR[8] && CACR[12] && !CACR[9] && !RMC &&
-        OP_SIZE_BUS == LONG && ADR_P_PHYS[1:0] == 2'b00) begin
+        OP_SIZE == LONG && ADR_P_PHYS[1:0] == 2'b00) begin
         CBREQ_DATA_REQ_NOW = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1) &&
                              !dcache_same_burst_line;
     end

@@ -23,7 +23,7 @@ always_comb begin : burst_prefetch_select
     dcache_found = 1'b0;
     dcache_scan_entry = DCACHE_BURST_FILL_NEXT_ENTRY;
 
-    if (!BUS_BSY && !DATA_WR && !DATA_RD_BUS && !OPCODE_REQ_CORE_MISS && !BUSY_EXH) begin
+    if (!BUS_BSY && !DATA_WR && !DATA_RD && !OPCODE_RD && !BUSY_EXH) begin
         if (ICACHE_BURST_FILL_VALID && ICACHE_BURST_FILL_PENDING != 8'h00) begin
             for (scan_idx = 0; scan_idx < 8; scan_idx = scan_idx + 1) begin
                 if (!icache_found) begin
@@ -227,7 +227,7 @@ always_comb begin : dcache_lookup
         req_entry = ADR_P_PHYS[3:2];
         req_tag = ADR_P_PHYS[31:8];
         if (req_cacheable &&
-            dcache_access_supported(OP_SIZE_BUS, ADR_P_PHYS[1:0]) &&
+            dcache_access_supported(OP_SIZE, ADR_P_PHYS[1:0]) &&
             DCACHE_TAG[req_line] == req_tag &&
             DCACHE_VALID[req_line][req_entry]) begin
             DCACHE_HIT_NOW = 1'b1;

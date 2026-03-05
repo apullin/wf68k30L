@@ -17,7 +17,6 @@ localparam int DCACHE_LINES = 16;
 // Cache arrays, fill tracking, and MOVEC(CACR/CAAR) semantics.
 always_ff @(posedge CLK) begin : cache_registers
     integer i;
-    integer j;
     logic [31:0] cacr_write_value;
     logic [3:0]  caar_line;
     logic [1:0]  caar_entry;
@@ -31,13 +30,18 @@ always_ff @(posedge CLK) begin : cache_registers
     logic [7:0]  icache_burst_pending_after;
     logic [3:0]  dcache_valid_after;
     logic [3:0]  dcache_burst_pending_after;
-    logic [31:0] dcache_merged_word;
     logic        dcache_hit;
     if (RESET_CPU) begin
         CACR <= 32'h0;
         CAAR <= 32'h0;
         ICACHE_RDY <= 1'b0;
         ICACHE_OPCODE_WORD <= 16'h0000;
+        ICACHE_HIT_PENDING <= 1'b0;
+        ICACHE_RAM_RD_EN <= 1'b0;
+        ICACHE_RAM_RD_ADDR <= 7'h00;
+        ICACHE_RAM_WR_EN <= 1'b0;
+        ICACHE_RAM_WR_ADDR <= 7'h00;
+        ICACHE_RAM_WR_DATA <= 16'h0000;
         ICACHE_FILL_PENDING <= 1'b0;
         ICACHE_FILL_ADDR <= 32'h0;
         ICACHE_FILL_CACHEABLE <= 1'b0;
@@ -56,7 +60,13 @@ always_ff @(posedge CLK) begin : cache_registers
         DATA_TO_CORE_CACHE <= 32'h0;
         DATA_LAST_FROM_CACHE <= 1'b0;
         DCACHE_HIT_PENDING <= 1'b0;
-        DCACHE_HIT_DATA_PENDING <= 32'h0;
+        DCACHE_HIT_SIZE_PENDING <= LONG;
+        DCACHE_HIT_ADDR10_PENDING <= 2'b00;
+        DCACHE_RAM_RD_EN <= 1'b0;
+        DCACHE_RAM_RD_ADDR <= 6'h00;
+        DCACHE_RAM_WR_EN <= 1'b0;
+        DCACHE_RAM_WR_ADDR <= 6'h00;
+        DCACHE_RAM_WR_DATA <= 32'h0000_0000;
         DCACHE_READ_FILL_PENDING <= 1'b0;
         DCACHE_READ_FILL_ADDR <= 32'h0;
         DCACHE_READ_FILL_SIZE <= LONG;
@@ -79,17 +89,17 @@ always_ff @(posedge CLK) begin : cache_registers
         for (i = 0; i < ICACHE_LINES; i = i + 1) begin
             ICACHE_TAG[i] <= 24'h0;
             ICACHE_VALID[i] <= 8'h00;
-            for (j = 0; j < 8; j = j + 1)
-                ICACHE_DATA[i][j] <= 16'h0000;
         end
         for (i = 0; i < DCACHE_LINES; i = i + 1) begin
             DCACHE_TAG[i] <= 24'h0;
             DCACHE_VALID[i] <= 4'h0;
-            for (j = 0; j < 4; j = j + 1)
-                DCACHE_DATA[i][j] <= 32'h0000_0000;
         end
     end else begin
         ICACHE_RDY <= 1'b0;
+        ICACHE_RAM_RD_EN <= 1'b0;
+        ICACHE_RAM_WR_EN <= 1'b0;
+        DCACHE_RAM_RD_EN <= 1'b0;
+        DCACHE_RAM_WR_EN <= 1'b0;
         DATA_RDY_CACHE <= 1'b0;
         DATA_VALID_CACHE <= 1'b0;
 
@@ -99,26 +109,34 @@ always_ff @(posedge CLK) begin : cache_registers
         else if (DATA_RDY_BUSIF_CORE)
             DATA_LAST_FROM_CACHE <= 1'b0;
 
-        // Serve opcode requests directly from the instruction-cache model.
-        if (!BUS_BSY && OPCODE_REQ_CORE && ICACHE_HIT_NOW) begin
-            ICACHE_OPCODE_WORD <= ICACHE_DATA[ADR_P_PHYS[7:4]][ADR_P_PHYS[3:1]];
+        // Serve opcode requests from synchronous I-cache RAM with one-cycle latency.
+        if (ICACHE_HIT_PENDING) begin
+            ICACHE_OPCODE_WORD <= ICACHE_RAM_RD_DATA;
             ICACHE_RDY <= 1'b1;
+            ICACHE_HIT_PENDING <= 1'b0;
+        end else if (!BUS_BSY && OPCODE_REQ_CORE && ICACHE_HIT_NOW) begin
+            ICACHE_RAM_RD_EN <= 1'b1;
+            ICACHE_RAM_RD_ADDR <= {ADR_P_PHYS[7:4], ADR_P_PHYS[3:1]};
+            ICACHE_HIT_PENDING <= 1'b1;
         end
 
         // Serve data-cache hits with one-cycle latency to match core handshake timing.
         if (DCACHE_HIT_PENDING) begin
-            DATA_TO_CORE_CACHE <= DCACHE_HIT_DATA_PENDING;
+            DATA_TO_CORE_CACHE <= dcache_read_extract(
+                DCACHE_RAM_RD_DATA,
+                DCACHE_HIT_SIZE_PENDING,
+                DCACHE_HIT_ADDR10_PENDING
+            );
             DATA_RDY_CACHE <= 1'b1;
             DATA_VALID_CACHE <= 1'b1;
             DCACHE_HIT_PENDING <= 1'b0;
         end else if (!BUS_BSY && DATA_RD && DCACHE_HIT_NOW && !DATA_RDY_BUSIF_CORE) begin
             dcache_line = ADR_P_PHYS[7:4];
             dcache_entry = ADR_P_PHYS[3:2];
-            DCACHE_HIT_DATA_PENDING <= dcache_read_extract(
-                DCACHE_DATA[dcache_line][dcache_entry],
-                OP_SIZE_BUS,
-                ADR_P_PHYS[1:0]
-            );
+            DCACHE_RAM_RD_EN <= 1'b1;
+            DCACHE_RAM_RD_ADDR <= {dcache_line, dcache_entry};
+            DCACHE_HIT_SIZE_PENDING <= OP_SIZE_BUS;
+            DCACHE_HIT_ADDR10_PENDING <= ADR_P_PHYS[1:0];
             DCACHE_HIT_PENDING <= 1'b1;
         end
 
@@ -165,7 +183,9 @@ always_ff @(posedge CLK) begin : cache_registers
             if (ICACHE_TAG[fill_line] != fill_tag)
                 ICACHE_VALID[fill_line] <= 8'h00;
             ICACHE_TAG[fill_line] <= fill_tag;
-            ICACHE_DATA[fill_line][fill_word] <= OPCODE_TO_CORE_BUSIF;
+            ICACHE_RAM_WR_EN <= 1'b1;
+            ICACHE_RAM_WR_ADDR <= {fill_line, fill_word};
+            ICACHE_RAM_WR_DATA <= OPCODE_TO_CORE_BUSIF;
             ICACHE_VALID[fill_line][fill_word] <= 1'b1;
 
             icache_valid_after = (ICACHE_TAG[fill_line] == fill_tag) ?
@@ -223,7 +243,9 @@ always_ff @(posedge CLK) begin : cache_registers
             if (DCACHE_TAG[dcache_line] != dcache_tag)
                 DCACHE_VALID[dcache_line] <= 4'h0;
             DCACHE_TAG[dcache_line] <= dcache_tag;
-            DCACHE_DATA[dcache_line][dcache_entry] <= DATA_TO_CORE_BUSIF;
+            DCACHE_RAM_WR_EN <= 1'b1;
+            DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
+            DCACHE_RAM_WR_DATA <= DATA_TO_CORE_BUSIF;
             DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
 
             dcache_valid_after = (DCACHE_TAG[dcache_line] == dcache_tag) ?
@@ -272,20 +294,23 @@ always_ff @(posedge CLK) begin : cache_registers
             dcache_entry = DCACHE_WRITE_ADDR[3:2];
             dcache_tag = DCACHE_WRITE_ADDR[31:8];
             dcache_hit = (DCACHE_TAG[dcache_line] == dcache_tag) && DCACHE_VALID[dcache_line][dcache_entry];
-            dcache_merged_word = dcache_write_merge(
-                DCACHE_DATA[dcache_line][dcache_entry],
-                DCACHE_WRITE_DATA,
-                DCACHE_WRITE_SIZE,
-                DCACHE_WRITE_ADDR[1:0]
-            );
             if (dcache_hit) begin
-                DCACHE_DATA[dcache_line][dcache_entry] <= dcache_merged_word;
-                DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
+                if (DCACHE_WRITE_SIZE == LONG && DCACHE_WRITE_ADDR[1:0] == 2'b00) begin
+                    DCACHE_RAM_WR_EN <= 1'b1;
+                    DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
+                    DCACHE_RAM_WR_DATA <= DCACHE_WRITE_DATA;
+                    DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
+                end else begin
+                    // Partial writes invalidate the cached long word to preserve coherency.
+                    DCACHE_VALID[dcache_line][dcache_entry] <= 1'b0;
+                end
             end else if (CACR[13] && !CACR[9] && DCACHE_WRITE_SIZE == LONG && DCACHE_WRITE_ADDR[1:0] == 2'b00) begin
                 if (DCACHE_TAG[dcache_line] != dcache_tag)
                     DCACHE_VALID[dcache_line] <= 4'h0;
                 DCACHE_TAG[dcache_line] <= dcache_tag;
-                DCACHE_DATA[dcache_line][dcache_entry] <= DCACHE_WRITE_DATA;
+                DCACHE_RAM_WR_EN <= 1'b1;
+                DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
+                DCACHE_RAM_WR_DATA <= DCACHE_WRITE_DATA;
                 DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
             end
         end
@@ -317,6 +342,7 @@ always_ff @(posedge CLK) begin : cache_registers
             if (cacr_write_value[3]) begin // CI
                 for (i = 0; i < ICACHE_LINES; i = i + 1)
                     ICACHE_VALID[i] <= 8'h00;
+                ICACHE_HIT_PENDING <= 1'b0;
                 ICACHE_BURST_TRACK_VALID <= 1'b0;
                 ICACHE_BURST_FILL_VALID <= 1'b0;
                 ICACHE_BURST_FILL_PENDING <= 8'h00;
@@ -325,6 +351,7 @@ always_ff @(posedge CLK) begin : cache_registers
             if (cacr_write_value[2]) begin // CEI
                 ICACHE_VALID[caar_line][{caar_entry, 1'b0}] <= 1'b0;
                 ICACHE_VALID[caar_line][{caar_entry, 1'b1}] <= 1'b0;
+                ICACHE_HIT_PENDING <= 1'b0;
                 ICACHE_BURST_TRACK_VALID <= 1'b0;
                 ICACHE_BURST_FILL_VALID <= 1'b0;
                 ICACHE_BURST_FILL_PENDING <= 8'h00;

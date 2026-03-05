@@ -118,8 +118,8 @@ logic [2:0]  MMU_ATC_FC [0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [31:0] MMU_ATC_TAG[0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [31:0] MMU_ATC_PTAG[0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [MMU_ATC_WAY_BITS-1:0] MMU_ATC_REPL_PTR [0:MMU_ATC_SETS-1];
-localparam int MMU_DESC_SHADOW_LINES = 256;
-// Descriptor-shadow store: 2-way set associative (256 total lines) to balance
+localparam int MMU_DESC_SHADOW_LINES = 64;
+// Descriptor-shadow store: 2-way set associative (64 total lines) to balance
 // conflict tolerance with synthesis fanout.
 localparam int MMU_DESC_SHADOW_WAYS = 2;
 localparam int MMU_DESC_SHADOW_SETS = MMU_DESC_SHADOW_LINES / MMU_DESC_SHADOW_WAYS;
@@ -413,10 +413,8 @@ logic [6:0]  ICACHE_RAM_WR_ADDR;
 logic [15:0] ICACHE_RAM_WR_DATA;
 logic [23:0] ICACHE_TAG [0:15];
 logic [7:0]  ICACHE_VALID [0:15];
-logic [15:0] ICACHE_DATA [0:15][0:7];
 logic        DCACHE_HIT_NOW;
 logic        DCACHE_HIT_PENDING;
-logic [31:0] DCACHE_HIT_DATA_PENDING;
 OP_SIZETYPE  DCACHE_HIT_SIZE_PENDING;
 logic [1:0]  DCACHE_HIT_ADDR10_PENDING;
 logic        DCACHE_RAM_RD_EN;
@@ -427,7 +425,6 @@ logic [5:0]  DCACHE_RAM_WR_ADDR;
 logic [31:0] DCACHE_RAM_WR_DATA;
 logic [23:0] DCACHE_TAG [0:15];
 logic [3:0]  DCACHE_VALID [0:15];
-logic [31:0] DCACHE_DATA [0:15][0:3];
 logic        DCACHE_READ_FILL_PENDING;
 logic [31:0] DCACHE_READ_FILL_ADDR;
 OP_SIZETYPE  DCACHE_READ_FILL_SIZE;
