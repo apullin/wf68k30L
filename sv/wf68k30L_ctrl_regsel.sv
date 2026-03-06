@@ -90,6 +90,16 @@ localparam logic [2:0]
     WRITEBACK      = 3'd3,
     WRITE_DEST     = 3'd4;
 
+logic        IS_MOVEM;
+logic        IS_PACK_UNPK;
+logic [2:0]  MOVEM_RD_SEL;
+logic        PACK_UNPK_DST_ADDR_RDY;
+
+assign IS_MOVEM = (OP == MOVEM);
+assign IS_PACK_UNPK = (OP == PACK || OP == UNPK);
+assign MOVEM_RD_SEL = MOVEM_PNTR[2:0];
+assign PACK_UNPK_DST_ADDR_RDY = !BIW_0[3] && !DR_IN_USE;
+
 // Internal signals
 logic AR_DEC_I;
 logic AR_WR_I;
@@ -117,9 +127,9 @@ assign AR_SEL_RD_1 = ((OP == ABCD || OP == SBCD) && FETCH_STATE == START_OP) ? B
                      (OP == MOVE && FETCH_STATE == INIT_EXEC_WB && BIW_0[8:6] != 3'b000) ? BIW_0[11:9] :
                      (OP == MOVEC && BIW_0[0]) ? BIW_1[14:12] : // MOVEC: general register to control register.
                      (OP == BSR || OP == MOVEC) ? 3'b111 : // Stack pointers.
-                     ((OP == PACK || OP == UNPK) && FETCH_STATE == START_OP && !BIW_0[3] && !DR_IN_USE) ? BIW_0[11:9] : // Destination address.
-                     ((OP == PACK || OP == UNPK) && FETCH_STATE == FETCH_OPERAND && RD_RDY) ? BIW_0[11:9] : // Destination address.
-                     ((OP == PACK || OP == UNPK) && FETCH_STATE == INIT_EXEC_WB) ? BIW_0[11:9] : // Destination address.
+                     (IS_PACK_UNPK && FETCH_STATE == START_OP && PACK_UNPK_DST_ADDR_RDY) ? BIW_0[11:9] : // Destination address.
+                     (IS_PACK_UNPK && FETCH_STATE == FETCH_OPERAND && RD_RDY) ? BIW_0[11:9] : // Destination address.
+                     (IS_PACK_UNPK && FETCH_STATE == INIT_EXEC_WB) ? BIW_0[11:9] : // Destination address.
                      (OP == CAS2 && FETCH_STATE == START_OP) ? BIW_1[14:12] : // Address operand.
                      (OP == CAS2 && FETCH_STATE == FETCH_OPERAND && !PHASE2) ? BIW_1[14:12] : // Address operand.
                      (OP == CAS2 && FETCH_STATE == CALC_AEFF) ? BIW_2[14:12] : // Address operand.
@@ -149,7 +159,7 @@ assign AR_SEL_WR_1 = (OP == ADDQ || OP == SUBQ) ? BIW_0[2:0] :
                      (OP == MOVEC || OP == MOVES) ? BIW_1[14:12] :
                      (OP == UNLK && FETCH_STATE == START_OP) ? 3'b111 :
                      (OP == LINK) ? BIW_0[2:0] :
-                     (OP == MOVEM) ? MOVEM_PNTR[2:0] :
+                     IS_MOVEM ? MOVEM_RD_SEL :
                      (OP == MOVE_USP) ? BIW_0[2:0] :
                      BIW_0[11:9]; // ADDA, EXG, LEA, MOVE, MOVEA, SUBA.
 
@@ -169,7 +179,7 @@ assign AR_WR_I = (OP == LINK && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) ? 1'b1 
                  (OP_WB_I == MOVEM && MOVEM_ADn_WB) ? 1'b1 : 1'b0;
 
 assign AR_SEL_RD_2 = (OP == CHK2 || OP == CMP2) ? BIW_1[14:12] :
-                     (OP == MOVEM) ? MOVEM_PNTR[2:0] : // This is the non addressing output.
+                     IS_MOVEM ? MOVEM_RD_SEL : // This is the non addressing output.
                      (OP == MOVES) ? BIW_1[14:12] :
                      (OP == ADDQ || OP == MOVE || OP == SUBQ || OP == TST) ? BIW_0[2:0] :
                      (OP == EXG && BIW_0[7:3] == 5'b10001) ? BIW_0[2:0] : // Data and address register.
@@ -252,7 +262,7 @@ assign DR_SEL_RD_1 = (FETCH_STATE == FETCH_EXWORD_1) ? EXT_WORD[14:12] : // Inde
                      (OP == CAS2 && !PHASE2) ? BIW_1[2:0] : // Compare operand.
                      (OP == CAS2) ? BIW_2[2:0] : // Compare operand.
                      ((OP == DIVS || OP == DIVU) && FETCH_STATE != INIT_EXEC_WB && BIW_0[8:6] == 3'b001) ? BIW_1[2:0] : // LONG 64.
-                     (OP == MOVEM) ? MOVEM_PNTR[2:0] :
+                     IS_MOVEM ? MOVEM_RD_SEL :
                      (OP == MOVEP) ? BIW_0[11:9] :
                      (OP == MOVEC || OP == MOVES) ? BIW_1[14:12] :
                      (OP == ADD || OP == AND_B || OP == OR_B || OP == SUB) ? BIW_0[2:0] :

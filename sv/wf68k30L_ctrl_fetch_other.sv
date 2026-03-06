@@ -93,60 +93,72 @@ localparam logic [2:0]
     WRITEBACK      = 3'd3,
     WRITE_DEST     = 3'd4;
 
+logic EW_SEEN;
+logic NO_AR_HAZARD;
+logic NO_DR_HAZARD;
+logic EXWORD_SRC_READY;
+logic MOVE_PHASE2_EXWORD_READY;
+
+assign EW_SEEN = EW_ACK || EW_RDY;
+assign NO_AR_HAZARD = !AR_IN_USE;
+assign NO_DR_HAZARD = !DR_IN_USE;
+assign EXWORD_SRC_READY = NO_AR_HAZARD && (BIW_1[15] || NO_DR_HAZARD);
+assign MOVE_PHASE2_EXWORD_READY = (OP == MOVE) && PHASE2 && EXWORD_SRC_READY;
+
 always_comb begin : other_states_dec
     case (FETCH_STATE)
         FETCH_DISPL: begin
             case (OP)
                 ADD, CMP, SUB, AND_B, EOR, OR_B: begin
-                    if ((EW_ACK || EW_RDY) && !AR_IN_USE) begin // ADH.
+                    if (EW_SEEN && NO_AR_HAZARD) begin // ADH.
                         NEXT_FETCH_STATE = CALC_AEFF;
                     end else begin
                         NEXT_FETCH_STATE = FETCH_DISPL;
                     end
                 end
                 ADDA, BCHG, BCLR, BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFINS, BFSET, BFTST, BSET, BTST, CHK, CHK2, CMP2, CMPA, DIVS, DIVU, MULS, MULU, MOVE, MOVEA, MOVE_TO_CCR, MOVE_TO_SR, SUBA: begin
-                    if ((EW_ACK || EW_RDY) && OP == MOVE && PHASE2 && !AR_IN_USE) begin // ADH.
+                    if (EW_SEEN && OP == MOVE && PHASE2 && NO_AR_HAZARD) begin // ADH.
                         NEXT_FETCH_STATE = INIT_EXEC_WB;
-                    end else if ((EW_ACK || EW_RDY) && !AR_IN_USE) begin // ADH.
+                    end else if (EW_SEEN && NO_AR_HAZARD) begin // ADH.
                         NEXT_FETCH_STATE = CALC_AEFF;
                     end else begin
                         NEXT_FETCH_STATE = FETCH_DISPL;
                     end
                 end
                 ADDI, ADDQ, ANDI, CAS, CMPI, EORI, NBCD, NEG, NEGX, NOT_B, ORI, SUBI, SUBQ, TST, TAS, ASL, ASR, LSL, LSR, ROTL, ROTR, ROXL, ROXR: begin
-                    if ((EW_ACK || EW_RDY) && !AR_IN_USE) begin // ADH.
+                    if (EW_SEEN && NO_AR_HAZARD) begin // ADH.
                         NEXT_FETCH_STATE = CALC_AEFF;
                     end else begin
                         NEXT_FETCH_STATE = FETCH_DISPL;
                     end
                 end
                 MOVES: begin
-                    if ((EW_ACK || EW_RDY) && !AR_IN_USE && !BIW_1[11]) begin
+                    if (EW_SEEN && NO_AR_HAZARD && !BIW_1[11]) begin
                         NEXT_FETCH_STATE = CALC_AEFF;
-                    end else if ((EW_ACK || EW_RDY) && !AR_IN_USE) begin
+                    end else if (EW_SEEN && NO_AR_HAZARD) begin
                         NEXT_FETCH_STATE = INIT_EXEC_WB;
                     end else begin
                         NEXT_FETCH_STATE = FETCH_DISPL;
                     end
                 end
                 PMOVE: begin
-                    if ((EW_ACK || EW_RDY) && !BIW_1[9] && !AR_IN_USE) begin
+                    if (EW_SEEN && !BIW_1[9] && NO_AR_HAZARD) begin
                         NEXT_FETCH_STATE = CALC_AEFF;   // <ea> -> MR
-                    end else if ((EW_ACK || EW_RDY) && BIW_1[9] && !AR_IN_USE) begin
+                    end else if (EW_SEEN && BIW_1[9] && NO_AR_HAZARD) begin
                         NEXT_FETCH_STATE = INIT_EXEC_WB; // MR -> <ea>
                     end else begin
                         NEXT_FETCH_STATE = FETCH_DISPL;
                     end
                 end
                 LEA, PEA: begin
-                    if ((EW_ACK || EW_RDY) && !AR_IN_USE) begin // ADH.
+                    if (EW_SEEN && NO_AR_HAZARD) begin // ADH.
                         NEXT_FETCH_STATE = SWITCH_STATE;
                     end else begin
                         NEXT_FETCH_STATE = FETCH_DISPL;
                     end
                 end
                 default: begin // CLR, JMP, JSR, MOVE_FROM_CCR, MOVE_FROM_SR, MOVEM, Scc.
-                    if ((EW_ACK || EW_RDY) && !AR_IN_USE) begin // ADH.
+                    if (EW_SEEN && NO_AR_HAZARD) begin // ADH.
                         NEXT_FETCH_STATE = INIT_EXEC_WB;
                     end else begin
                         NEXT_FETCH_STATE = FETCH_DISPL;
@@ -169,28 +181,28 @@ always_comb begin : other_states_dec
                 NEXT_FETCH_STATE = FETCH_OD_LO; // Word outer displacement.
             end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[1:0] == 2'b01) begin
                 NEXT_FETCH_STATE = FETCH_MEMADR; // Null outer displacement, go to intermediate address.
-            end else if (EW_ACK || EW_RDY) begin // Null displacement, no outer displacement.
+            end else if (EW_SEEN) begin // Null displacement, no outer displacement.
                 case (OP)
                     ADD, CMP, SUB, AND_B, EOR, OR_B: begin
-                        if ((!BIW_1[15] && !AR_IN_USE && !DR_IN_USE) || (BIW_1[15] && !AR_IN_USE)) begin // ADH.
+                        if (EXWORD_SRC_READY) begin // ADH.
                             NEXT_FETCH_STATE = CALC_AEFF;
                         end else begin
                             NEXT_FETCH_STATE = FETCH_EXWORD_1;
                         end
                     end
                     ADDA, BCHG, BCLR, BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFINS, BFSET, BFTST, BSET, BTST, CHK, CHK2, CMP2, CMPA, DIVS, DIVU, MULS, MULU, MOVE, MOVEA, MOVE_TO_CCR, MOVE_TO_SR, SUBA: begin
-                        if (OP == MOVE && PHASE2 && !BIW_1[15] && !AR_IN_USE && !DR_IN_USE) begin // ADH.
+                        if (MOVE_PHASE2_EXWORD_READY && !BIW_1[15]) begin // ADH.
                             NEXT_FETCH_STATE = INIT_EXEC_WB;
-                        end else if (OP == MOVE && PHASE2 && BIW_1[15] && !AR_IN_USE) begin // ADH.
+                        end else if (MOVE_PHASE2_EXWORD_READY) begin // ADH.
                             NEXT_FETCH_STATE = INIT_EXEC_WB;
-                        end else if ((!BIW_1[15] && !AR_IN_USE && !DR_IN_USE) || (BIW_1[15] && !AR_IN_USE)) begin // ADH.
+                        end else if (EXWORD_SRC_READY) begin // ADH.
                             NEXT_FETCH_STATE = CALC_AEFF;
                         end else begin
                             NEXT_FETCH_STATE = FETCH_EXWORD_1;
                         end
                     end
                     MOVES: begin
-                        if ((!BIW_1[15] && !AR_IN_USE && !DR_IN_USE) || (BIW_1[15] && !AR_IN_USE)) begin // ADH.
+                        if (EXWORD_SRC_READY) begin // ADH.
                             if (!BIW_1[11]) begin
                                 NEXT_FETCH_STATE = CALC_AEFF;
                             end else begin
@@ -201,7 +213,7 @@ always_comb begin : other_states_dec
                         end
                     end
                     PMOVE: begin
-                        if ((!BIW_1[15] && !AR_IN_USE && !DR_IN_USE) || (BIW_1[15] && !AR_IN_USE)) begin
+                        if (EXWORD_SRC_READY) begin
                             if (!BIW_1[9]) begin
                                 NEXT_FETCH_STATE = CALC_AEFF;   // <ea> -> MR
                             end else begin
@@ -212,7 +224,7 @@ always_comb begin : other_states_dec
                         end
                     end
                     ADDI, ADDQ, ANDI, CAS, CMPI, EORI, NBCD, NEG, NEGX, NOT_B, ORI, SUBI, SUBQ, TST, TAS, ASL, ASR, LSL, LSR, ROTL, ROTR, ROXL, ROXR: begin
-                        if ((!BIW_1[15] && !AR_IN_USE && !DR_IN_USE) || (BIW_1[15] && !AR_IN_USE)) begin // ADH.
+                        if (EXWORD_SRC_READY) begin // ADH.
                             NEXT_FETCH_STATE = CALC_AEFF;
                         end else begin
                             NEXT_FETCH_STATE = FETCH_EXWORD_1;

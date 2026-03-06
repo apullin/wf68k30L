@@ -242,30 +242,33 @@ end
 // MOVEM_COMB process (combinational)
 always_comb begin
     logic [3:0] INDEX;
-    // This signal determines whether to handle address or data registers.
-    if (ADR_MODE_I == 3'b100) begin // -(An).
-        MOVEM_ADn_I = ~MOVEM_PVAR_S[3];
-        MOVEM_ADn = ~MOVEM_PVAR_S[3];
-    end else begin
-        MOVEM_ADn_I = MOVEM_PVAR_S[3];
-        MOVEM_ADn = MOVEM_PVAR_S[3];
-    end
-
     INDEX = MOVEM_PVAR_S;
 
-    // The following signal determines if a register is affected or not, depending
-    // on the status of the register list bit.
-    if (OP == MOVEM && BIW_1[INDEX]) begin
-        MOVEM_COND = 1'b1;
-    end else begin
+    if (OP != MOVEM) begin
+        MOVEM_ADn_I = 1'b0;
+        MOVEM_ADn = 1'b0;
         MOVEM_COND = 1'b0;
-    end
-
-    // This signal determines whether to handle address or data registers.
-    if (ADR_MODE_I == 3'b100) begin // -(An).
-        MOVEM_PNTR = ~MOVEM_PVAR_S; // Count down.
+        MOVEM_PNTR = 4'h0;
     end else begin
-        MOVEM_PNTR = MOVEM_PVAR_S;
+        // This signal determines whether to handle address or data registers.
+        if (ADR_MODE_I == 3'b100) begin // -(An).
+            MOVEM_ADn_I = ~MOVEM_PVAR_S[3];
+            MOVEM_ADn = ~MOVEM_PVAR_S[3];
+        end else begin
+            MOVEM_ADn_I = MOVEM_PVAR_S[3];
+            MOVEM_ADn = MOVEM_PVAR_S[3];
+        end
+
+        // The following signal determines if a register is affected or not, depending
+        // on the status of the register list bit.
+        MOVEM_COND = BIW_1[INDEX];
+
+        // This signal determines whether to handle address or data registers.
+        if (ADR_MODE_I == 3'b100) begin // -(An).
+            MOVEM_PNTR = ~MOVEM_PVAR_S; // Count down.
+        end else begin
+            MOVEM_PNTR = MOVEM_PVAR_S;
+        end
     end
 end
 
