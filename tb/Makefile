@@ -29,6 +29,7 @@ VERILOG_SOURCES = \
     $(SV_DIR)/wf68k30L_sync_ram_1r1w.sv \
     $(SV_DIR)/wf68k30L_divider.sv \
     $(SV_DIR)/wf68k30L_control.sv \
+    $(SV_DIR)/wf68k30L_cpu_wrapper.sv \
     $(SV_DIR)/wf68k30L_ctrl_comb.sv \
     $(SV_DIR)/wf68k30L_ctrl_exec_dec.sv \
     $(SV_DIR)/wf68k30L_ctrl_fetch_dec.sv \
