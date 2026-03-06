@@ -122,21 +122,22 @@ function automatic logic [31:0] mmu_index_extract(
     input logic [5:0]  consumed_bits,
     input logic [3:0]  width
 );
-    logic [31:0] idx;
-    logic [5:0] bitpos;
-    integer j;
+    logic [5:0]  start_bit;
+    logic [31:0] bit_stream;
+    logic [31:0] width_mask;
 begin
-    idx = 32'h0;
-    for (j = 0; j < 16; j = j + 1) begin
-        if (j < width) begin
-            bitpos = {2'b00, initial_shift} + consumed_bits + j[5:0];
-            if (bitpos < 6'd32)
-                idx = {idx[30:0], logical_addr[31 - bitpos]};
-            else
-                idx = {idx[30:0], 1'b0};
-        end
+    start_bit = {2'b00, initial_shift} + consumed_bits;
+    if (start_bit >= 6'd32)
+        bit_stream = 32'h0000_0000;
+    else
+        bit_stream = logical_addr << start_bit;
+
+    if (width == 4'h0) begin
+        mmu_index_extract = 32'h0000_0000;
+    end else begin
+        width_mask = (32'h1 << width) - 32'h1;
+        mmu_index_extract = (bit_stream >> (6'd32 - {2'b00, width})) & width_mask;
     end
-    mmu_index_extract = idx;
 end
 endfunction
 
@@ -208,6 +209,10 @@ function automatic logic [35:0] mmu_atc_lookup(
     logic        w;
     logic        m;
     logic [31:0] ptag;
+    logic [2:0]  atc_way_fc;
+    logic [31:0] atc_way_tag;
+    logic [31:0] atc_way_ptag;
+    integer atc_way_idx;
     integer way;
 begin
     set_idx = mmu_atc_set_idx(fc, tag);
@@ -218,15 +223,19 @@ begin
     ptag = 32'h0;
 
     for (way = 0; way < MMU_ATC_WAYS; way = way + 1) begin
+        atc_way_idx = (set_idx * MMU_ATC_WAYS) + way;
+        atc_way_fc = MMU_ATC_FC_FLAT[(atc_way_idx*3) +: 3];
+        atc_way_tag = MMU_ATC_TAG_FLAT[(atc_way_idx*32) +: 32];
+        atc_way_ptag = MMU_ATC_PTAG_FLAT[(atc_way_idx*32) +: 32];
         if (!hit &&
-            MMU_ATC_V[set_idx][way] &&
-            MMU_ATC_FC[set_idx][way] == fc &&
-            MMU_ATC_TAG[set_idx][way] == tag) begin
+            MMU_ATC_V_FLAT[atc_way_idx] &&
+            atc_way_fc == fc &&
+            atc_way_tag == tag) begin
             hit = 1'b1;
-            ptag = MMU_ATC_PTAG[set_idx][way];
-            b = MMU_ATC_B[set_idx][way];
-            w = MMU_ATC_W[set_idx][way];
-            m = MMU_ATC_M[set_idx][way] || write_access;
+            ptag = atc_way_ptag;
+            b = MMU_ATC_B_FLAT[atc_way_idx];
+            w = MMU_ATC_W_FLAT[atc_way_idx];
+            m = MMU_ATC_M_FLAT[atc_way_idx] || write_access;
         end
     end
 
@@ -248,6 +257,9 @@ function automatic logic [2*MMU_ATC_WAY_BITS+1:0] mmu_atc_probe_set(
     logic free;
     logic [MMU_ATC_WAY_BITS-1:0] hit_way;
     logic [MMU_ATC_WAY_BITS-1:0] free_way;
+    logic [2:0]  atc_way_fc;
+    logic [31:0] atc_way_tag;
+    integer atc_way_idx;
     integer way;
 begin
     hit = 1'b0;
@@ -255,68 +267,21 @@ begin
     hit_way = '0;
     free_way = '0;
     for (way = 0; way < MMU_ATC_WAYS; way = way + 1) begin
+        atc_way_idx = (set_idx * MMU_ATC_WAYS) + way;
+        atc_way_fc = MMU_ATC_FC_FLAT[(atc_way_idx*3) +: 3];
+        atc_way_tag = MMU_ATC_TAG_FLAT[(atc_way_idx*32) +: 32];
         if (!hit &&
-            MMU_ATC_V[set_idx][way] &&
-            MMU_ATC_FC[set_idx][way] == fc &&
-            MMU_ATC_TAG[set_idx][way] == tag) begin
+            MMU_ATC_V_FLAT[atc_way_idx] &&
+            atc_way_fc == fc &&
+            atc_way_tag == tag) begin
             hit = 1'b1;
             hit_way = way[MMU_ATC_WAY_BITS-1:0];
         end
-        if (!free && !MMU_ATC_V[set_idx][way]) begin
+        if (!free && !MMU_ATC_V_FLAT[atc_way_idx]) begin
             free = 1'b1;
             free_way = way[MMU_ATC_WAY_BITS-1:0];
         end
     end
     mmu_atc_probe_set = {hit, free, hit_way, free_way};
-end
-endfunction
-
-function automatic logic [MMU_DESC_SHADOW_SET_BITS-1:0] mmu_desc_shadow_set_idx(input logic [31:0] addr);
-    logic [31:0] addr_w;
-begin
-    addr_w = {addr[31:2], 2'b00};
-    mmu_desc_shadow_set_idx = addr_w[MMU_DESC_SHADOW_SET_BITS+1:2];
-end
-endfunction
-
-function automatic logic [32:0] mmu_desc_shadow_read(input logic [31:0] addr);
-    logic hit;
-    logic [31:0] data;
-    logic [31:0] addr_w;
-    logic [MMU_DESC_SHADOW_SET_BITS-1:0] set_idx;
-    integer way;
-begin
-    hit = 1'b0;
-    data = 32'h0;
-    addr_w = {addr[31:2], 2'b00};
-    set_idx = mmu_desc_shadow_set_idx(addr_w);
-    for (way = 0; way < MMU_DESC_SHADOW_WAYS; way = way + 1) begin
-        if (!hit && MMU_DESC_SHADOW_V[set_idx][way] && MMU_DESC_SHADOW_ADDR[set_idx][way] == addr_w) begin
-            hit = 1'b1;
-            data = MMU_DESC_SHADOW_DATA[set_idx][way];
-        end
-    end
-    mmu_desc_shadow_read = {hit, data};
-end
-endfunction
-
-// Packed descriptor-shadow lookup:
-// [65]    low-word valid
-// [64]    high-word valid (forced high for short descriptors)
-// [63:32] low descriptor word
-// [31:0]  high descriptor word
-function automatic logic [65:0] mmu_desc_shadow_read_entry(
-    input logic [31:0] desc_addr,
-    input logic [3:0]  desc_size
-);
-    logic [32:0] lookup_lo;
-    logic [32:0] lookup_hi;
-begin
-    lookup_lo = mmu_desc_shadow_read(desc_addr);
-    if (desc_size == 4'd8)
-        lookup_hi = mmu_desc_shadow_read(desc_addr + 32'd4);
-    else
-        lookup_hi = {1'b1, 32'h0000_0000};
-    mmu_desc_shadow_read_entry = {lookup_lo[32], lookup_hi[32], lookup_lo[31:0], lookup_hi[31:0]};
 end
 endfunction

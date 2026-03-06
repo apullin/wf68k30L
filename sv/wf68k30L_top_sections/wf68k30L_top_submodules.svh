@@ -351,6 +351,7 @@
         .ALU_COND               (ALU_COND),
         .DBcc_COND              (DBcc_COND),
         .BRANCH_ATN             (BRANCH_ATN),
+        .MMU_PTEST_READY        (MMU_PTEST_READY),
         .RESET_STRB             (RESET_STRB),
         .BERR                   (BERR_MAIN),
         .STATUSn                (STATUSn_MAIN),

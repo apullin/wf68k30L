@@ -36,6 +36,13 @@ VERILOG_SOURCES = \
     $(SV_DIR)/wf68k30L_ctrl_fetch_start.sv \
     $(SV_DIR)/wf68k30L_ctrl_movem.sv \
     $(SV_DIR)/wf68k30L_ctrl_regsel.sv \
+    $(SV_DIR)/wf68k30L_top_desc_shadow_lookup.sv \
+    $(SV_DIR)/wf68k30L_top_cache_state.sv \
+    $(SV_DIR)/wf68k30L_top_mmu_ptest.sv \
+    $(SV_DIR)/wf68k30L_top_mmu_ptest_stage.sv \
+    $(SV_DIR)/wf68k30L_top_mmu_state.sv \
+    $(SV_DIR)/wf68k30L_top_routing_bus_cache.sv \
+    $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv \
     $(SV_DIR)/wf68k30L_top.sv
 
 # Default: full top-level smoke test

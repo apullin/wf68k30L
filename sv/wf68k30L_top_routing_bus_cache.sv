@@ -1,3 +1,302 @@
+(* keep_hierarchy = "yes" *)
+module WF68K30L_TOP_ROUTING_BUS_CACHE #(
+    parameter int MMU_DESC_SHADOW_LINES = 64,
+    parameter int MMU_DESC_SHADOW_WAYS = 1,
+    parameter int MMU_DESC_SHADOW_SETS = MMU_DESC_SHADOW_LINES / MMU_DESC_SHADOW_WAYS,
+    parameter int MMU_DESC_SHADOW_SET_BITS = $clog2(MMU_DESC_SHADOW_SETS),
+    parameter int MMU_DESC_SHADOW_WAY_BITS = (MMU_DESC_SHADOW_WAYS > 1) ? $clog2(MMU_DESC_SHADOW_WAYS) : 1
+) (
+    input  logic        CLK,
+    input  logic        RESET_CPU,
+    input  logic        BUS_BSY,
+    input  logic        BUSY_EXH,
+
+    input  logic        DATA_RD_EXH,
+    input  logic        DATA_RD_MAIN,
+    input  logic        DATA_WR_EXH,
+    input  logic        DATA_WR_MAIN,
+    input  logic        OPCODE_RD,
+
+    input  logic        MMU_RUNTIME_REQ,
+    input  logic        MMU_RUNTIME_FAULT,
+    input  logic        MMU_RUNTIME_STALL,
+    input  logic [2:0]  MMU_RUNTIME_ATC_FC,
+
+    input  logic [31:0] MMU_TC,
+    input  logic [63:0] MMU_SRP,
+    input  logic [63:0] MMU_CRP,
+    input  logic [31:0] ADR_P,
+    input  logic [31:0] ADR_P_PHYS,
+    input  logic [31:0] DATA_OUT,
+    input  logic [31:0] DATA_TO_CORE_BUSIF,
+    input  logic        DATA_RDY_BUSIF_CORE,
+    input  logic        ICACHE_HIT_NOW,
+    input  logic        DCACHE_HIT_NOW,
+    input  logic [2:0]  MMU_PTEST_FC,
+    input  logic [31:0] MMU_PTEST_LOGICAL,
+    input  logic [2:0]  MMU_PTEST_LEVEL,
+    input  logic        MMU_PTEST_START,
+    input  logic        MMU_PTEST_CONSUME,
+
+    input  logic        ICACHE_BURST_FILL_VALID,
+    input  logic [3:0]  ICACHE_BURST_FILL_LINE,
+    input  logic [23:0] ICACHE_BURST_FILL_TAG,
+    input  logic [7:0]  ICACHE_BURST_FILL_PENDING,
+    input  logic [2:0]  ICACHE_BURST_FILL_FC,
+    input  logic [2:0]  ICACHE_BURST_FILL_NEXT_WORD,
+
+    input  logic        DCACHE_BURST_FILL_VALID,
+    input  logic [3:0]  DCACHE_BURST_FILL_LINE,
+    input  logic [23:0] DCACHE_BURST_FILL_TAG,
+    input  logic [3:0]  DCACHE_BURST_FILL_PENDING,
+    input  logic [2:0]  DCACHE_BURST_FILL_FC,
+    input  logic [1:0]  DCACHE_BURST_FILL_NEXT_ENTRY,
+
+    input  logic        MMU_TWALK_START,
+
+    output logic        DATA_RD,
+    output logic        DATA_WR,
+    output logic        DATA_RD_BUS,
+
+    output logic        BURST_PREFETCH_OP_REQ,
+    output logic        BURST_PREFETCH_DATA_REQ,
+    output logic [2:0]  BURST_PREFETCH_OP_WORD,
+    output logic [1:0]  BURST_PREFETCH_DATA_ENTRY,
+    output logic [31:0] BURST_PREFETCH_ADDR,
+    output logic [2:0]  BURST_PREFETCH_FC,
+
+    output logic        RD_REQ,
+    output logic        WR_REQ,
+    output logic        OPCODE_REQ,
+    output logic        OPCODE_REQ_CORE,
+    output logic        OPCODE_REQ_CORE_MISS,
+
+    output logic        RD_REQ_I,
+    output logic        WR_REQ_I,
+    output logic        OPCODE_REQ_I,
+    output logic        MMU_FAULT_DATA_ACK,
+    output logic        MMU_FAULT_OPCODE_ACK,
+    output logic        BUS_CYCLE_BURST,
+    output logic        BUS_CYCLE_BURST_IS_OP,
+
+    output logic        MMU_TWALK_BUSY,
+    output logic        MMU_TWALK_VALID,
+    output logic [2:0]  MMU_TWALK_FC,
+    output logic [31:0] MMU_TWALK_LOGICAL,
+    output logic        MMU_TWALK_WRITE,
+    output logic [35:0] MMU_TWALK_RESULT,
+    output logic [2:0]  MMU_TWALK_STATE,
+    output logic [31:0] MMU_TWALK_TC,
+    output logic [31:0] MMU_TWALK_TABLE_BASE,
+    output logic [31:0] MMU_TWALK_DESC_ADDR,
+    output logic [31:0] MMU_TWALK_PAGE_BASE,
+    output logic [31:0] MMU_TWALK_DESC_PTR,
+    output logic [31:0] MMU_TWALK_INDEX,
+    output logic [5:0]  MMU_TWALK_CONSUMED,
+    output logic [3:0]  MMU_TWALK_DESC_SIZE,
+    output logic [3:0]  MMU_TWALK_NEXT_WIDTH,
+    output logic [2:0]  MMU_TWALK_LEVELS,
+    output logic [2:0]  MMU_TWALK_TLX_LEVEL,
+    output logic [1:0]  MMU_TWALK_DESC_DT,
+    output logic [14:0] MMU_TWALK_ROOT_LIMIT,
+    output logic        MMU_TWALK_ROOT_LIMIT_LOWER,
+    output logic        MMU_TWALK_FC_LEVEL,
+    output logic        MMU_TWALK_HAS_NEXT,
+    output logic        MMU_TWALK_WP_ACCUM,
+    output logic        MMU_PTEST_BUSY,
+    output logic        MMU_PTEST_READY,
+    output logic [15:0] MMU_PTEST_WALK_MMUSR
+);
+
+`include "wf68k30L_pkg.svh"
+`include "wf68k30L_top_sections/helpers/wf68k30L_top_helpers_mmu_pure.svh"
+
+logic [MMU_DESC_SHADOW_WAYS-1:0] MMU_DESC_SHADOW_V [0:MMU_DESC_SHADOW_SETS-1];
+logic [31:0] MMU_DESC_SHADOW_ADDR [0:MMU_DESC_SHADOW_SETS-1][0:MMU_DESC_SHADOW_WAYS-1];
+logic [31:0] MMU_DESC_SHADOW_DATA [0:MMU_DESC_SHADOW_SETS-1][0:MMU_DESC_SHADOW_WAYS-1];
+logic [MMU_DESC_SHADOW_WAY_BITS-1:0] MMU_DESC_SHADOW_REPL_PTR [0:MMU_DESC_SHADOW_SETS-1];
+logic [MMU_DESC_SHADOW_SETS*MMU_DESC_SHADOW_WAYS-1:0] MMU_DESC_SHADOW_V_FLAT;
+logic [MMU_DESC_SHADOW_SETS*MMU_DESC_SHADOW_WAYS*32-1:0] MMU_DESC_SHADOW_ADDR_FLAT;
+logic [MMU_DESC_SHADOW_SETS*MMU_DESC_SHADOW_WAYS*32-1:0] MMU_DESC_SHADOW_DATA_FLAT;
+logic        MMU_DESC_SHADOW_PENDING;
+logic [31:0] MMU_DESC_SHADOW_PENDING_ADDR;
+logic        MMU_DESC_SHADOW_PENDING_WR;
+logic [31:0] MMU_TWALK_FETCH_LO_WORD;
+logic [31:0] MMU_TWALK_FETCH_HI_WORD;
+logic        MMU_TWALK_FETCH_LO_VALID;
+logic        MMU_TWALK_FETCH_HI_VALID;
+logic [31:0] MMU_TWALK_INDIRECT_SHORT_ADDR;
+logic [31:0] MMU_TWALK_INDIRECT_LONG_ADDR;
+logic [32:0] MMU_TWALK_DESC_LOOKUP_LO;
+logic [32:0] MMU_TWALK_DESC_LOOKUP_HI;
+logic [32:0] MMU_TWALK_INDIRECT_SHORT_LOOKUP;
+logic [32:0] MMU_TWALK_INDIRECT_LONG_LOOKUP_LO;
+logic [32:0] MMU_TWALK_INDIRECT_LONG_LOOKUP_HI;
+logic [1:0]  MMU_TWALK_DESC_DT_CUR;
+logic [31:0] MMU_TWALK_DESC_PAGE_BASE;
+logic [31:0] MMU_TWALK_DESC_TABLE_BASE_NEXT;
+logic [31:0] MMU_TWALK_NEXT_LIMIT_INDEX;
+logic [31:0] MMU_TWALK_OFFSET_MASK_CUR;
+
+assign MMU_TWALK_INDIRECT_SHORT_ADDR = {MMU_TWALK_DESC_PTR[31:2], 2'b00};
+assign MMU_TWALK_INDIRECT_LONG_ADDR = {MMU_TWALK_DESC_PTR[31:3], 3'b000};
+
+function automatic logic [MMU_DESC_SHADOW_SET_BITS-1:0] mmu_desc_shadow_set_idx(input logic [31:0] addr);
+    logic [31:0] addr_w;
+begin
+    addr_w = {addr[31:2], 2'b00};
+    mmu_desc_shadow_set_idx = addr_w[MMU_DESC_SHADOW_SET_BITS+1:2];
+end
+endfunction
+
+function automatic logic [35:0] mmu_twalk_fault_result(
+    input logic [31:0] logical_addr,
+    input logic        wp_accum,
+    input logic        write_access
+);
+begin
+    mmu_twalk_fault_result = 36'h0;
+    mmu_twalk_fault_result[31:0] = logical_addr;
+    mmu_twalk_fault_result[32] = 1'b1;
+    mmu_twalk_fault_result[34] = wp_accum;
+    mmu_twalk_fault_result[35] = write_access;
+end
+endfunction
+
+function automatic logic [35:0] mmu_twalk_page_result(
+    input logic [31:0] phys_addr,
+    input logic        fault,
+    input logic        wp_accum,
+    input logic        page_m
+);
+begin
+    mmu_twalk_page_result = 36'h0;
+    mmu_twalk_page_result[31:0] = phys_addr;
+    mmu_twalk_page_result[32] = fault;
+    mmu_twalk_page_result[34] = wp_accum;
+    mmu_twalk_page_result[35] = page_m;
+end
+endfunction
+
+function automatic logic [31:0] mmu_twalk_offset_mask(
+    input logic [31:0] tc_in,
+    input logic [5:0]  consumed_bits
+);
+    logic [5:0] used_bits;
+begin
+    used_bits = {2'b00, tc_in[19:16]} + consumed_bits;
+    if (used_bits >= 6'd32)
+        mmu_twalk_offset_mask = 32'h0000_0000;
+    else
+        mmu_twalk_offset_mask = 32'hFFFF_FFFF >> used_bits;
+end
+endfunction
+
+assign MMU_TWALK_DESC_DT_CUR = MMU_TWALK_FETCH_LO_WORD[1:0];
+assign MMU_TWALK_DESC_PAGE_BASE = (MMU_TWALK_DESC_SIZE == 4'd8) ?
+                                  {MMU_TWALK_FETCH_HI_WORD[31:8], 8'h00} :
+                                  {MMU_TWALK_FETCH_LO_WORD[31:8], 8'h00};
+assign MMU_TWALK_DESC_TABLE_BASE_NEXT = (MMU_TWALK_DESC_SIZE == 4'd8) ?
+                                        {MMU_TWALK_FETCH_HI_WORD[31:4], 4'b0000} :
+                                        {MMU_TWALK_FETCH_LO_WORD[31:4], 4'b0000};
+assign MMU_TWALK_NEXT_LIMIT_INDEX = mmu_index_extract(
+    MMU_TWALK_LOGICAL,
+    MMU_TWALK_TC[19:16],
+    MMU_TWALK_CONSUMED,
+    MMU_TWALK_NEXT_WIDTH
+);
+assign MMU_TWALK_OFFSET_MASK_CUR = mmu_twalk_offset_mask(MMU_TWALK_TC, MMU_TWALK_CONSUMED);
+
+WF68K30L_TOP_DESC_SHADOW_LOOKUP #(
+    .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
+    .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
+    .MMU_DESC_SHADOW_SETS(MMU_DESC_SHADOW_SETS),
+    .MMU_DESC_SHADOW_SET_BITS(MMU_DESC_SHADOW_SET_BITS)
+) I_MMU_TWALK_DESC_LOOKUP_LO (
+    .ADDR(MMU_TWALK_DESC_ADDR),
+    .MMU_DESC_SHADOW_V_FLAT(MMU_DESC_SHADOW_V_FLAT),
+    .MMU_DESC_SHADOW_ADDR_FLAT(MMU_DESC_SHADOW_ADDR_FLAT),
+    .MMU_DESC_SHADOW_DATA_FLAT(MMU_DESC_SHADOW_DATA_FLAT),
+    .LOOKUP(MMU_TWALK_DESC_LOOKUP_LO)
+);
+
+WF68K30L_TOP_DESC_SHADOW_LOOKUP #(
+    .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
+    .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
+    .MMU_DESC_SHADOW_SETS(MMU_DESC_SHADOW_SETS),
+    .MMU_DESC_SHADOW_SET_BITS(MMU_DESC_SHADOW_SET_BITS)
+) I_MMU_TWALK_DESC_LOOKUP_HI (
+    .ADDR(MMU_TWALK_DESC_ADDR + 32'd4),
+    .MMU_DESC_SHADOW_V_FLAT(MMU_DESC_SHADOW_V_FLAT),
+    .MMU_DESC_SHADOW_ADDR_FLAT(MMU_DESC_SHADOW_ADDR_FLAT),
+    .MMU_DESC_SHADOW_DATA_FLAT(MMU_DESC_SHADOW_DATA_FLAT),
+    .LOOKUP(MMU_TWALK_DESC_LOOKUP_HI)
+);
+
+WF68K30L_TOP_DESC_SHADOW_LOOKUP #(
+    .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
+    .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
+    .MMU_DESC_SHADOW_SETS(MMU_DESC_SHADOW_SETS),
+    .MMU_DESC_SHADOW_SET_BITS(MMU_DESC_SHADOW_SET_BITS)
+) I_MMU_TWALK_INDIRECT_SHORT_LOOKUP (
+    .ADDR(MMU_TWALK_INDIRECT_SHORT_ADDR),
+    .MMU_DESC_SHADOW_V_FLAT(MMU_DESC_SHADOW_V_FLAT),
+    .MMU_DESC_SHADOW_ADDR_FLAT(MMU_DESC_SHADOW_ADDR_FLAT),
+    .MMU_DESC_SHADOW_DATA_FLAT(MMU_DESC_SHADOW_DATA_FLAT),
+    .LOOKUP(MMU_TWALK_INDIRECT_SHORT_LOOKUP)
+);
+
+WF68K30L_TOP_DESC_SHADOW_LOOKUP #(
+    .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
+    .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
+    .MMU_DESC_SHADOW_SETS(MMU_DESC_SHADOW_SETS),
+    .MMU_DESC_SHADOW_SET_BITS(MMU_DESC_SHADOW_SET_BITS)
+) I_MMU_TWALK_INDIRECT_LONG_LOOKUP_LO (
+    .ADDR(MMU_TWALK_INDIRECT_LONG_ADDR),
+    .MMU_DESC_SHADOW_V_FLAT(MMU_DESC_SHADOW_V_FLAT),
+    .MMU_DESC_SHADOW_ADDR_FLAT(MMU_DESC_SHADOW_ADDR_FLAT),
+    .MMU_DESC_SHADOW_DATA_FLAT(MMU_DESC_SHADOW_DATA_FLAT),
+    .LOOKUP(MMU_TWALK_INDIRECT_LONG_LOOKUP_LO)
+);
+
+WF68K30L_TOP_DESC_SHADOW_LOOKUP #(
+    .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
+    .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
+    .MMU_DESC_SHADOW_SETS(MMU_DESC_SHADOW_SETS),
+    .MMU_DESC_SHADOW_SET_BITS(MMU_DESC_SHADOW_SET_BITS)
+) I_MMU_TWALK_INDIRECT_LONG_LOOKUP_HI (
+    .ADDR(MMU_TWALK_INDIRECT_LONG_ADDR + 32'd4),
+    .MMU_DESC_SHADOW_V_FLAT(MMU_DESC_SHADOW_V_FLAT),
+    .MMU_DESC_SHADOW_ADDR_FLAT(MMU_DESC_SHADOW_ADDR_FLAT),
+    .MMU_DESC_SHADOW_DATA_FLAT(MMU_DESC_SHADOW_DATA_FLAT),
+    .LOOKUP(MMU_TWALK_INDIRECT_LONG_LOOKUP_HI)
+);
+
+WF68K30L_TOP_MMU_PTEST #(
+    .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
+    .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
+    .MMU_DESC_SHADOW_SETS(MMU_DESC_SHADOW_SETS),
+    .MMU_DESC_SHADOW_SET_BITS(MMU_DESC_SHADOW_SET_BITS),
+    .MMU_DESC_SHADOW_WAY_BITS(MMU_DESC_SHADOW_WAY_BITS)
+) I_TOP_MMU_PTEST (
+    .CLK(CLK),
+    .RESET_CPU(RESET_CPU),
+    .PTEST_START(MMU_PTEST_START),
+    .PTEST_CONSUME(MMU_PTEST_CONSUME),
+    .MMU_SRP(MMU_SRP),
+    .MMU_CRP(MMU_CRP),
+    .MMU_TC(MMU_TC),
+    .PTEST_FC(MMU_PTEST_FC),
+    .PTEST_LOGICAL(MMU_PTEST_LOGICAL),
+    .PTEST_LEVEL(MMU_PTEST_LEVEL),
+    .MMU_DESC_SHADOW_V_FLAT(MMU_DESC_SHADOW_V_FLAT),
+    .MMU_DESC_SHADOW_ADDR_FLAT(MMU_DESC_SHADOW_ADDR_FLAT),
+    .MMU_DESC_SHADOW_DATA_FLAT(MMU_DESC_SHADOW_DATA_FLAT),
+    .PTEST_BUSY(MMU_PTEST_BUSY),
+    .PTEST_READY(MMU_PTEST_READY),
+    .PTEST_WALK_MMUSR(MMU_PTEST_WALK_MMUSR)
+);
+
 // ========================================================================
 // Bus request arbitration
 // ========================================================================
@@ -116,14 +415,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
     logic [32:0] walk_lookup_hi;
     logic [35:0] walk_result;
     logic [31:0] walk_desc;
-    logic [31:0] walk_desc_hi;
     logic [31:0] walk_index;
-    logic [31:0] walk_limit_index;
-    logic [31:0] walk_page_base;
-    logic [31:0] walk_phys;
-    logic [31:0] walk_offset_mask;
-    logic [31:0] walk_indirect_base;
-    logic [5:0]  walk_used_bits;
     logic [5:0]  next_consumed;
     logic [3:0]  walk_width;
     logic [3:0]  walk_next_width;
@@ -209,12 +501,8 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                     MMU_TWALK_FETCH_HI_VALID <= 1'b0;
                     MMU_TWALK_VALID <= 1'b0;
 
-                    if (root_ptr[33:32] != 2'b10 && root_ptr[33:32] != 2'b11) begin
-                        walk_result = 36'h0;
-                        walk_result[31:0] = ADR_P;
-                        walk_result[32] = 1'b1;
-                        walk_result[34] = 1'b0;
-                        walk_result[35] = DATA_WR;
+                if (root_ptr[33:32] != 2'b10 && root_ptr[33:32] != 2'b11) begin
+                        walk_result = mmu_twalk_fault_result(ADR_P, 1'b0, DATA_WR);
                         MMU_TWALK_RESULT <= walk_result;
                         MMU_TWALK_VALID <= 1'b1;
                         MMU_TWALK_BUSY <= 1'b0;
@@ -274,11 +562,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 end
 
                 if (walk_fault) begin
-                    walk_result = 36'h0;
-                    walk_result[31:0] = MMU_TWALK_LOGICAL;
-                    walk_result[32] = 1'b1;
-                    walk_result[34] = MMU_TWALK_WP_ACCUM;
-                    walk_result[35] = MMU_TWALK_WRITE;
+                    walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, MMU_TWALK_WP_ACCUM, MMU_TWALK_WRITE);
                     MMU_TWALK_RESULT <= walk_result;
                     MMU_TWALK_VALID <= 1'b1;
                     MMU_TWALK_BUSY <= 1'b0;
@@ -293,7 +577,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
             end
 
             MMU_TWALK_ST_FETCH_LO: begin
-                walk_lookup = mmu_desc_shadow_read(MMU_TWALK_DESC_ADDR);
+                walk_lookup = MMU_TWALK_DESC_LOOKUP_LO;
                 MMU_TWALK_FETCH_LO_WORD <= walk_lookup[31:0];
                 MMU_TWALK_FETCH_LO_VALID <= walk_lookup[32];
                 if (MMU_TWALK_DESC_SIZE == 4'd8) begin
@@ -306,7 +590,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
             end
 
             MMU_TWALK_ST_FETCH_HI: begin
-                walk_lookup_hi = mmu_desc_shadow_read(MMU_TWALK_DESC_ADDR + 32'd4);
+                walk_lookup_hi = MMU_TWALK_DESC_LOOKUP_HI;
                 MMU_TWALK_FETCH_HI_WORD <= walk_lookup_hi[31:0];
                 MMU_TWALK_FETCH_HI_VALID <= walk_lookup_hi[32];
                 MMU_TWALK_STATE <= MMU_TWALK_ST_EVAL;
@@ -318,8 +602,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 walk_page_m = MMU_TWALK_WRITE;
 
                 walk_desc = MMU_TWALK_FETCH_LO_WORD;
-                walk_desc_hi = MMU_TWALK_FETCH_HI_WORD;
-                walk_desc_dt = walk_desc[1:0];
+                walk_desc_dt = MMU_TWALK_DESC_DT_CUR;
                 next_levels = MMU_TWALK_LEVELS + 3'd1;
                 walk_wp_accum = walk_wp_accum || walk_desc[2];
 
@@ -331,40 +614,29 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 if (!walk_fault) begin
                     case (walk_desc_dt)
                         2'b00: begin
-                            walk_fault = 1'b1;
+                            walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
+                            MMU_TWALK_RESULT <= walk_result;
+                            MMU_TWALK_VALID <= 1'b1;
+                            MMU_TWALK_BUSY <= 1'b0;
+                            MMU_TWALK_STATE <= MMU_TWALK_ST_IDLE;
                         end
                         2'b01: begin
                             if (MMU_TWALK_DESC_SIZE == 4'd8 && MMU_TWALK_HAS_NEXT && MMU_TWALK_NEXT_WIDTH != 4'h0) begin
                                 walk_limit_lower = walk_desc[31];
                                 walk_limit = walk_desc[30:16];
-                                walk_limit_index = mmu_index_extract(
-                                    MMU_TWALK_LOGICAL,
-                                    MMU_TWALK_TC[19:16],
-                                    MMU_TWALK_CONSUMED,
-                                    MMU_TWALK_NEXT_WIDTH
-                                );
-                                if (mmu_limit_violation(walk_limit_lower, walk_limit, walk_limit_index))
+                                if (mmu_limit_violation(walk_limit_lower, walk_limit, MMU_TWALK_NEXT_LIMIT_INDEX))
                                     walk_fault = 1'b1;
                             end
 
-                            walk_page_base = (MMU_TWALK_DESC_SIZE == 4'd8) ?
-                                             {walk_desc_hi[31:8], 8'h00} :
-                                             {walk_desc[31:8], 8'h00};
                             walk_page_m = walk_desc[4] || MMU_TWALK_WRITE;
-                            walk_used_bits = {2'b00, MMU_TWALK_TC[19:16]} + MMU_TWALK_CONSUMED;
-                            if (walk_used_bits >= 6'd32)
-                                walk_offset_mask = 32'h0000_0000;
-                            else
-                                walk_offset_mask = 32'hFFFF_FFFF >> walk_used_bits;
-                            walk_phys = walk_page_base + (MMU_TWALK_LOGICAL & walk_offset_mask);
+                            walk_result = mmu_twalk_page_result(
+                                MMU_TWALK_DESC_PAGE_BASE + (MMU_TWALK_LOGICAL & MMU_TWALK_OFFSET_MASK_CUR),
+                                walk_fault,
+                                walk_wp_accum,
+                                walk_page_m
+                            );
                             if (MMU_TWALK_WRITE && walk_wp_accum)
-                                walk_fault = 1'b1;
-
-                            walk_result = 36'h0;
-                            walk_result[31:0] = walk_phys;
-                            walk_result[32] = walk_fault;
-                            walk_result[34] = walk_wp_accum;
-                            walk_result[35] = walk_page_m;
+                                walk_result[32] = 1'b1;
                             MMU_TWALK_RESULT <= walk_result;
                             MMU_TWALK_VALID <= 1'b1;
                             MMU_TWALK_BUSY <= 1'b0;
@@ -375,37 +647,29 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                                 if (MMU_TWALK_DESC_SIZE == 4'd8 && MMU_TWALK_NEXT_WIDTH != 4'h0) begin
                                     walk_limit_lower = walk_desc[31];
                                     walk_limit = walk_desc[30:16];
-                                    walk_limit_index = mmu_index_extract(
-                                        MMU_TWALK_LOGICAL,
-                                        MMU_TWALK_TC[19:16],
-                                        MMU_TWALK_CONSUMED,
-                                        MMU_TWALK_NEXT_WIDTH
-                                    );
-                                    if (mmu_limit_violation(walk_limit_lower, walk_limit, walk_limit_index))
+                                    if (mmu_limit_violation(walk_limit_lower, walk_limit, MMU_TWALK_NEXT_LIMIT_INDEX))
                                         walk_fault = 1'b1;
                                 end
 
                                 if (walk_fault) begin
-                                    walk_result = 36'h0;
-                                    walk_result[31:0] = MMU_TWALK_LOGICAL;
-                                    walk_result[32] = 1'b1;
-                                    walk_result[34] = walk_wp_accum;
-                                    walk_result[35] = MMU_TWALK_WRITE;
+                                    walk_result = mmu_twalk_fault_result(
+                                        MMU_TWALK_LOGICAL,
+                                        walk_wp_accum,
+                                        MMU_TWALK_WRITE
+                                    );
                                     MMU_TWALK_RESULT <= walk_result;
                                     MMU_TWALK_VALID <= 1'b1;
                                     MMU_TWALK_BUSY <= 1'b0;
                                     MMU_TWALK_STATE <= MMU_TWALK_ST_IDLE;
                                 end else begin
-                                    MMU_TWALK_TABLE_BASE <= (MMU_TWALK_DESC_SIZE == 4'd8) ?
-                                                            {walk_desc_hi[31:4], 4'b0000} :
-                                                            {walk_desc[31:4], 4'b0000};
+                                    MMU_TWALK_TABLE_BASE <= MMU_TWALK_DESC_TABLE_BASE_NEXT;
                                     MMU_TWALK_DESC_SIZE <= (walk_desc_dt == 2'b10) ? 4'd4 : 4'd8;
                                     MMU_TWALK_WP_ACCUM <= walk_wp_accum;
                                     MMU_TWALK_LEVELS <= next_levels;
                                     MMU_TWALK_STATE <= MMU_TWALK_ST_STEP;
                                 end
                             end else begin
-                                MMU_TWALK_DESC_PTR <= (MMU_TWALK_DESC_SIZE == 4'd8) ? walk_desc_hi : walk_desc;
+                                MMU_TWALK_DESC_PTR <= (MMU_TWALK_DESC_SIZE == 4'd8) ? MMU_TWALK_FETCH_HI_WORD : walk_desc;
                                 MMU_TWALK_DESC_DT <= walk_desc_dt;
                                 MMU_TWALK_WP_ACCUM <= walk_wp_accum;
                                 MMU_TWALK_LEVELS <= next_levels;
@@ -414,11 +678,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                         end
                     endcase
                 end else begin
-                    walk_result = 36'h0;
-                    walk_result[31:0] = MMU_TWALK_LOGICAL;
-                    walk_result[32] = 1'b1;
-                    walk_result[34] = walk_wp_accum;
-                    walk_result[35] = MMU_TWALK_WRITE;
+                    walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
                     MMU_TWALK_RESULT <= walk_result;
                     MMU_TWALK_VALID <= 1'b1;
                     MMU_TWALK_BUSY <= 1'b0;
@@ -427,11 +687,10 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
             end
 
             MMU_TWALK_ST_INDIRECT_LO: begin
-                walk_indirect_base = {MMU_TWALK_DESC_PTR[31:3], 3'b000};
                 if (MMU_TWALK_DESC_DT == 2'b10)
-                    walk_lookup = mmu_desc_shadow_read({MMU_TWALK_DESC_PTR[31:2], 2'b00});
+                    walk_lookup = MMU_TWALK_INDIRECT_SHORT_LOOKUP;
                 else
-                    walk_lookup = mmu_desc_shadow_read(walk_indirect_base);
+                    walk_lookup = MMU_TWALK_INDIRECT_LONG_LOOKUP_LO;
                 MMU_TWALK_FETCH_LO_WORD <= walk_lookup[31:0];
                 MMU_TWALK_FETCH_LO_VALID <= walk_lookup[32];
                 MMU_TWALK_STATE <= MMU_TWALK_ST_INDIRECT_HI;
@@ -446,43 +705,41 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 if (MMU_TWALK_DESC_DT == 2'b10) begin
                     if (!walk_lookup[32] || walk_lookup[1:0] != 2'b01) begin
                         walk_fault = 1'b1;
-                        walk_page_base = MMU_TWALK_LOGICAL;
+                        walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
                     end else begin
                         walk_wp_accum = walk_wp_accum || walk_lookup[2];
-                        walk_page_base = {walk_lookup[31:8], 8'h00};
                         walk_page_m = walk_lookup[4] || MMU_TWALK_WRITE;
+                        walk_result = mmu_twalk_page_result(
+                            {walk_lookup[31:8], 8'h00} + (MMU_TWALK_LOGICAL & MMU_TWALK_OFFSET_MASK_CUR),
+                            1'b0,
+                            walk_wp_accum,
+                            walk_page_m
+                        );
                     end
                 end else begin
-                    walk_lookup_hi = mmu_desc_shadow_read({MMU_TWALK_DESC_PTR[31:3], 3'b000} + 32'd4);
+                    walk_lookup_hi = MMU_TWALK_INDIRECT_LONG_LOOKUP_HI;
                     if (!walk_lookup[32] || !walk_lookup_hi[32] || walk_lookup[1:0] != 2'b01) begin
                         walk_fault = 1'b1;
-                        walk_page_base = MMU_TWALK_LOGICAL;
+                        walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
                     end else begin
                         walk_wp_accum = walk_wp_accum || walk_lookup[2];
                         if (!MMU_TWALK_FC[2] && walk_lookup[8]) begin
                             walk_fault = 1'b1;
-                            walk_page_base = MMU_TWALK_LOGICAL;
+                            walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
                         end else begin
-                            walk_page_base = {walk_lookup_hi[31:8], 8'h00};
                             walk_page_m = walk_lookup[4] || MMU_TWALK_WRITE;
+                            walk_result = mmu_twalk_page_result(
+                                {walk_lookup_hi[31:8], 8'h00} + (MMU_TWALK_LOGICAL & MMU_TWALK_OFFSET_MASK_CUR),
+                                1'b0,
+                                walk_wp_accum,
+                                walk_page_m
+                            );
                         end
                     end
                 end
 
-                walk_used_bits = {2'b00, MMU_TWALK_TC[19:16]} + MMU_TWALK_CONSUMED;
-                if (walk_used_bits >= 6'd32)
-                    walk_offset_mask = 32'h0000_0000;
-                else
-                    walk_offset_mask = 32'hFFFF_FFFF >> walk_used_bits;
-                walk_phys = walk_page_base + (MMU_TWALK_LOGICAL & walk_offset_mask);
                 if (MMU_TWALK_WRITE && walk_wp_accum)
-                    walk_fault = 1'b1;
-
-                walk_result = 36'h0;
-                walk_result[31:0] = walk_phys;
-                walk_result[32] = walk_fault;
-                walk_result[34] = walk_wp_accum;
-                walk_result[35] = walk_page_m;
+                    walk_result[32] = 1'b1;
                 MMU_TWALK_RESULT <= walk_result;
                 MMU_TWALK_VALID <= 1'b1;
                 MMU_TWALK_BUSY <= 1'b0;
@@ -571,55 +828,24 @@ assign RD_REQ = !BUS_BSY ? ((DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_S
 assign WR_REQ = !BUS_BSY ? (DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) : WR_REQ_I;
 assign OPCODE_REQ_CORE = !BUS_BSY ? OPCODE_RD : OPCODE_REQ_I;
 
-// Minimal instruction-cache lookup on opcode requests.
-always_comb begin : icache_lookup
-    logic [3:0]  req_line;
-    logic [2:0]  req_word;
-    logic [23:0] req_tag;
-    logic        req_cacheable;
-    ICACHE_HIT_NOW = 1'b0;
-    req_line = 4'h0;
-    req_word = 3'h0;
-    req_tag = 24'h0;
-    req_cacheable = 1'b0;
-    if (!BUS_BSY && OPCODE_REQ_CORE && CACR[0]) begin // EI=1
-        req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
-        req_line = ADR_P_PHYS[7:4];
-        req_word = ADR_P_PHYS[3:1];
-        req_tag = ADR_P_PHYS[31:8];
-        if (req_cacheable && ICACHE_TAG[req_line] == req_tag && ICACHE_VALID[req_line][req_word])
-            ICACHE_HIT_NOW = 1'b1;
-    end
-end
-
 assign OPCODE_REQ_CORE_MISS = OPCODE_REQ_CORE && !ICACHE_HIT_NOW;
 
 // On an instruction-cache hit, satisfy the opcode fetch internally.
 assign OPCODE_REQ = (OPCODE_REQ_CORE_MISS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
 
-// Minimal data-cache lookup on data read requests.
-always_comb begin : dcache_lookup
-    logic [3:0]  req_line;
-    logic [1:0]  req_entry;
-    logic [23:0] req_tag;
-    logic        req_cacheable;
-    DCACHE_HIT_NOW = 1'b0;
-    req_line = 4'h0;
-    req_entry = 2'h0;
-    req_tag = 24'h0;
-    req_cacheable = 1'b0;
-    if (!BUS_BSY && DATA_RD && CACR[8] && !RMC) begin // ED=1 and not RMW read portion.
-        req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
-        req_line = ADR_P_PHYS[7:4];
-        req_entry = ADR_P_PHYS[3:2];
-        req_tag = ADR_P_PHYS[31:8];
-        if (req_cacheable &&
-            dcache_access_supported(OP_SIZE, ADR_P_PHYS[1:0]) &&
-            DCACHE_TAG[req_line] == req_tag &&
-            DCACHE_VALID[req_line][req_entry]) begin
-            DCACHE_HIT_NOW = 1'b1;
+assign DATA_RD_BUS = DATA_RD && !DCACHE_HIT_NOW;
+
+genvar flat_set_i;
+genvar flat_way_i;
+generate
+    for (flat_set_i = 0; flat_set_i < MMU_DESC_SHADOW_SETS; flat_set_i = flat_set_i + 1) begin : gen_pack_desc_shadow_set
+        for (flat_way_i = 0; flat_way_i < MMU_DESC_SHADOW_WAYS; flat_way_i = flat_way_i + 1) begin : gen_pack_desc_shadow_way
+            localparam int FLAT_IDX = (flat_set_i * MMU_DESC_SHADOW_WAYS) + flat_way_i;
+            assign MMU_DESC_SHADOW_V_FLAT[FLAT_IDX] = MMU_DESC_SHADOW_V[flat_set_i][flat_way_i];
+            assign MMU_DESC_SHADOW_ADDR_FLAT[(FLAT_IDX*32) +: 32] = MMU_DESC_SHADOW_ADDR[flat_set_i][flat_way_i];
+            assign MMU_DESC_SHADOW_DATA_FLAT[(FLAT_IDX*32) +: 32] = MMU_DESC_SHADOW_DATA[flat_set_i][flat_way_i];
         end
     end
-end
+endgenerate
 
-assign DATA_RD_BUS = DATA_RD && !DCACHE_HIT_NOW;
+endmodule

@@ -1358,6 +1358,96 @@ async def test_mmu_runtime_short_descriptor_wp_fault_vector56(dut):
 
 
 @cocotb.test()
+async def test_mmu_runtime_short_descriptor_invalid_leaf_vector56(dut):
+    """Short-format DT=0 leaf descriptor should fault cleanly and vector through 56."""
+    h = CPUTestHarness(dut)
+
+    handler_addr = 0x000880
+    vector_addr = 56 * 4
+    logical_addr = 0x12345008
+
+    root_tbl = 0x00000400
+    lvlb_tbl = 0x00000800
+    page_tbl = 0x00000C00
+    desc_a_addr = root_tbl + (0x12 << 2)
+    desc_b_addr = lvlb_tbl + (0x34 << 2)
+    desc_c_addr = page_tbl + (0x5 << 2)
+    desc_a = (lvlb_tbl & 0xFFFFFFF0) | 0x00000002  # DT=2
+    desc_b = (page_tbl & 0xFFFFFFF0) | 0x00000002  # DT=2
+    desc_c_invalid = 0x00000000                    # DT=0 invalid leaf
+
+    tt0_src = h.DATA_BASE + 0x7E0
+    tt1_src = h.DATA_BASE + 0x800
+    crp_src = h.DATA_BASE + 0x820
+    tc_src = h.DATA_BASE + 0x840
+    tt0_prog = 0x00008260
+    tt1_prog = 0x00008350
+    crp_hi = 0x7FFF0002
+    crp_lo = root_tbl
+    tc_val = 0x80C08840
+
+    handler_code = [
+        *moveq(0x38, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        # Prime descriptor shadow before enabling MMU.
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 3, DN, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(tt0_src),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(tt1_src),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(crp_src),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(tc_src),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),        # Invalid leaf should fault here.
+
+        *moveq(0x11, 1),                      # Must not execute.
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    h.mem.load_long(desc_a_addr, desc_a)
+    h.mem.load_long(desc_b_addr, desc_b)
+    h.mem.load_long(desc_c_addr, desc_c_invalid)
+    h.mem.load_long(tt0_src, tt0_prog)
+    h.mem.load_long(tt1_src, tt1_prog)
+    h.mem.load_long(crp_src + 0, crp_hi)
+    h.mem.load_long(crp_src + 4, crp_lo)
+    h.mem.load_long(tc_src, tc_val)
+
+    found = await h.run_until_sentinel(max_cycles=80000)
+    assert found, "Runtime short-table invalid leaf MMU fault test did not complete"
+
+    marker = h.read_result_long(0)
+    assert marker == 0x38, f"Expected MMU configuration vector marker 0x38, got 0x{marker:08X}"
+    h.cleanup()
+
+
+@cocotb.test()
 async def test_mmu_runtime_long_descriptor_table_walk(dut):
     """Runtime MMU translates through long-format descriptor tables on ATC miss."""
     h = CPUTestHarness(dut)

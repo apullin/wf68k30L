@@ -1,8 +1,61 @@
-// MMU address translation flow:
-// - TT hit bypass.
-// - ATC hit/fault check.
-// - Root-pointer direct map (DT=01) or table walk (DT=10/11).
-// - Runtime sideband outputs (stall/fault/ATC refill).
+(* keep_hierarchy = "yes" *)
+module WF68K30L_TOP_ROUTING_MMU_TRANSLATE #(
+    parameter int MMU_ATC_LINES = 8,
+    parameter int MMU_ATC_WAYS = 2,
+    parameter int MMU_ATC_SETS = MMU_ATC_LINES / MMU_ATC_WAYS,
+    parameter int MMU_ATC_SET_BITS = $clog2(MMU_ATC_SETS)
+) (
+    input  logic        BUS_BSY,
+    input  logic        DATA_WR,
+    input  logic        DATA_RD,
+    input  logic        OPCODE_RD,
+    input  logic [31:0] MMU_TC,
+    input  logic [2:0]  FC_I,
+    input  logic [63:0] MMU_SRP,
+    input  logic [63:0] MMU_CRP,
+    input  logic [31:0] ADR_P,
+    input  logic [31:0] MMU_TT0,
+    input  logic [31:0] MMU_TT1,
+    input  logic        RMC,
+    input  logic        MMU_TWALK_VALID,
+    input  logic [2:0]  MMU_TWALK_FC,
+    input  logic [31:0] MMU_TWALK_LOGICAL,
+    input  logic        MMU_TWALK_WRITE,
+    input  logic [35:0] MMU_TWALK_RESULT,
+    input  logic        MMU_TWALK_BUSY,
+    input  logic [31:0] ADR_P_PHYS_LATCH,
+    input  logic        BURST_PREFETCH_OP_REQ,
+    input  logic        BURST_PREFETCH_DATA_REQ,
+    input  logic [31:0] BURST_PREFETCH_ADDR,
+
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_V_FLAT,
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_B_FLAT,
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_W_FLAT,
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_M_FLAT,
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*3-1:0] MMU_ATC_FC_FLAT,
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT,
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT,
+
+    output logic [31:0] ADR_P_PHYS_CALC,
+    output logic [31:0] ADR_P_PHYS,
+    output logic [31:0] ADR_BUS_REQ_PHYS,
+
+    output logic        MMU_RUNTIME_REQ,
+    output logic        MMU_RUNTIME_FAULT,
+    output logic        MMU_RUNTIME_ATC_REFILL,
+    output logic [2:0]  MMU_RUNTIME_ATC_FC,
+    output logic [31:0] MMU_RUNTIME_ATC_TAG,
+    output logic [31:0] MMU_RUNTIME_ATC_PTAG,
+    output logic        MMU_RUNTIME_ATC_B,
+    output logic        MMU_RUNTIME_ATC_W,
+    output logic        MMU_RUNTIME_ATC_M,
+    output logic        MMU_RUNTIME_STALL,
+    output logic        MMU_TWALK_START
+);
+
+`include "wf68k30L_pkg.svh"
+`include "wf68k30L_top_sections/helpers/wf68k30L_top_helpers_mmu_pure.svh"
+
 always_comb begin : mmu_address_translate
     logic        read_access;
     logic        write_access;
@@ -30,7 +83,12 @@ always_comb begin : mmu_address_translate
     logic [31:0] first_index;
     logic        root_limit_fault;
     logic        walk_match;
-    logic [35:0] atc_lookup;
+    logic [MMU_ATC_SET_BITS-1:0] atc_set_idx;
+    logic [2:0]  atc_way_fc;
+    logic [31:0] atc_way_tag;
+    logic [31:0] atc_way_ptag;
+    integer      atc_way_idx;
+    integer way;
 
     read_access = OPCODE_RD || DATA_RD;
     write_access = DATA_WR;
@@ -53,6 +111,7 @@ always_comb begin : mmu_address_translate
         first_index = mmu_index_extract(ADR_P, MMU_TC[19:16], 6'd0, MMU_TC[15:12]);
     root_limit_fault = (root_limit_lower && first_index[14:0] < root_limit) ||
                        (!root_limit_lower && first_index[14:0] > root_limit);
+
     atc_fc = FC_I;
     atc_logical = ADR_P;
     atc_tag = mmu_page_tag(MMU_TC, atc_logical);
@@ -64,12 +123,25 @@ always_comb begin : mmu_address_translate
     atc_b = 1'b0;
     atc_w = 1'b0;
     atc_m = write_access;
-    atc_lookup = mmu_atc_lookup(atc_fc, atc_tag, write_access);
-    atc_hit = atc_lookup[35];
-    atc_b = atc_lookup[34];
-    atc_w = atc_lookup[33];
-    atc_m = atc_lookup[32];
-    atc_ptag = atc_lookup[31:0];
+
+    atc_set_idx = atc_tag[MMU_ATC_SET_BITS-1:0] ^ atc_fc[MMU_ATC_SET_BITS-1:0];
+    for (way = 0; way < MMU_ATC_WAYS; way = way + 1) begin
+        atc_way_idx = (atc_set_idx * MMU_ATC_WAYS) + way;
+        atc_way_fc = MMU_ATC_FC_FLAT[(atc_way_idx*3) +: 3];
+        atc_way_tag = MMU_ATC_TAG_FLAT[(atc_way_idx*32) +: 32];
+        atc_way_ptag = MMU_ATC_PTAG_FLAT[(atc_way_idx*32) +: 32];
+        if (!atc_hit &&
+            MMU_ATC_V_FLAT[atc_way_idx] &&
+            atc_way_fc == atc_fc &&
+            atc_way_tag == atc_tag) begin
+            atc_hit = 1'b1;
+            atc_ptag = atc_way_ptag;
+            atc_b = MMU_ATC_B_FLAT[atc_way_idx];
+            atc_w = MMU_ATC_W_FLAT[atc_way_idx];
+            atc_m = MMU_ATC_M_FLAT[atc_way_idx] || write_access;
+        end
+    end
+
     if (atc_hit) begin
         atc_fault = atc_b || (write_access && atc_w);
         atc_phys = mmu_page_compose_addr(MMU_TC, atc_ptag, atc_logical);
@@ -141,3 +213,5 @@ end
 assign ADR_P_PHYS = BUS_BSY ? ADR_P_PHYS_LATCH : ADR_P_PHYS_CALC;
 assign ADR_BUS_REQ_PHYS = (BURST_PREFETCH_OP_REQ || BURST_PREFETCH_DATA_REQ) ?
                           BURST_PREFETCH_ADDR : ADR_P_PHYS;
+
+endmodule

@@ -9,6 +9,7 @@
 //                                                                    //
 //--------------------------------------------------------------------//
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_CTRL_EXEC_DEC (
     // Current states
     input  logic [2:0]  EXEC_WB_STATE,
@@ -35,6 +36,9 @@ module WF68K30L_CTRL_EXEC_DEC (
 
     // Phase
     input  logic        PHASE2,
+
+    // MMU
+    input  logic        MMU_PTEST_READY,
 
     // Output
     output logic [2:0]  NEXT_EXEC_WB_STATE
@@ -164,6 +168,12 @@ always_comb begin : exec_wb_dec
                         end else begin
                             NEXT_EXEC_WB_STATE = WRITE_DEST; // MMU register -> <ea>.
                         end
+                    end
+                    PTEST: begin
+                        if (BIW_1_WB[12:10] == 3'b000 || MMU_PTEST_READY)
+                            NEXT_EXEC_WB_STATE = IDLE;
+                        else
+                            NEXT_EXEC_WB_STATE = EXECUTE;
                     end
                     // Default is for:
                     // ANDI_TO_CCR, Bcc, BFTST, BTST, CHK, CHK2,

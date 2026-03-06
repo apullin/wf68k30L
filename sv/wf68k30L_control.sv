@@ -147,6 +147,7 @@
 //   Introdeced a new state CALC_AEFF which results in no need of ADR_ATN and a twice highre fmax.
 //
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_CONTROL #(
     parameter NO_PIPELINE = 0  // If true the controller work in scalar mode.
 ) (
@@ -298,6 +299,7 @@ module WF68K30L_CONTROL #(
     input  logic        ALU_COND,
     input  logic        DBcc_COND,
     input  logic        BRANCH_ATN,
+    input  logic        MMU_PTEST_READY,
     output logic        RESET_STRB,
     output logic        BERR,
     output logic        STATUSn,
@@ -895,6 +897,7 @@ end
         .MOVEM_INH_WR        (MOVEM_INH_WR),
         .BF_BYTES            (BF_BYTES),
         .PHASE2              (PHASE2),
+        .MMU_PTEST_READY     (MMU_PTEST_READY),
         .NEXT_EXEC_WB_STATE  (NEXT_EXEC_WB_STATE)
     );
 
