@@ -499,6 +499,7 @@
         .PC_ADR_OFFSET          (PC_ADR_OFFSET),
         .PC_EW_OFFSET           (PC_EW_OFFSET),
         .PC_OFFSET              (PC_OFFSET_OPD),
+        .PC_REDIRECT_FLUSH      (PC_ADD_DISPL || PC_LOAD_MAIN || PC_LOAD_EXH),
 
         .OPCODE_RD              (OPCODE_RD),
         .OPCODE_RDY             (OPCODE_RDY),

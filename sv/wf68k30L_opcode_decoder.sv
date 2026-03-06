@@ -88,6 +88,7 @@ module WF68K30L_OPCODE_DECODER #(
     output logic [7:0]  PC_ADR_OFFSET,
     output logic [3:0]  PC_EW_OFFSET,
     output logic [7:0]  PC_OFFSET,
+    input  logic        PC_REDIRECT_FLUSH,
 
     output logic        OPCODE_RD,
     input  logic        OPCODE_RDY,
@@ -160,6 +161,7 @@ logic        OW_REQ;
 
 TRAPTYPE_OPC TRAP_CODE_I;
 logic        FLUSHED;
+logic        FLUSH_REFILL_REQ;
 logic        PC_INC_I;
 logic        PIPE_RDY;
 logic        OPCODE_ACCEPT;
@@ -531,7 +533,7 @@ always_ff @(posedge CLK) begin : pc_offset
     reg [6:0] PC_VAR;
     reg [6:0] PC_VAR_MEM;
 
-    if (IPIPE_FLUSH) begin
+    if (IPIPE_FLUSH || FLUSH_REFILL_REQ) begin
         ADR_OFFSET = 7'd0;
     end else if (PC_INC_I && OPCODE_ACCEPT) begin
         ADR_OFFSET = ADR_OFFSET + 7'd1 - PC_VAR;
@@ -587,7 +589,11 @@ end
 always_comb begin : pc_offset_comb
     reg [6:0] adr_offset_fwd;
     reg [6:0] adr_offset_bus;
-    if (BUSY_EXH && PC_INC_I) begin
+    if (FLUSH_REFILL_REQ) begin
+        // The delayed refill pulse exists only to restart prefetch after a
+        // flush; do not advance the architectural PC a second time.
+        PC_OFFSET = 8'h00;
+    end else if (BUSY_EXH && PC_INC_I) begin
         PC_OFFSET = {PC_VAR_MEM_S, 1'b0};
     end else if (OP == DBcc && LOOP_BSY_I && !LOOP_EXIT) begin
         // Suppress to increment after DBcc operation during the loop to
@@ -600,7 +606,7 @@ always_comb begin : pc_offset_comb
     // only appear in ADR_OFFSET_S one cycle later.  This mirrors the
     // blocking-assignment logic inside the pc_offset always_ff block.
     adr_offset_fwd = ADR_OFFSET_S;
-    if (IPIPE_FLUSH)
+    if (FLUSH_REFILL_REQ || IPIPE_FLUSH)
         adr_offset_fwd = 7'd0;
     else if (PC_INC_I && OPCODE_ACCEPT)
         adr_offset_fwd = ADR_OFFSET_S + 7'd1 - PC_VAR_S;
@@ -615,7 +621,7 @@ always_comb begin : pc_offset_comb
     adr_offset_bus = adr_offset_fwd;
     // Do not apply this compensation on flush cycles (taken branches/jumps),
     // where the fetch pipeline is being restarted from a new PC.
-    if (PC_INC_I && !IPIPE_FLUSH)
+    if (PC_INC_I && !IPIPE_FLUSH && !FLUSH_REFILL_REQ)
         adr_offset_bus = adr_offset_fwd + PC_VAR_S;
 
     PC_ADR_OFFSET = {adr_offset_bus, 1'b0};
@@ -629,9 +635,17 @@ always_ff @(posedge CLK) begin : flush_tracker
         FLUSHED <= 1'b0;
 end
 
+always_ff @(posedge CLK) begin : flush_refill_tracker
+    if (IPIPE_FLUSH && BUSY_MAIN && PC_REDIRECT_FLUSH)
+        FLUSH_REFILL_REQ <= 1'b1;
+    else
+        FLUSH_REFILL_REQ <= 1'b0;
+end
+
 assign PC_INC = PC_INC_I;
-assign PC_INC_I = FLUSHED ? 1'b0 : // Avoid double increment after a flushed pipe.
-                  (IPIPE_FLUSH && BUSY_MAIN) ? 1'b1 : // If the pipe is flushed, we need the new PC value for refilling.
+assign PC_INC_I = FLUSH_REFILL_REQ ? 1'b1 : // Restart prefetch one cycle after a flush.
+                  FLUSHED ? 1'b0 : // Avoid double increment after a flushed pipe.
+                  (IPIPE_FLUSH && BUSY_MAIN) ? 1'b1 : // Sequential/system flushes still advance immediately.
                   BKPT_REQ ? 1'b0 : // Do not update!
                   (OW_REQ && PIPE_RDY) ? 1'b1 : PC_INC_EXH;
 
