@@ -14,11 +14,11 @@ module WF68K30L_CPU_WRAPPER #(
 
     // CPU-style address/data bus.
     output logic [31:0] A,
-    inout  tri   [31:0] D,
+    inout  wire  [31:0] D,
 
     // System control. RESETn is combined into a bidirectional open-drain pin.
     input  logic        BERRn,
-    inout  tri1         RESETn,
+    inout  wire         RESETn,
     input  logic        HALTn,
     output logic        HALT_OUTn_DBG,
 
