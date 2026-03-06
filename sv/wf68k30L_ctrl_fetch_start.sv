@@ -8,6 +8,7 @@
 //                                                                    //
 //--------------------------------------------------------------------//
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_CTRL_FETCH_START (
     // Operation
     input  logic [6:0]  OP,

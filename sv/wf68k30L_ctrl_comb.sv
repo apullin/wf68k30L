@@ -10,6 +10,7 @@
 //                                                                    //
 //--------------------------------------------------------------------//
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_CTRL_COMB #(
     parameter NO_PIPELINE = 0
 ) (

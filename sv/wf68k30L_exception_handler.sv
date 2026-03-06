@@ -36,6 +36,7 @@
 //   Various fixes.
 //
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_EXCEPTION_HANDLER #(
     parameter [15:0] VERSION = 16'h1409
 )(

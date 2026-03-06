@@ -13,6 +13,7 @@
 // CERN OHL v. 1.2
 // ------------------------------------------------------------------------
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_DATA_REGISTERS (
     input  logic        CLK,
     input  logic        RESET,

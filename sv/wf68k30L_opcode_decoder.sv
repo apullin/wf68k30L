@@ -60,6 +60,7 @@
 //   Rearranged address error handling.
 //
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_OPCODE_DECODER #(
     parameter NO_LOOP = 0  // If 1 the DBcc loop mechanism is disabled.
 )(

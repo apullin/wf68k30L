@@ -28,6 +28,11 @@ SV_FILES=(
     "$SV_DIR/wf68k30L_opcode_decoder.sv"
     "$SV_DIR/wf68k30L_exception_handler.sv"
     "$SV_DIR/wf68k30L_control.sv"
+    "$SV_DIR/wf68k30L_top_desc_shadow_lookup.sv"
+    "$SV_DIR/wf68k30L_top_cache_state.sv"
+    "$SV_DIR/wf68k30L_top_mmu_ptest.sv"
+    "$SV_DIR/wf68k30L_top_mmu_ptest_stage.sv"
+    "$SV_DIR/wf68k30L_top_mmu_state.sv"
     "$SV_DIR/wf68k30L_top.sv"
 )
 

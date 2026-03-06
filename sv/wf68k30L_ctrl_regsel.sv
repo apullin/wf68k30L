@@ -8,6 +8,7 @@
 //                                                                    //
 //--------------------------------------------------------------------//
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_CTRL_REGSEL (
     // Operation
     input  logic [6:0]  OP,

@@ -14,6 +14,7 @@
 //                                                                    //
 //--------------------------------------------------------------------//
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_CTRL_FETCH_DEC (
     // Current states
     input  logic [4:0]  FETCH_STATE,

@@ -9,6 +9,7 @@
 // -- on QUOTIENT/REMAINDER so architectural Dn is preserved.             --
 // ------------------------------------------------------------------------
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_DIVIDER (
     input  logic        CLK,
 

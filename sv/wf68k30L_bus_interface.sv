@@ -5,6 +5,7 @@
 // -- CERN OHL v. 1.2                                                    --
 // ------------------------------------------------------------------------
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_BUS_INTERFACE (
     input  logic        CLK,
 

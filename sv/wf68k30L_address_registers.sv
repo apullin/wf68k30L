@@ -45,6 +45,7 @@
 //   Removed ADR_ATN. We do not need this any more.
 //
 
+(* keep_hierarchy = "yes" *)
 module WF68K30L_ADDRESS_REGISTERS (
     input  logic        CLK,
     input  logic        RESET,

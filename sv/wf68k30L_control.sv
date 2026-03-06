@@ -365,10 +365,14 @@ logic           OD_REQ_16;
 logic           OD_REQ_32;
 OP_68K          OP_WB_I = UNIMPLEMENTED;
 logic           OW_RDY;
+logic           OW_RDY_NEXT;
 logic           PHASE2;
 logic           RD_RDY;
 logic           READ_CYCLE;
 logic           SBIT_I;
+logic           EW_RDY_NEXT;
+logic           MEMADR_RDY_NEXT;
+logic           BRANCH_ATN_HOLD;
 logic           WR_RDY;
 logic           WRITE_CYCLE;
 
@@ -412,7 +416,7 @@ WF68K30L_CTRL_COMB #(
     .MOVEM_FIRST_RD      (MOVEM_FIRST_RD),
     .BF_BYTES            (BF_BYTES),
     .BF_HILOn            (BF_HILOn),
-    .BRANCH_ATN          (BRANCH_ATN),
+    .BRANCH_ATN          (BRANCH_ATN_HOLD),
     .DBcc_COND           (DBcc_COND),
     .TRACE_MODE          (TRACE_MODE),
     .VBIT                (VBIT),
@@ -507,40 +511,70 @@ WF68K30L_CTRL_COMB #(
 // Clocked processes
 // ====================================================================
 
+always_comb begin : data_available_next
+    // Drive these through the D path so nextpnr does not see false timing
+    // loops through ECP5 FF control arcs (LSR/CE) in the fetch-control cone.
+    OW_RDY_NEXT = OW_RDY;
+    EW_RDY_NEXT = EW_RDY;
+    MEMADR_RDY_NEXT = MEMADR_RDY;
+
+    if (FETCH_STATE == START_OP && NEXT_FETCH_STATE != START_OP) begin
+        OW_RDY_NEXT = 1'b0; // Reset.
+    end else if (FETCH_STATE == START_OP && (OP == ILLEGAL || OP == RTE || OP == TRAP || OP == UNIMPLEMENTED) && BUSY_EXH) begin
+        OW_RDY_NEXT = 1'b0; // Done.
+    end else if (OPD_ACK) begin
+        OW_RDY_NEXT = 1'b1; // Set.
+    end
+
+    if (FETCH_STATE == START_OP) begin
+        EW_RDY_NEXT = 1'b0;
+    end else if (FETCH_STATE == FETCH_DISPL && NEXT_FETCH_STATE != FETCH_DISPL) begin
+        EW_RDY_NEXT = 1'b0;
+    end else if (FETCH_STATE == FETCH_EXWORD_1 && NEXT_FETCH_STATE != FETCH_EXWORD_1) begin
+        EW_RDY_NEXT = 1'b0;
+    end else if (FETCH_STATE == FETCH_D_LO && NEXT_FETCH_STATE != FETCH_D_LO) begin
+        EW_RDY_NEXT = 1'b0;
+    end else if (FETCH_STATE == FETCH_IDATA_B1 && NEXT_FETCH_STATE != FETCH_IDATA_B1) begin
+        EW_RDY_NEXT = 1'b0;
+    end else if ((FETCH_STATE == FETCH_DISPL || FETCH_STATE == FETCH_EXWORD_1 || FETCH_STATE == FETCH_IDATA_B1 || FETCH_STATE == FETCH_D_LO) && EW_ACK) begin
+        EW_RDY_NEXT = 1'b1;
+    end
+
+    if (FETCH_STATE == START_OP) begin
+        MEMADR_RDY_NEXT = 1'b0;
+    end else if (FETCH_STATE == FETCH_MEMADR && NEXT_FETCH_STATE != FETCH_MEMADR) begin
+        MEMADR_RDY_NEXT = 1'b0;
+    end else if (FETCH_STATE == FETCH_MEMADR && DATA_RDY) begin
+        MEMADR_RDY_NEXT = 1'b1;
+    end
+end
+
 always_ff @(posedge CLK) begin : data_available
     // These flip flops store the information whether the data required in the different
     // states is available or not. This is necessary in case of delayed cycles for
     // example if the required address register is not ready to be read.
     if (RESET_CPU) begin
         OW_RDY <= 1'b0;
+        EW_RDY <= 1'b0;
+        MEMADR_RDY <= 1'b0;
+    end else begin
+        OW_RDY <= OW_RDY_NEXT;
+        EW_RDY <= EW_RDY_NEXT;
+        MEMADR_RDY <= MEMADR_RDY_NEXT;
+    end
+end
+
+always_ff @(posedge CLK) begin : branch_atn_hold
+    if (RESET_CPU) begin
+        BRANCH_ATN_HOLD <= 1'b0;
     end else if (FETCH_STATE == START_OP && NEXT_FETCH_STATE != START_OP) begin
-        OW_RDY <= 1'b0; // Reset.
-    end else if (FETCH_STATE == START_OP && (OP == ILLEGAL || OP == RTE || OP == TRAP || OP == UNIMPLEMENTED) && BUSY_EXH) begin
-        OW_RDY <= 1'b0; // Done.
-    end else if (OPD_ACK) begin
-        OW_RDY <= 1'b1; // Set.
-    end
-
-    if (FETCH_STATE == START_OP) begin
-        EW_RDY <= 1'b0;
-    end else if (FETCH_STATE == FETCH_DISPL && NEXT_FETCH_STATE != FETCH_DISPL) begin
-        EW_RDY <= 1'b0;
-    end else if (FETCH_STATE == FETCH_EXWORD_1 && NEXT_FETCH_STATE != FETCH_EXWORD_1) begin
-        EW_RDY <= 1'b0;
-    end else if (FETCH_STATE == FETCH_D_LO && NEXT_FETCH_STATE != FETCH_D_LO) begin
-        EW_RDY <= 1'b0;
-    end else if (FETCH_STATE == FETCH_IDATA_B1 && NEXT_FETCH_STATE != FETCH_IDATA_B1) begin
-        EW_RDY <= 1'b0;
-    end else if ((FETCH_STATE == FETCH_DISPL || FETCH_STATE == FETCH_EXWORD_1 || FETCH_STATE == FETCH_IDATA_B1 || FETCH_STATE == FETCH_D_LO) && EW_ACK) begin
-        EW_RDY <= 1'b1;
-    end
-
-    if (FETCH_STATE == START_OP) begin
-        MEMADR_RDY <= 1'b0;
-    end else if (FETCH_STATE == FETCH_MEMADR && NEXT_FETCH_STATE != FETCH_MEMADR) begin
-        MEMADR_RDY <= 1'b0;
-    end else if (FETCH_STATE == FETCH_MEMADR && DATA_RDY) begin
-        MEMADR_RDY <= 1'b1;
+        BRANCH_ATN_HOLD <= 1'b0;
+    end else if (INIT_ENTRY &&
+                 (OP == ANDI_TO_SR || OP == EORI_TO_SR || OP == MOVE_TO_SR || OP == ORI_TO_SR)) begin
+        // Hold the processor-context change prediction once the SR write
+        // enters execution so the fetch-state logic does not form a
+        // combinational loop back through operand routing.
+        BRANCH_ATN_HOLD <= BRANCH_ATN;
     end
 end
 
@@ -871,7 +905,7 @@ end
         .MOVEM_FIRST_RD     (MOVEM_FIRST_RD),
         .MOVEP_PNTR_I       (MOVEP_PNTR_I),
         .BF_BYTES           (BF_BYTES),
-        .BRANCH_ATN         (BRANCH_ATN),
+        .BRANCH_ATN         (BRANCH_ATN_HOLD),
         .DBcc_COND          (DBcc_COND),
         .TRACE_MODE         (TRACE_MODE),
         .EXH_REQ            (EXH_REQ),
