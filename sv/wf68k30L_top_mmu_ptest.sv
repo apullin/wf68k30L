@@ -1,11 +1,5 @@
 (* keep_hierarchy = "yes" *)
-module WF68K30L_TOP_MMU_PTEST #(
-    parameter int MMU_DESC_SHADOW_LINES = 64,
-    parameter int MMU_DESC_SHADOW_WAYS = 1,
-    parameter int MMU_DESC_SHADOW_SETS = MMU_DESC_SHADOW_LINES / MMU_DESC_SHADOW_WAYS,
-    parameter int MMU_DESC_SHADOW_SET_BITS = $clog2(MMU_DESC_SHADOW_SETS),
-    parameter int MMU_DESC_SHADOW_WAY_BITS = (MMU_DESC_SHADOW_WAYS > 1) ? $clog2(MMU_DESC_SHADOW_WAYS) : 1
-) (
+module WF68K30L_TOP_MMU_PTEST (
     input  logic        CLK,
     input  logic        RESET_CPU,
     input  logic        PTEST_START,
@@ -16,9 +10,9 @@ module WF68K30L_TOP_MMU_PTEST #(
     input  logic [2:0]  PTEST_FC,
     input  logic [31:0] PTEST_LOGICAL,
     input  logic [2:0]  PTEST_LEVEL,
-    input  logic [MMU_DESC_SHADOW_SETS*MMU_DESC_SHADOW_WAYS-1:0] MMU_DESC_SHADOW_V_FLAT,
-    input  logic [MMU_DESC_SHADOW_SETS*MMU_DESC_SHADOW_WAYS*32-1:0] MMU_DESC_SHADOW_ADDR_FLAT,
-    input  logic [MMU_DESC_SHADOW_SETS*MMU_DESC_SHADOW_WAYS*32-1:0] MMU_DESC_SHADOW_DATA_FLAT,
+    output logic        SHADOW_RD_EN,
+    output logic [31:0] SHADOW_RD_ADDR,
+    input  logic [32:0] SHADOW_LOOKUP,
     output logic        PTEST_BUSY,
     output logic        PTEST_READY,
     output logic [15:0] PTEST_WALK_MMUSR
@@ -35,6 +29,19 @@ localparam logic [15:0] MMUSR_I = 16'h0400;
 localparam logic [15:0] MMUSR_M = 16'h0200;
 localparam logic [15:0] MMUSR_N = 16'h0007;
 
+localparam logic [3:0] PTEST_ST_IDLE             = 4'd0;
+localparam logic [3:0] PTEST_ST_STEP             = 4'd1;
+localparam logic [3:0] PTEST_ST_FETCH_LO_REQ     = 4'd2;
+localparam logic [3:0] PTEST_ST_FETCH_LO_RESP    = 4'd3;
+localparam logic [3:0] PTEST_ST_FETCH_HI_REQ     = 4'd4;
+localparam logic [3:0] PTEST_ST_FETCH_HI_RESP    = 4'd5;
+localparam logic [3:0] PTEST_ST_EVAL             = 4'd6;
+localparam logic [3:0] PTEST_ST_INDIRECT_LO_REQ  = 4'd7;
+localparam logic [3:0] PTEST_ST_INDIRECT_LO_RESP = 4'd8;
+localparam logic [3:0] PTEST_ST_INDIRECT_HI_REQ  = 4'd9;
+localparam logic [3:0] PTEST_ST_INDIRECT_HI_RESP = 4'd10;
+
+logic [3:0]  ptest_state_r;
 logic [31:0] ptest_tc_r;
 logic [2:0]  ptest_fc_r;
 logic [31:0] ptest_logical_r;
@@ -43,11 +50,16 @@ logic [14:0] root_limit_r;
 logic        root_limit_lower_r;
 
 logic [31:0] walk_table_base_r;
+logic [31:0] walk_desc_addr_r;
+logic [31:0] walk_desc_ptr_r;
 logic [5:0]  walk_consumed_r;
 logic [3:0]  walk_desc_size_r;
+logic [3:0]  walk_next_width_r;
 logic [2:0]  walk_tlx_level_r;
 logic        walk_fc_level_r;
 logic [2:0]  walk_levels_r;
+logic [1:0]  walk_desc_dt_r;
+logic        walk_has_next_r;
 logic        walk_done_r;
 logic        walk_fault_r;
 logic        walk_limit_fault_r;
@@ -56,25 +68,10 @@ logic        walk_bus_fault_r;
 logic        walk_invalid_fault_r;
 logic        walk_wp_accum_r;
 logic        walk_page_m_r;
-
-logic [31:0] walk_table_base_next;
-logic [5:0]  walk_consumed_next;
-logic [3:0]  walk_desc_size_next;
-logic [2:0]  walk_tlx_level_next;
-logic        walk_fc_level_next;
-logic [2:0]  walk_levels_next;
-logic        walk_done_next;
-logic        walk_fault_next;
-logic        walk_limit_fault_next;
-logic        walk_super_fault_next;
-logic        walk_bus_fault_next;
-logic        walk_invalid_fault_next;
-logic        walk_wp_accum_next;
-logic        walk_page_m_next;
-
-logic        walk_complete_now;
-logic        walk_force_invalid_now;
-logic [15:0] walk_mmusr_now;
+logic [31:0] walk_fetch_lo_word_r;
+logic [31:0] walk_fetch_hi_word_r;
+logic        walk_fetch_lo_valid_r;
+logic        walk_fetch_hi_valid_r;
 
 function automatic logic [15:0] ptest_root_mmusr(
     input logic [14:0] limit,
@@ -122,75 +119,59 @@ begin
 end
 endfunction
 
-WF68K30L_TOP_MMU_PTEST_STAGE #(
-    .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
-    .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
-    .MMU_DESC_SHADOW_SETS(MMU_DESC_SHADOW_SETS),
-    .MMU_DESC_SHADOW_SET_BITS(MMU_DESC_SHADOW_SET_BITS),
-    .MMU_DESC_SHADOW_WAY_BITS(MMU_DESC_SHADOW_WAY_BITS)
-) I_STAGE (
-    .MMU_TC(ptest_tc_r),
-    .FC_IN(ptest_fc_r),
-    .LOGICAL_ADDR(ptest_logical_r),
-    .SEARCH_LIMIT(search_limit_r),
-    .ROOT_LIMIT(root_limit_r),
-    .ROOT_LIMIT_LOWER(root_limit_lower_r),
-    .MMU_DESC_SHADOW_V_FLAT(MMU_DESC_SHADOW_V_FLAT),
-    .MMU_DESC_SHADOW_ADDR_FLAT(MMU_DESC_SHADOW_ADDR_FLAT),
-    .MMU_DESC_SHADOW_DATA_FLAT(MMU_DESC_SHADOW_DATA_FLAT),
-    .IN_TABLE_BASE(walk_table_base_r),
-    .IN_CONSUMED(walk_consumed_r),
-    .IN_DESC_SIZE(walk_desc_size_r),
-    .IN_TLX_LEVEL(walk_tlx_level_r),
-    .IN_FC_LEVEL(walk_fc_level_r),
-    .IN_LEVELS(walk_levels_r),
-    .IN_DONE(walk_done_r),
-    .IN_FAULT(walk_fault_r),
-    .IN_LIMIT_FAULT(walk_limit_fault_r),
-    .IN_SUPER_FAULT(walk_super_fault_r),
-    .IN_BUS_FAULT(walk_bus_fault_r),
-    .IN_INVALID_FAULT(walk_invalid_fault_r),
-    .IN_WP_ACCUM(walk_wp_accum_r),
-    .IN_PAGE_M(walk_page_m_r),
-    .OUT_TABLE_BASE(walk_table_base_next),
-    .OUT_CONSUMED(walk_consumed_next),
-    .OUT_DESC_SIZE(walk_desc_size_next),
-    .OUT_TLX_LEVEL(walk_tlx_level_next),
-    .OUT_FC_LEVEL(walk_fc_level_next),
-    .OUT_LEVELS(walk_levels_next),
-    .OUT_DONE(walk_done_next),
-    .OUT_FAULT(walk_fault_next),
-    .OUT_LIMIT_FAULT(walk_limit_fault_next),
-    .OUT_SUPER_FAULT(walk_super_fault_next),
-    .OUT_BUS_FAULT(walk_bus_fault_next),
-    .OUT_INVALID_FAULT(walk_invalid_fault_next),
-    .OUT_WP_ACCUM(walk_wp_accum_next),
-    .OUT_PAGE_M(walk_page_m_next)
-);
-
-assign walk_complete_now = walk_done_next || walk_fault_next || (walk_levels_next >= search_limit_r);
-assign walk_force_invalid_now = !walk_fault_next && !walk_done_next && (search_limit_r == 3'd7);
-assign walk_mmusr_now = ptest_walk_mmusr(
-    walk_limit_fault_next,
-    walk_super_fault_next,
-    walk_bus_fault_next,
-    walk_wp_accum_next,
-    walk_done_next,
-    walk_page_m_next,
-    walk_invalid_fault_next,
-    walk_force_invalid_now,
-    walk_levels_next
-);
+always_comb begin : ptest_shadow_req
+    SHADOW_RD_EN = 1'b0;
+    SHADOW_RD_ADDR = 32'h0000_0000;
+    case (ptest_state_r)
+        PTEST_ST_FETCH_LO_REQ: begin
+            SHADOW_RD_EN = 1'b1;
+            SHADOW_RD_ADDR = walk_desc_addr_r;
+        end
+        PTEST_ST_FETCH_HI_REQ: begin
+            SHADOW_RD_EN = 1'b1;
+            SHADOW_RD_ADDR = walk_desc_addr_r + 32'd4;
+        end
+        PTEST_ST_INDIRECT_LO_REQ: begin
+            SHADOW_RD_EN = 1'b1;
+            SHADOW_RD_ADDR = (walk_desc_dt_r == 2'b10) ?
+                             {walk_desc_ptr_r[31:2], 2'b00} :
+                             {walk_desc_ptr_r[31:3], 3'b000};
+        end
+        PTEST_ST_INDIRECT_HI_REQ: begin
+            SHADOW_RD_EN = 1'b1;
+            SHADOW_RD_ADDR = {walk_desc_ptr_r[31:3], 3'b000} + 32'd4;
+        end
+        default: begin end
+    endcase
+end
 
 always_ff @(posedge CLK) begin : ptest_fsm
     logic [63:0] root_ptr;
     logic [1:0]  root_dt;
     logic [2:0]  search_limit;
     logic [31:0] first_index;
+    logic [3:0]  walk_width;
+    logic [3:0]  walk_next_width;
+    logic [31:0] walk_index;
+    logic [31:0] walk_limit_index;
+    logic [2:0]  next_tlx_level;
+    logic [2:0]  level_after;
+    logic [1:0]  desc_dt;
+    logic        walk_has_next;
+    logic        walk_fault;
+    logic        walk_limit_fault;
+    logic        walk_super_fault;
+    logic        walk_bus_fault;
+    logic        walk_invalid_fault;
+    logic        walk_wp_accum;
+    logic        walk_page_m;
+    logic        walk_done;
+    logic        force_invalid;
     if (RESET_CPU) begin
         PTEST_BUSY <= 1'b0;
         PTEST_READY <= 1'b0;
         PTEST_WALK_MMUSR <= 16'h0000;
+        ptest_state_r <= PTEST_ST_IDLE;
         ptest_tc_r <= 32'h0000_0000;
         ptest_fc_r <= 3'b000;
         ptest_logical_r <= 32'h0000_0000;
@@ -198,11 +179,16 @@ always_ff @(posedge CLK) begin : ptest_fsm
         root_limit_r <= 15'h0000;
         root_limit_lower_r <= 1'b0;
         walk_table_base_r <= 32'h0000_0000;
+        walk_desc_addr_r <= 32'h0000_0000;
+        walk_desc_ptr_r <= 32'h0000_0000;
         walk_consumed_r <= 6'd0;
         walk_desc_size_r <= 4'd0;
+        walk_next_width_r <= 4'd0;
         walk_tlx_level_r <= 3'd0;
         walk_fc_level_r <= 1'b0;
         walk_levels_r <= 3'd0;
+        walk_desc_dt_r <= 2'b00;
+        walk_has_next_r <= 1'b0;
         walk_done_r <= 1'b0;
         walk_fault_r <= 1'b0;
         walk_limit_fault_r <= 1'b0;
@@ -211,76 +197,368 @@ always_ff @(posedge CLK) begin : ptest_fsm
         walk_invalid_fault_r <= 1'b0;
         walk_wp_accum_r <= 1'b0;
         walk_page_m_r <= 1'b0;
+        walk_fetch_lo_word_r <= 32'h0000_0000;
+        walk_fetch_hi_word_r <= 32'h0000_0000;
+        walk_fetch_lo_valid_r <= 1'b0;
+        walk_fetch_hi_valid_r <= 1'b0;
     end else begin
         if (PTEST_CONSUME)
             PTEST_READY <= 1'b0;
 
-        if (PTEST_START) begin
-            root_ptr = (MMU_TC[25] && PTEST_FC[2]) ? MMU_SRP : MMU_CRP;
-            root_dt = root_ptr[33:32];
-            search_limit = (PTEST_LEVEL == 3'b000) ? 3'd7 : PTEST_LEVEL;
-            first_index = MMU_TC[24] ?
-                          {29'h0, PTEST_FC} :
-                          mmu_index_extract(PTEST_LOGICAL, MMU_TC[19:16], 6'd0, MMU_TC[15:12]);
-
-            ptest_tc_r <= MMU_TC;
-            ptest_fc_r <= PTEST_FC;
-            ptest_logical_r <= PTEST_LOGICAL;
-            search_limit_r <= search_limit;
-            root_limit_r <= root_ptr[62:48];
-            root_limit_lower_r <= root_ptr[63];
-
-            walk_table_base_r <= {root_ptr[31:4], 4'b0000};
-            walk_consumed_r <= 6'd0;
-            walk_desc_size_r <= (root_dt == 2'b11) ? 4'd8 : 4'd4;
-            walk_tlx_level_r <= 3'd0;
-            walk_fc_level_r <= MMU_TC[24];
-            walk_levels_r <= 3'd0;
-            walk_done_r <= 1'b0;
-            walk_fault_r <= 1'b0;
-            walk_limit_fault_r <= 1'b0;
-            walk_super_fault_r <= 1'b0;
-            walk_bus_fault_r <= 1'b0;
-            walk_invalid_fault_r <= 1'b0;
-            walk_wp_accum_r <= 1'b0;
-            walk_page_m_r <= 1'b0;
-
-            if (root_dt == 2'b01) begin
-                PTEST_WALK_MMUSR <= ptest_root_mmusr(root_ptr[62:48], root_ptr[63], first_index);
+        case (ptest_state_r)
+            PTEST_ST_IDLE: begin
                 PTEST_BUSY <= 1'b0;
-                PTEST_READY <= 1'b1;
-            end else if (root_dt == 2'b10 || root_dt == 2'b11) begin
-                PTEST_WALK_MMUSR <= 16'h0000;
-                PTEST_BUSY <= 1'b1;
-                PTEST_READY <= 1'b0;
-            end else begin
-                PTEST_WALK_MMUSR <= MMUSR_I;
-                PTEST_BUSY <= 1'b0;
-                PTEST_READY <= 1'b1;
+                if (PTEST_START) begin
+                    root_ptr = (MMU_TC[25] && PTEST_FC[2]) ? MMU_SRP : MMU_CRP;
+                    root_dt = root_ptr[33:32];
+                    search_limit = (PTEST_LEVEL == 3'b000) ? 3'd7 : PTEST_LEVEL;
+                    first_index = MMU_TC[24] ?
+                                  {29'h0, PTEST_FC} :
+                                  mmu_index_extract(PTEST_LOGICAL, MMU_TC[19:16], 6'd0, MMU_TC[15:12]);
+
+                    ptest_tc_r <= MMU_TC;
+                    ptest_fc_r <= PTEST_FC;
+                    ptest_logical_r <= PTEST_LOGICAL;
+                    search_limit_r <= search_limit;
+                    root_limit_r <= root_ptr[62:48];
+                    root_limit_lower_r <= root_ptr[63];
+                    walk_table_base_r <= {root_ptr[31:4], 4'b0000};
+                    walk_desc_addr_r <= 32'h0000_0000;
+                    walk_desc_ptr_r <= 32'h0000_0000;
+                    walk_consumed_r <= 6'd0;
+                    walk_desc_size_r <= (root_dt == 2'b11) ? 4'd8 : 4'd4;
+                    walk_next_width_r <= 4'd0;
+                    walk_tlx_level_r <= 3'd0;
+                    walk_fc_level_r <= MMU_TC[24];
+                    walk_levels_r <= 3'd0;
+                    walk_desc_dt_r <= 2'b00;
+                    walk_has_next_r <= 1'b0;
+                    walk_done_r <= 1'b0;
+                    walk_fault_r <= 1'b0;
+                    walk_limit_fault_r <= 1'b0;
+                    walk_super_fault_r <= 1'b0;
+                    walk_bus_fault_r <= 1'b0;
+                    walk_invalid_fault_r <= 1'b0;
+                    walk_wp_accum_r <= 1'b0;
+                    walk_page_m_r <= 1'b0;
+                    walk_fetch_lo_word_r <= 32'h0000_0000;
+                    walk_fetch_hi_word_r <= 32'h0000_0000;
+                    walk_fetch_lo_valid_r <= 1'b0;
+                    walk_fetch_hi_valid_r <= 1'b0;
+
+                    if (root_dt == 2'b01) begin
+                        PTEST_WALK_MMUSR <= ptest_root_mmusr(root_ptr[62:48], root_ptr[63], first_index);
+                        PTEST_READY <= 1'b1;
+                    end else if (root_dt == 2'b10 || root_dt == 2'b11) begin
+                        PTEST_BUSY <= 1'b1;
+                        PTEST_READY <= 1'b0;
+                        ptest_state_r <= PTEST_ST_STEP;
+                    end else begin
+                        PTEST_WALK_MMUSR <= MMUSR_I;
+                        PTEST_READY <= 1'b1;
+                    end
+                end
             end
-        end else if (PTEST_BUSY) begin
-            walk_table_base_r <= walk_table_base_next;
-            walk_consumed_r <= walk_consumed_next;
-            walk_desc_size_r <= walk_desc_size_next;
-            walk_tlx_level_r <= walk_tlx_level_next;
-            walk_fc_level_r <= walk_fc_level_next;
-            walk_levels_r <= walk_levels_next;
-            walk_done_r <= walk_done_next;
-            walk_fault_r <= walk_fault_next;
-            walk_limit_fault_r <= walk_limit_fault_next;
-            walk_super_fault_r <= walk_super_fault_next;
-            walk_bus_fault_r <= walk_bus_fault_next;
-            walk_invalid_fault_r <= walk_invalid_fault_next;
-            walk_wp_accum_r <= walk_wp_accum_next;
-            walk_page_m_r <= walk_page_m_next;
 
-            if (walk_complete_now) begin
-                PTEST_WALK_MMUSR <= walk_mmusr_now;
+            PTEST_ST_STEP: begin
+                walk_fault = 1'b0;
+                walk_limit_fault = walk_limit_fault_r;
+                walk_invalid_fault = walk_invalid_fault_r;
+                walk_index = 32'h0000_0000;
+                walk_width = 4'h0;
+                walk_next_width = 4'h0;
+                walk_has_next = 1'b0;
+
+                if (walk_levels_r >= 3'd5)
+                    walk_fault = 1'b1;
+
+                if (!walk_fault) begin
+                    if (walk_fc_level_r) begin
+                        walk_index = {29'h0, ptest_fc_r};
+                        walk_next_width = mmu_tlx_width(ptest_tc_r, walk_tlx_level_r[1:0]);
+                        walk_has_next = (walk_next_width != 4'h0);
+                        walk_fc_level_r <= 1'b0;
+                    end else begin
+                        walk_width = mmu_tlx_width(ptest_tc_r, walk_tlx_level_r[1:0]);
+                        if (walk_width == 4'h0) begin
+                            walk_fault = 1'b1;
+                            walk_invalid_fault = 1'b1;
+                        end else begin
+                            walk_index = mmu_index_extract(
+                                ptest_logical_r,
+                                ptest_tc_r[19:16],
+                                walk_consumed_r,
+                                walk_width
+                            );
+                            walk_consumed_r <= walk_consumed_r + {2'b00, walk_width};
+                            next_tlx_level = walk_tlx_level_r + 3'd1;
+                            walk_tlx_level_r <= next_tlx_level;
+                            if (next_tlx_level < 3'd4) begin
+                                walk_next_width = mmu_tlx_width(ptest_tc_r, next_tlx_level[1:0]);
+                                walk_has_next = (walk_next_width != 4'h0);
+                            end
+                            if ((walk_levels_r == 3'd0) && !ptest_tc_r[24] &&
+                                mmu_limit_violation(root_limit_lower_r, root_limit_r, walk_index)) begin
+                                walk_fault = 1'b1;
+                                walk_limit_fault = 1'b1;
+                            end
+                        end
+                    end
+                end
+
+                if (walk_fault) begin
+                    PTEST_WALK_MMUSR <= ptest_walk_mmusr(
+                        walk_limit_fault,
+                        walk_super_fault_r,
+                        walk_bus_fault_r,
+                        walk_wp_accum_r,
+                        1'b0,
+                        walk_page_m_r,
+                        walk_invalid_fault,
+                        1'b0,
+                        walk_levels_r
+                    );
+                    PTEST_BUSY <= 1'b0;
+                    PTEST_READY <= 1'b1;
+                    ptest_state_r <= PTEST_ST_IDLE;
+                    walk_fault_r <= walk_fault;
+                    walk_limit_fault_r <= walk_limit_fault;
+                    walk_invalid_fault_r <= walk_invalid_fault;
+                end else begin
+                    walk_next_width_r <= walk_next_width;
+                    walk_has_next_r <= walk_has_next;
+                    walk_desc_addr_r <= mmu_desc_addr(walk_table_base_r, walk_index, walk_desc_size_r);
+                    ptest_state_r <= PTEST_ST_FETCH_LO_REQ;
+                end
+            end
+
+            PTEST_ST_FETCH_LO_REQ: begin
+                ptest_state_r <= PTEST_ST_FETCH_LO_RESP;
+            end
+
+            PTEST_ST_FETCH_LO_RESP: begin
+                walk_fetch_lo_word_r <= SHADOW_LOOKUP[31:0];
+                walk_fetch_lo_valid_r <= SHADOW_LOOKUP[32];
+                if (walk_desc_size_r == 4'd8) begin
+                    ptest_state_r <= PTEST_ST_FETCH_HI_REQ;
+                end else begin
+                    walk_fetch_hi_word_r <= 32'h0000_0000;
+                    walk_fetch_hi_valid_r <= 1'b1;
+                    ptest_state_r <= PTEST_ST_EVAL;
+                end
+            end
+
+            PTEST_ST_FETCH_HI_REQ: begin
+                ptest_state_r <= PTEST_ST_FETCH_HI_RESP;
+            end
+
+            PTEST_ST_FETCH_HI_RESP: begin
+                walk_fetch_hi_word_r <= SHADOW_LOOKUP[31:0];
+                walk_fetch_hi_valid_r <= SHADOW_LOOKUP[32];
+                ptest_state_r <= PTEST_ST_EVAL;
+            end
+
+            PTEST_ST_EVAL: begin
+                walk_fault = walk_fault_r;
+                walk_limit_fault = walk_limit_fault_r;
+                walk_super_fault = walk_super_fault_r;
+                walk_bus_fault = walk_bus_fault_r;
+                walk_invalid_fault = walk_invalid_fault_r;
+                walk_wp_accum = walk_wp_accum_r;
+                walk_page_m = walk_page_m_r;
+                walk_done = walk_done_r;
+                desc_dt = walk_fetch_lo_word_r[1:0];
+                level_after = walk_levels_r + 3'd1;
+                force_invalid = 1'b0;
+
+                walk_wp_accum = walk_wp_accum || walk_fetch_lo_word_r[2];
+
+                if (!walk_fetch_lo_valid_r || !walk_fetch_hi_valid_r) begin
+                    walk_fault = 1'b1;
+                    walk_bus_fault = 1'b1;
+                end
+                if (!walk_fault && (walk_desc_size_r == 4'd8) && !ptest_fc_r[2] && walk_fetch_lo_word_r[8]) begin
+                    walk_fault = 1'b1;
+                    walk_super_fault = 1'b1;
+                end
+
+                if (!walk_fault) begin
+                    case (desc_dt)
+                        2'b00: begin
+                            walk_fault = 1'b1;
+                            walk_invalid_fault = 1'b1;
+                        end
+
+                        2'b01: begin
+                            if ((walk_desc_size_r == 4'd8) && walk_has_next_r && (walk_next_width_r != 4'h0)) begin
+                                walk_limit_index = mmu_index_extract(
+                                    ptest_logical_r,
+                                    ptest_tc_r[19:16],
+                                    walk_consumed_r,
+                                    walk_next_width_r
+                                );
+                                if (mmu_limit_violation(walk_fetch_lo_word_r[31], walk_fetch_lo_word_r[30:16], walk_limit_index)) begin
+                                    walk_fault = 1'b1;
+                                    walk_limit_fault = 1'b1;
+                                end
+                            end
+
+                            if (!walk_fault) begin
+                                walk_done = 1'b1;
+                                walk_page_m = walk_fetch_lo_word_r[4];
+                            end
+                        end
+
+                        default: begin
+                            if (walk_has_next_r && (level_after < search_limit_r)) begin
+                                if ((walk_desc_size_r == 4'd8) && (walk_next_width_r != 4'h0)) begin
+                                    walk_limit_index = mmu_index_extract(
+                                        ptest_logical_r,
+                                        ptest_tc_r[19:16],
+                                        walk_consumed_r,
+                                        walk_next_width_r
+                                    );
+                                    if (mmu_limit_violation(walk_fetch_lo_word_r[31], walk_fetch_lo_word_r[30:16], walk_limit_index)) begin
+                                        walk_fault = 1'b1;
+                                        walk_limit_fault = 1'b1;
+                                    end
+                                end
+
+                                if (!walk_fault) begin
+                                    walk_table_base_r <= (walk_desc_size_r == 4'd8) ?
+                                                         {walk_fetch_hi_word_r[31:4], 4'b0000} :
+                                                         {walk_fetch_lo_word_r[31:4], 4'b0000};
+                                    walk_desc_size_r <= (desc_dt == 2'b10) ? 4'd4 : 4'd8;
+                                    walk_wp_accum_r <= walk_wp_accum;
+                                    walk_levels_r <= level_after;
+                                    ptest_state_r <= PTEST_ST_STEP;
+                                end
+                            end else if (!walk_has_next_r) begin
+                                walk_desc_ptr_r <= (walk_desc_size_r == 4'd8) ? walk_fetch_hi_word_r : walk_fetch_lo_word_r;
+                                walk_desc_dt_r <= desc_dt;
+                                walk_wp_accum_r <= walk_wp_accum;
+                                walk_levels_r <= level_after;
+                                ptest_state_r <= PTEST_ST_INDIRECT_LO_REQ;
+                            end else begin
+                                force_invalid = (search_limit_r == 3'd7);
+                            end
+                        end
+                    endcase
+                end
+
+                if ((ptest_state_r == PTEST_ST_EVAL) && (walk_done || walk_fault || force_invalid || (level_after >= search_limit_r && walk_has_next_r))) begin
+                    PTEST_WALK_MMUSR <= ptest_walk_mmusr(
+                        walk_limit_fault,
+                        walk_super_fault,
+                        walk_bus_fault,
+                        walk_wp_accum,
+                        walk_done,
+                        walk_page_m,
+                        walk_invalid_fault,
+                        force_invalid,
+                        level_after
+                    );
+                    PTEST_BUSY <= 1'b0;
+                    PTEST_READY <= 1'b1;
+                    ptest_state_r <= PTEST_ST_IDLE;
+                    walk_done_r <= walk_done;
+                    walk_fault_r <= walk_fault;
+                    walk_limit_fault_r <= walk_limit_fault;
+                    walk_super_fault_r <= walk_super_fault;
+                    walk_bus_fault_r <= walk_bus_fault;
+                    walk_invalid_fault_r <= walk_invalid_fault;
+                    walk_wp_accum_r <= walk_wp_accum;
+                    walk_page_m_r <= walk_page_m;
+                end
+            end
+
+            PTEST_ST_INDIRECT_LO_REQ: begin
+                ptest_state_r <= PTEST_ST_INDIRECT_LO_RESP;
+            end
+
+            PTEST_ST_INDIRECT_LO_RESP: begin
+                walk_fetch_lo_word_r <= SHADOW_LOOKUP[31:0];
+                walk_fetch_lo_valid_r <= SHADOW_LOOKUP[32];
+                if (walk_desc_dt_r == 2'b10)
+                    ptest_state_r <= PTEST_ST_INDIRECT_HI_RESP;
+                else
+                    ptest_state_r <= PTEST_ST_INDIRECT_HI_REQ;
+            end
+
+            PTEST_ST_INDIRECT_HI_REQ: begin
+                ptest_state_r <= PTEST_ST_INDIRECT_HI_RESP;
+            end
+
+            PTEST_ST_INDIRECT_HI_RESP: begin
+                walk_fault = 1'b0;
+                walk_limit_fault = walk_limit_fault_r;
+                walk_super_fault = 1'b0;
+                walk_bus_fault = 1'b0;
+                walk_invalid_fault = 1'b0;
+                walk_wp_accum = walk_wp_accum_r;
+                walk_page_m = walk_page_m_r;
+                walk_done = 1'b0;
+
+                if (walk_desc_dt_r == 2'b10) begin
+                    if (!walk_fetch_lo_valid_r) begin
+                        walk_fault = 1'b1;
+                        walk_bus_fault = 1'b1;
+                    end else if (walk_fetch_lo_word_r[1:0] != 2'b01) begin
+                        walk_fault = 1'b1;
+                        walk_invalid_fault = 1'b1;
+                    end else begin
+                        walk_wp_accum = walk_wp_accum || walk_fetch_lo_word_r[2];
+                        walk_page_m = walk_fetch_lo_word_r[4];
+                        walk_done = 1'b1;
+                    end
+                end else begin
+                    if (!walk_fetch_lo_valid_r || !SHADOW_LOOKUP[32]) begin
+                        walk_fault = 1'b1;
+                        walk_bus_fault = 1'b1;
+                    end else if (walk_fetch_lo_word_r[1:0] != 2'b01) begin
+                        walk_fault = 1'b1;
+                        walk_invalid_fault = 1'b1;
+                    end else begin
+                        walk_wp_accum = walk_wp_accum || walk_fetch_lo_word_r[2];
+                        if (!ptest_fc_r[2] && walk_fetch_lo_word_r[8]) begin
+                            walk_fault = 1'b1;
+                            walk_super_fault = 1'b1;
+                        end else begin
+                            walk_page_m = walk_fetch_lo_word_r[4];
+                            walk_done = 1'b1;
+                        end
+                    end
+                end
+
+                PTEST_WALK_MMUSR <= ptest_walk_mmusr(
+                    walk_limit_fault,
+                    walk_super_fault,
+                    walk_bus_fault,
+                    walk_wp_accum,
+                    walk_done,
+                    walk_page_m,
+                    walk_invalid_fault,
+                    1'b0,
+                    walk_levels_r
+                );
                 PTEST_BUSY <= 1'b0;
                 PTEST_READY <= 1'b1;
+                ptest_state_r <= PTEST_ST_IDLE;
+                walk_done_r <= walk_done;
+                walk_fault_r <= walk_fault;
+                walk_limit_fault_r <= walk_limit_fault;
+                walk_super_fault_r <= walk_super_fault;
+                walk_bus_fault_r <= walk_bus_fault;
+                walk_invalid_fault_r <= walk_invalid_fault;
+                walk_wp_accum_r <= walk_wp_accum;
+                walk_page_m_r <= walk_page_m;
             end
-        end
+
+            default: begin
+                PTEST_BUSY <= 1'b0;
+                ptest_state_r <= PTEST_ST_IDLE;
+            end
+        endcase
     end
 end
-
 endmodule

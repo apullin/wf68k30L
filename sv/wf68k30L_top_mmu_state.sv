@@ -32,6 +32,7 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic [2:0]  SFC,
     input  logic [2:0]  DFC,
     input  logic [31:0] ADR_EFF,
+    input  logic        PTEST_WALK_START,
     input  logic [15:0] PTEST_WALK_MMUSR,
 
     output logic [63:0] MMU_SRP,
@@ -68,6 +69,7 @@ logic [2:0]  MMU_ATC_FC [0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [31:0] MMU_ATC_TAG[0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [31:0] MMU_ATC_PTAG[0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [MMU_ATC_WAY_BITS-1:0] MMU_ATC_REPL_PTR [0:MMU_ATC_SETS-1];
+logic                        PTEST_WALK_PENDING;
 
 for (genvar set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin : gen_pack_mmu_atc_set
     for (genvar way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin : gen_pack_mmu_atc_way
@@ -216,7 +218,6 @@ always_ff @(posedge CLK) begin : mmu_registers
     logic        pflush_exec;
     logic        pmove_flush_exec;
     logic [2:0]  fc_sel;
-    logic [2:0]  ptest_level;
     logic [2:0]  atc_fc;
     logic [2:0]  atc_mask;
     logic [31:0] atc_logical;
@@ -249,6 +250,7 @@ always_ff @(posedge CLK) begin : mmu_registers
         MMU_TT0 <= 32'h0;
         MMU_TT1 <= 32'h0;
         MMU_MMUSR <= 32'h0;
+        PTEST_WALK_PENDING <= 1'b0;
         TRAP_MMU_CFG <= 1'b0;
         MMU_ATC_FLUSH_COUNT <= 32'h0;
         for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin
@@ -296,6 +298,8 @@ always_ff @(posedge CLK) begin : mmu_registers
             MMU_TT1 <= ALU_RESULT[31:0];
         if (MMU_MMUSR_WR)
             MMU_MMUSR <= {16'h0, ALU_RESULT[15:0]};
+        if (PTEST_WALK_START)
+            PTEST_WALK_PENDING <= 1'b1;
 
         if (pmove_flush_exec) begin
             for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1)
@@ -416,23 +420,25 @@ always_ff @(posedge CLK) begin : mmu_registers
         end
 
         if (ptest_exec) begin
-            atc_fc = mmu_fc_decode(BIW_1[4:0], DR_OUT_1, SFC, DFC);
-            ptest_level = BIW_1[12:10];
-            atc_logical = ADR_EFF;
-            atc_tag = mmu_page_tag(MMU_TC, atc_logical);
-            atc_rmw = 1'b0;
-
-            tt_hit = mmu_tt_match(MMU_TT0, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw) ||
-                     mmu_tt_match(MMU_TT1, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw);
-
-            atc_lookup = mmu_atc_lookup(atc_fc, atc_tag, 1'b0);
-            atc_hit = atc_lookup[35];
-            atc_b_result = atc_lookup[34];
-            atc_w_result = atc_lookup[33];
-            atc_m_result = atc_lookup[32];
-
             mmusr_value = 16'h0000;
-            if (ptest_level == 3'b000) begin
+            if (PTEST_WALK_PENDING) begin
+                mmusr_value = PTEST_WALK_MMUSR;
+                PTEST_WALK_PENDING <= 1'b0;
+            end else begin
+                atc_fc = mmu_fc_decode(BIW_1[4:0], DR_OUT_1, SFC, DFC);
+                atc_logical = ADR_EFF;
+                atc_tag = mmu_page_tag(MMU_TC, atc_logical);
+                atc_rmw = 1'b0;
+
+                tt_hit = mmu_tt_match(MMU_TT0, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw) ||
+                         mmu_tt_match(MMU_TT1, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw);
+
+                atc_lookup = mmu_atc_lookup(atc_fc, atc_tag, 1'b0);
+                atc_hit = atc_lookup[35];
+                atc_b_result = atc_lookup[34];
+                atc_w_result = atc_lookup[33];
+                atc_m_result = atc_lookup[32];
+
                 if (tt_hit)
                     mmusr_value = MMUSR_T;
                 else if (!atc_hit)
@@ -445,8 +451,6 @@ always_ff @(posedge CLK) begin : mmu_registers
                     if (atc_m_result)
                         mmusr_value = mmusr_value | MMUSR_M;
                 end
-            end else begin
-                mmusr_value = PTEST_WALK_MMUSR;
             end
             MMU_MMUSR <= {16'h0, mmusr_value};
         end
