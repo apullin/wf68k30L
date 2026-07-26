@@ -990,7 +990,10 @@ always_ff @(posedge CLK) begin : status_reg_proc
         SREG_MEM[10:8] = IRQ_PEND; // Update IRQ level.
     end
 
-    if (SR_CLR_MBIT)
+    // Reset enters the interrupt mode of the supervisor level, so it clears M
+    // along with setting S above. Every other exception preserves M and only
+    // the interrupt stack switch clears it via SR_CLR_MBIT.
+    if (SR_CLR_MBIT || RESET)
         SREG_MEM[12] = 1'b0;
     else if (SR_WR && OP_IN == RTE) // Written by the exception handler, no ALU required.
         SREG_MEM = OP1_IN[15:0];
