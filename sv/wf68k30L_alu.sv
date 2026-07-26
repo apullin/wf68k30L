@@ -500,8 +500,13 @@ always_comb begin : other_ops
     case (OP)
         CAS:
             RESULT_tmp = OP2; // Destination operand.
-        CAS2: // Destination operands.
-            RESULT_tmp = HILOn ? OP3 : OP2;
+        CAS2: // Destination operands (written to Dc1/Dc2 when a compare fails).
+            // OP2 always holds the memory operand of the phase being compared,
+            // so after the second phase it is memory operand 2 and OP3 still
+            // holds the retained memory operand 1. The compare-register
+            // writeback visits Dc1 first (HILOn = 0) and Dc2 second
+            // (HILOn = 1), so Dc1 must take OP3 and Dc2 must take OP2.
+            RESULT_tmp = HILOn ? OP2 : OP3;
         EXT:
             case (BIW_0[8:6])
                 3'b011:  RESULT_tmp = {{16{OP2[15]}}, OP2[15:0]};
@@ -779,7 +784,12 @@ always_comb begin : cond_codes_comb
             SM_sig = OP1_SIGNEXT[31];
             DM_sig = OP2[31];
         end
-        ADD, ADDI, ADDQ, ADDX, CMP, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX: begin
+        // CAS and CAS2 belong here too: PRM Table 3-11 gives them the CMP
+        // condition-code equations, and the XNZVC arm below already routes them
+        // through compute_cmp_flags. Without them the MSBs fell to the default
+        // all-zero arm, so N, V and C came out cleared for every CAS -- correct
+        // only by accident on the equal-operands path.
+        ADD, ADDI, ADDQ, ADDX, CAS, CAS2, CMP, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX: begin
             case (OP_SIZE)
                 BYTE: begin
                     RM_sig = RESULT_INTOP[7];
