@@ -161,6 +161,9 @@ assign AR_SEL_WR_1 = (OP == ADDQ || OP == SUBQ) ? BIW_0[2:0] :
                      (OP == LINK) ? BIW_0[2:0] :
                      IS_MOVEM ? MOVEM_RD_SEL :
                      (OP == MOVE_USP) ? BIW_0[2:0] :
+                     // Keyed on the fetch stage: AR_MARK_USED latches this selector at
+                     // the end of INIT_EXEC_WB, before PTEST reaches the writeback stage.
+                     (OP == PTEST) ? BIW_1[7:5] :
                      BIW_0[11:9]; // ADDA, EXG, LEA, MOVE, MOVEA, SUBA.
 
 assign AR_WR_1 = AR_WR_I;
@@ -176,7 +179,8 @@ assign AR_WR_I = (OP == LINK && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) ? 1'b1 
                  (OP_WB_I == MOVEA) ? 1'b1 :
                  (OP_WB_I == MOVEC && BIW_1_WB[15] && !BIW_0_WB[0]) ? 1'b1 : // To general register.
                  (OP_WB_I == MOVES && BIW_1_WB[15]) ? 1'b1 :
-                 (OP_WB_I == MOVEM && MOVEM_ADn_WB) ? 1'b1 : 1'b0;
+                 (OP_WB_I == MOVEM && MOVEM_ADn_WB) ? 1'b1 :
+                 (OP_WB_I == PTEST && BIW_1_WB[8]) ? 1'b1 : 1'b0; // Descriptor address to An.
 
 assign AR_SEL_RD_2 = (OP == CHK2 || OP == CMP2) ? BIW_1[14:12] :
                      IS_MOVEM ? MOVEM_RD_SEL : // This is the non addressing output.

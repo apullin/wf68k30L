@@ -15,7 +15,8 @@ module WF68K30L_TOP_MMU_PTEST (
     input  logic [32:0] SHADOW_LOOKUP,
     output logic        PTEST_BUSY,
     output logic        PTEST_READY,
-    output logic [15:0] PTEST_WALK_MMUSR
+    output logic [15:0] PTEST_WALK_MMUSR,
+    output logic [31:0] PTEST_DESC_ADDR
 );
 
 `include "wf68k30L_pkg.svh"
@@ -72,6 +73,9 @@ logic [31:0] walk_fetch_lo_word_r;
 logic [31:0] walk_fetch_hi_word_r;
 logic        walk_fetch_lo_valid_r;
 logic        walk_fetch_hi_valid_r;
+// The indirect descriptor address exists only as the shadow request, so it has
+// to be held until the fetch is known to have succeeded.
+logic [31:0] walk_indirect_addr_r;
 
 function automatic logic [15:0] ptest_root_mmusr(
     input logic [14:0] limit,
@@ -172,6 +176,7 @@ always_ff @(posedge CLK) begin : ptest_fsm
         PTEST_BUSY <= 1'b0;
         PTEST_READY <= 1'b0;
         PTEST_WALK_MMUSR <= 16'h0000;
+        PTEST_DESC_ADDR <= 32'h0000_0000;
         ptest_state_r <= PTEST_ST_IDLE;
         ptest_tc_r <= 32'h0000_0000;
         ptest_fc_r <= 3'b000;
@@ -202,6 +207,7 @@ always_ff @(posedge CLK) begin : ptest_fsm
         walk_fetch_hi_word_r <= 32'h0000_0000;
         walk_fetch_lo_valid_r <= 1'b0;
         walk_fetch_hi_valid_r <= 1'b0;
+        walk_indirect_addr_r <= 32'h0000_0000;
     end else begin
         if (PTEST_CONSUME)
             PTEST_READY <= 1'b0;
@@ -246,6 +252,10 @@ always_ff @(posedge CLK) begin : ptest_fsm
                     walk_fetch_hi_word_r <= 32'h0000_0000;
                     walk_fetch_lo_valid_r <= 1'b0;
                     walk_fetch_hi_valid_r <= 1'b0;
+                    walk_indirect_addr_r <= 32'h0000_0000;
+                    // Stays zero unless a descriptor is successfully fetched, which
+                    // is also the value required for a page-descriptor root pointer.
+                    PTEST_DESC_ADDR <= 32'h0000_0000;
 
                     if (root_dt == 2'b01) begin
                         // UM 9.5.1.2: with TC.FCL set the root L/U and LIMIT are unused.
@@ -379,6 +389,8 @@ always_ff @(posedge CLK) begin : ptest_fsm
                 if (!walk_fetch_lo_valid_r || !walk_fetch_hi_valid_r) begin
                     walk_fault = 1'b1;
                     walk_bus_fault = 1'b1;
+                end else begin
+                    PTEST_DESC_ADDR <= walk_desc_addr_r;
                 end
                 if (!walk_fault && (walk_desc_size_r == 4'd8) && !ptest_fc_r[2] && walk_fetch_lo_word_r[8]) begin
                     walk_fault = 1'b1;
@@ -476,6 +488,7 @@ always_ff @(posedge CLK) begin : ptest_fsm
             end
 
             PTEST_ST_INDIRECT_LO_REQ: begin
+                walk_indirect_addr_r <= SHADOW_RD_ADDR;
                 ptest_state_r <= PTEST_ST_INDIRECT_LO_RESP;
             end
 
@@ -532,6 +545,9 @@ always_ff @(posedge CLK) begin : ptest_fsm
                         end
                     end
                 end
+
+                if (!walk_bus_fault)
+                    PTEST_DESC_ADDR <= walk_indirect_addr_r;
 
                 PTEST_WALK_MMUSR <= ptest_walk_mmusr(
                     walk_limit_fault,

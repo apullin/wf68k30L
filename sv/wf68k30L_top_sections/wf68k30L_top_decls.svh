@@ -377,6 +377,7 @@ logic        MMU_PTEST_CONSUME;
 logic        MMU_PTEST_BUSY;
 logic        MMU_PTEST_READY;
 logic [15:0] MMU_PTEST_WALK_MMUSR;
+logic [31:0] MMU_PTEST_DESC_ADDR;
 logic        MMU_TWALK_START;
 logic        MMU_TWALK_BUSY;
 logic        MMU_TWALK_VALID;

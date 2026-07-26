@@ -114,7 +114,8 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     output logic        MMU_TWALK_WP_ACCUM,
     output logic        MMU_PTEST_BUSY,
     output logic        MMU_PTEST_READY,
-    output logic [15:0] MMU_PTEST_WALK_MMUSR
+    output logic [15:0] MMU_PTEST_WALK_MMUSR,
+    output logic [31:0] MMU_PTEST_DESC_ADDR
 );
 
 `include "wf68k30L_pkg.svh"
@@ -326,7 +327,8 @@ WF68K30L_TOP_MMU_PTEST I_TOP_MMU_PTEST (
     .SHADOW_LOOKUP(MMU_PTEST_SHADOW_LOOKUP),
     .PTEST_BUSY(MMU_PTEST_BUSY),
     .PTEST_READY(MMU_PTEST_READY),
-    .PTEST_WALK_MMUSR(MMU_PTEST_WALK_MMUSR)
+    .PTEST_WALK_MMUSR(MMU_PTEST_WALK_MMUSR),
+    .PTEST_DESC_ADDR(MMU_PTEST_DESC_ADDR)
 );
 
 // ========================================================================

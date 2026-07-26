@@ -2885,16 +2885,9 @@ def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst):
     return program, loads, desc_c_addr, logical_addr
 
 
-@cocotb.test(skip=True)
+@cocotb.test()
 async def test_mmu_ptest_returns_last_descriptor_address_in_an(dut):
-    """PTEST <ea>,#level,An writes the last descriptor's physical address to An (UM 9.8).
-
-    Skipped: the address-register file writes AR[AR_PNTR_WB_1], and AR_PNTR_WB_1 is
-    only loaded from AR_SEL_WR_1 when AR_MARK_USED strobes at the end of
-    INIT_EXEC_WB. AR_MARK_USED (wf68k30L_ctrl_comb.sv) has no PTEST arm, so the
-    write lands on whichever register the previous instruction marked. Enable this
-    test together with that arm.
-    """
+    """PTEST <ea>,#level,An writes the last descriptor's physical address to An (UM 9.8)."""
     h = CPUTestHarness(dut)
     an_dst = h.DATA_BASE + 0xC80
     mmusr_dst = h.DATA_BASE + 0xCA0

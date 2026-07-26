@@ -51,6 +51,7 @@ module WF68K30L_OPERAND_MUX (
     input  logic [31:0] MMU_TT0,
     input  logic [31:0] MMU_TT1,
     input  logic [31:0] MMU_MMUSR,
+    input  logic [31:0] MMU_PTEST_DESC_ADDR,
     input  logic [63:0] ALU_RESULT,
 
     // --- Immediate data buffer inputs ---
@@ -171,6 +172,8 @@ end
 always_comb begin : ar_in_1_mux
     if (BUSY_EXH)
         AR_IN_1 = DATA_TO_CORE;
+    else if (ALU_BSY && AR_WR_1 && OP_WB == PTEST)
+        AR_IN_1 = MMU_PTEST_DESC_ADDR; // PTEST: last descriptor address to An.
     else if (ALU_BSY && AR_WR_1)
         AR_IN_1 = ALU_RESULT[31:0];
     else if (ALU_BSY && (DFC_WR || SFC_WR || ISP_WR || MSP_WR || USP_WR))

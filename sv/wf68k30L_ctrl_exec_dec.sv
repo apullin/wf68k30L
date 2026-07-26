@@ -171,7 +171,7 @@ always_comb begin : exec_wb_dec
                     end
                     PTEST: begin
                         if (BIW_1_WB[12:10] == 3'b000 || MMU_PTEST_READY)
-                            NEXT_EXEC_WB_STATE = IDLE;
+                            NEXT_EXEC_WB_STATE = BIW_1_WB[8] ? WRITEBACK : IDLE; // Descriptor address to An.
                         else
                             NEXT_EXEC_WB_STATE = EXECUTE;
                     end

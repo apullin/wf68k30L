@@ -36,6 +36,7 @@
         .MMU_TT0                (MMU_TT0),
         .MMU_TT1                (MMU_TT1),
         .MMU_MMUSR              (MMU_MMUSR),
+        .MMU_PTEST_DESC_ADDR    (MMU_PTEST_DESC_ADDR),
         .ALU_RESULT             (ALU_RESULT),
         .STORE_IDATA_B1         (STORE_IDATA_B1),
         .STORE_IDATA_B2         (STORE_IDATA_B2),
