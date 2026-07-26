@@ -1751,6 +1751,46 @@ async def test_rte_format_a_rerun_ssw_uses_refill_path(dut):
     h.cleanup()
 
 
+@cocotb.test()
+async def test_rte_format_9_deallocates_twenty_bytes(dut):
+    """UM 8.1.13/Table 8-6: format $9 is a 10-word frame, so RTE must
+    deallocate 0x14 bytes - matching the ten words the builder pushes."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001C00
+    target_pc = 0x00000500
+    instr_adr = 0x00000100
+
+    target_code = _handler_code_read_sp(h, 0x5F)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    frame = [0x0000] * 10
+    frame[0x00 // 2] = 0x2700
+    frame[0x02 // 2] = (target_pc >> 16) & 0xFFFF
+    frame[0x04 // 2] = target_pc & 0xFFFF
+    frame[0x06 // 2] = 0x9000 | 0x034        # format 9, vector offset 0x34 (vector 13)
+    frame[0x08 // 2] = (instr_adr >> 16) & 0xFFFF
+    frame[0x0A // 2] = instr_adr & 0xFFFF
+    h.mem.load_words(frame_sp, frame)
+
+    found = await h.run_until_sentinel(max_cycles=6000)
+    marker = h.read_result_long(0)
+    sp_after = h.read_result_long(4)
+    assert found, f"Sentinel not reached after format-9 RTE (marker=0x{marker:08X})"
+    assert marker == 0x5F, f"Format-9 RTE reached the wrong code: 0x{marker:08X}"
+    assert sp_after == frame_sp + 0x14, (
+        f"SP after format-9 RTE = 0x{sp_after:08X}; expected 0x{frame_sp + 0x14:08X} "
+        f"(ten-word frame = 0x14 bytes)"
+    )
+    h.cleanup()
+
+
 # =========================================================================
 # TRAP with RTE: verify we can return from a trap handler
 # =========================================================================
@@ -1866,5 +1906,78 @@ async def test_divu_divide_by_zero_vector_offset(dut):
     # Vector 5 * 4 = 0x014
     assert vec_offset == 0x014, (
         f"Div-by-zero vector offset should be 0x014 (vector 5): got 0x{vec_offset:03X}"
+    )
+    h.cleanup()
+
+
+# =========================================================================
+# MMU configuration exception (vector 56) - post-instruction, format $2
+# =========================================================================
+
+@cocotb.test()
+async def test_mmu_config_exception_is_post_instruction_format_2(dut):
+    """UM 8.1.10: the MMU configuration exception is a post-instruction
+    exception. It builds a format-$2 frame whose stacked PC is the scanPC
+    (next instruction), so a handler that RTEs resumes past the PMOVE."""
+    h = CPUTestHarness(dut)
+    handler_addr = 0x000680
+    vector_addr = 56 * 4
+    tc_src = h.DATA_BASE + 0x200
+    invalid_tc = 0x80700000   # E=1, PS=0x7 reserved -> configuration exception
+
+    handler_code = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *moveq(0x38, 1),
+        *move(LONG, DN, 1, AN_IND, 0),         # [RESULT+0] = 0x38
+        *addq(LONG, 4, AN, 0),
+        *moveq(0, 2),
+        *move(WORD, AN_DISP, 7, DN, 2),        # D2 = [SP+6] format/vector word
+        *disp16(6),
+        *move(LONG, DN, 2, AN_IND, 0),         # [RESULT+4]
+        *addq(LONG, 4, AN, 0),
+        *moveq(0, 3),
+        *move(WORD, AN_DISP, 7, DN, 3),        # D3 = [SP+4] low word of stacked PC
+        *disp16(4),
+        *move(LONG, DN, 3, AN_IND, 0),         # [RESULT+8]
+        *rte(),
+    ]
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),   # 0x100: A0 = TC source (6 bytes)
+        *imm_long(tc_src),
+        0xF010, 0x4000,                        # 0x106: PMOVE (A0),TC -> next = 0x10A
+        *moveq(0x11, 1),                       # 0x10A: only runs if RTE resumes past PMOVE
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE + 0x10),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    h.mem.load_long(tc_src, invalid_tc)
+
+    found = await h.run_until_sentinel(max_cycles=14000)
+    marker = h.read_result_long(0)
+    fmt_vec = h.read_result_long(4)
+    stacked_pc_lo = h.read_result_long(8)
+    resumed = h.mem.read(h.RESULT_BASE + 0x10, 4)
+    assert marker == 0x38, (
+        f"MMU configuration handler did not run: marker=0x{marker:08X}"
+    )
+    assert (fmt_vec >> 12) == 0x2, (
+        f"MMU configuration frame format = 0x{fmt_vec >> 12:X}; expected 0x2 "
+        f"(six-word post-instruction frame); full word 0x{fmt_vec:04X}"
+    )
+    assert (fmt_vec & 0xFFF) == 0x0E0, (
+        f"Vector offset = 0x{fmt_vec & 0xFFF:03X}; expected 0x0E0 (vector 56)"
+    )
+    assert stacked_pc_lo == 0x010A, (
+        f"Stacked PC = 0x....{stacked_pc_lo:04X}; expected 0x010A (the scanPC, "
+        f"i.e. the instruction after the 4-byte PMOVE at 0x106)"
+    )
+    assert found, "Sentinel not reached: RTE re-executed the faulting PMOVE"
+    assert resumed == 0x11, (
+        f"Code after the PMOVE did not run: marker=0x{resumed:08X}"
     )
     h.cleanup()

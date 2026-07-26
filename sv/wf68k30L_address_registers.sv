@@ -529,7 +529,10 @@ always_ff @(posedge CLK) begin : stack_pointers
         endcase
     end
 
-    if (AR_DEC && AR_PNTR_1 == 7 && SBIT && MBIT) begin
+    // ISP_DEC is the exception handler's frame push. It must move whichever
+    // supervisor stack pointer the frame write address is taken from, which
+    // the exception handler forces to S=1 and therefore selects with M alone.
+    if ((ISP_DEC && MBIT) || (AR_DEC && AR_PNTR_1 == 7 && SBIT && MBIT)) begin
         case (OP_SIZE)
             BYTE:    MSP_REG <= MSP_REG - 32'd2; // Stack: byte decrements by two.
             WORD:    MSP_REG <= MSP_REG - 32'd2;
@@ -558,7 +561,7 @@ always_ff @(posedge CLK) begin : stack_pointers
         endcase
     end
 
-    if (ISP_DEC || (AR_DEC && AR_PNTR_1 == 7 && SBIT && !MBIT)) begin
+    if ((ISP_DEC && !MBIT) || (AR_DEC && AR_PNTR_1 == 7 && SBIT && !MBIT)) begin
         case (OP_SIZE)
             BYTE:    ISP_REG <= ISP_REG - 32'd2; // Stack: byte decrements by two.
             WORD:    ISP_REG <= ISP_REG - 32'd2;
