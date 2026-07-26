@@ -161,21 +161,68 @@ test-shakeout:
 	  --coremark-iterations "$(SHAKEOUT_COREMARK_ITERATIONS)" \
 	  --coremark-total-data-size "$(SHAKEOUT_COREMARK_TOTAL_DATA_SIZE)"
 
-# Lightweight formal smoke on the data-register hazard tracker.
-formal-smoke:
+# Bounded formal checks against the real RTL.
+#
+# clk2fflogic + `chformal -lower` are REQUIRED: as of Yosys 0.62 an immediate
+# assert becomes a $check cell, and write_smt2 emits nothing for $check. Without
+# these two passes the SMT2 contains zero assertions and every run reports
+# PASSED vacuously. `make formal-selftest` guards against that regressing.
+#
+# The harnesses toggle CLK from $global_clock, so a depth of N global steps is
+# about N/2 clock edges.
+FORMAL_LOWER := clk2fflogic; chformal -lower
+FORMAL_DEPTH ?= 24
+
+.PHONY: formal-selftest formal-deep
+
+formal-smoke: formal-selftest
 	mkdir -p build/formal
 	yosys -q -p \
 	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_data_registers.sv formal/data_regs_hazard_formal.sv; \
-	   prep -top data_regs_hazard_formal -flatten; \
+	   prep -top data_regs_hazard_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/data_regs_hazard.smt2"
-	yosys-smtbmc -s yices -t 24 build/formal/data_regs_hazard.smt2
+	yosys-smtbmc -s yices -t $(FORMAL_DEPTH) build/formal/data_regs_hazard.smt2
+	yosys-smtbmc -i -s yices -t $(FORMAL_DEPTH) build/formal/data_regs_hazard.smt2
 	yosys -q -p \
-	  "read_verilog -formal -sv formal/mmu_runtime_gate_formal.sv; \
-	   prep -top mmu_runtime_gate_formal -flatten; \
+	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv formal/mmu_runtime_gate_formal.sv; \
+	   prep -top mmu_runtime_gate_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/mmu_runtime_gate.smt2"
-	yosys-smtbmc -s yices -t 24 build/formal/mmu_runtime_gate.smt2
+	yosys-smtbmc -s yices -t $(FORMAL_DEPTH) build/formal/mmu_runtime_gate.smt2
 	yosys -q -p \
-	  "read_verilog -formal -sv formal/mmu_walk_delay_state_formal.sv; \
-	   prep -top mmu_walk_delay_state_formal -flatten; \
+	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_top_mmu_state.sv formal/mmu_walk_delay_state_formal.sv; \
+	   prep -top mmu_walk_delay_state_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/mmu_walk_delay_state.smt2"
-	yosys-smtbmc -s yices -t 24 build/formal/mmu_walk_delay_state.smt2
+	yosys-smtbmc -s yices -t $(FORMAL_DEPTH) build/formal/mmu_walk_delay_state.smt2
+
+# Proves the formal flow can actually fail. A trivially false assertion must be
+# reported FAILED; if it passes, assertions are being dropped and every other
+# formal result in this Makefile is meaningless.
+formal-selftest:
+	mkdir -p build/formal
+	printf 'module formal_selftest;\n logic CLK = 1'"'"'b0;\n always_ff @($$global_clock) CLK <= !CLK;\n always_ff @(posedge CLK) assert(1'"'"'b0);\nendmodule\n' \
+	  > build/formal/formal_selftest.sv
+	yosys -q -p \
+	  "read_verilog -formal -sv build/formal/formal_selftest.sv; \
+	   prep -top formal_selftest -flatten; $(FORMAL_LOWER); \
+	   write_smt2 -wires build/formal/formal_selftest.smt2"
+	@if yosys-smtbmc -s yices -t 8 build/formal/formal_selftest.smt2 2>&1 | grep -q 'Status: FAILED'; then \
+	   echo "formal-selftest: OK (assertions are live)"; \
+	 else \
+	   echo "formal-selftest: FAILED -- assertions are not reaching the solver;"; \
+	   echo "                 every formal result would be a vacuous PASS."; \
+	   exit 1; \
+	 fi
+
+# Opt-in exhaustive register-file property (REGFILE_PROPERTY). Known hard: the
+# UNSAT direction did not complete at depth 10 on yices/boolector/bitwuzla, so
+# this is deliberately not part of formal-smoke. Counterexamples are still found
+# quickly, which makes it useful as a mutation check.
+formal-deep: formal-selftest
+	mkdir -p build/formal
+	yosys -q -p \
+	  "read_verilog -formal -sv -DREGFILE_PROPERTY -I $(SV_DIR) $(SV_DIR)/wf68k30L_data_registers.sv formal/data_regs_hazard_formal.sv; \
+	   prep -top data_regs_hazard_formal -flatten; $(FORMAL_LOWER); \
+	   write_smt2 -wires build/formal/data_regs_regfile.smt2"
+	yosys-smtbmc -s yices -t $(FORMAL_DEEP_DEPTH) build/formal/data_regs_regfile.smt2
+
+FORMAL_DEEP_DEPTH ?= 10

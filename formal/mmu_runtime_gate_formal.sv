@@ -1,3 +1,7 @@
+// NOTE: this harness re-implements the gating equations rather than
+// instantiating the RTL, so it checks the intended contract, not the
+// implementation. Binding it to the real module is pending; until then a
+// divergence in sv/wf68k30L_top_*.sv will NOT be caught here.
 module mmu_runtime_gate_formal;
     logic data_rd_bus, data_wr, opcode_req_core_miss;
     logic mmu_runtime_fault, mmu_runtime_stall;

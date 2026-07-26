@@ -1,3 +1,7 @@
+// NOTE: this harness re-implements the gating equations rather than
+// instantiating the RTL, so it checks the intended contract, not the
+// implementation. Binding it to the real module is pending; until then a
+// divergence in sv/wf68k30L_top_*.sv will NOT be caught here.
 module mmu_walk_delay_state_formal;
     logic CLK = 1'b0;
     always_ff @($global_clock) begin
@@ -37,8 +41,9 @@ module mmu_walk_delay_state_formal;
             RESET_CPU <= 1'b0;
 
         if (f_past_valid) begin
-            // No armed state can survive reset or active bus cycles.
-            if (RESET_CPU || BUS_BSY)
+            // The latch reflects the previous cycle's inputs, so reset/BUS_BSY
+            // clear it one cycle later.
+            if ($past(RESET_CPU) || $past(BUS_BSY))
                 assert(!MMU_WALK_DELAY_ARMED);
 
             // Armed state must directly mirror prior-cycle stall when request is present.
