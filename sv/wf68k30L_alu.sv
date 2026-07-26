@@ -91,6 +91,8 @@ logic [31:0] RESULT_BITOP;
 logic [31:0] RESULT_INTOP;
 logic [31:0] RESULT_LOGOP;
 logic [63:0] RESULT_MUL;
+logic signed [63:0] RESULT_MUL_S;
+logic [63:0] RESULT_MUL_U;
 logic [31:0] RESULT_OTHERS;
 logic [5:0]  SHIFT_WIDTH;
 logic [5:0]  SHIFT_WIDTH_IN_sig;
@@ -450,9 +452,14 @@ end
 // ========================================================================
 // Multiplication
 // ========================================================================
-assign RESULT_MUL = (OP == MULS) ? ($signed(OP1_SIGNEXT) * $signed(OP2_SIGNEXT)) :
-                    (OP_SIZE == LONG) ? (OP1 * OP2) :
-                    ({16'h0, OP1[15:0]} * {16'h0, OP2[15:0]});
+// The two products need separately typed contexts: a conditional expression
+// mixing them is unsigned as a whole, which would zero extend the signed
+// operands to 64 bits before multiplying.
+assign RESULT_MUL_S = $signed(OP1_SIGNEXT) * $signed(OP2_SIGNEXT);
+assign RESULT_MUL_U = (OP_SIZE == LONG) ? (OP1 * OP2) :
+                      ({16'h0, OP1[15:0]} * {16'h0, OP2[15:0]});
+
+assign RESULT_MUL = (OP == MULS) ? RESULT_MUL_S : RESULT_MUL_U;
 
 // ========================================================================
 // Other/special operations

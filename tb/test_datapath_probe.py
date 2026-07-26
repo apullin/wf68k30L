@@ -62,6 +62,31 @@ async def test_muls_l_64bit_negative(dut):
 
 
 @cocotb.test()
+async def test_muls_l_32bit_negative_no_overflow(dut):
+    """MULS.L D1,D2 with -2 * 3: product fits in 32 bits -> V=0, N=1."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x223C, 0xFFFF, 0xFFFE,      # MOVE.L #-2,D1
+        0x243C, 0x0000, 0x0003,      # MOVE.L #3,D2
+        0x4C01, 0x2800,              # MULS.L D1,D2 (32-bit)
+        0x42C3,                      # MOVE CCR,D3
+        0x23C2, 0x0002, 0x0000,      # MOVE.L D2,($20000).L
+        0x23C3, 0x0002, 0x0004,      # MOVE.L D3,($20004).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+    d2 = h.mem.read(RES, 4)
+    ccr = h.mem.read(RES + 4, 4) & 0x1F
+    n = (ccr >> 3) & 1
+    z = (ccr >> 2) & 1
+    v = (ccr >> 1) & 1
+    assert (d2, n, z, v) == (0xFFFFFFFA, 1, 0, 0), (
+        f"MULS.L -2*3 (32-bit): D2=0x{d2:08X} N={n} Z={z} V={v}, "
+        f"expected 0xFFFFFFFA N=1 Z=0 V=0"
+    )
+
+
+@cocotb.test()
 async def test_bfffo_leading_zero_count(dut):
     """BFFFO D0{0:32},D1 with D0=0x00008000 must return offset 16."""
     h = CPUTestHarness(dut)
