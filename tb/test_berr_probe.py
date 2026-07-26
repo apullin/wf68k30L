@@ -199,6 +199,14 @@ async def test_berr_exception_and_rte_rerun(dut):
     assert d0 == 0x5A5AA5A5, (
         f"Rerun read returned 0x{d0:08X}, expected 0x5A5AA5A5"
     )
+    # UM 8.1.2: the stacked PC is the logical address of the instruction that
+    # was executing. RTE reruns the faulted access by re-executing from that
+    # address, so any other value silently drops the access.
+    stacked_pc = (frame[1] << 16) | frame[2]
+    assert stacked_pc == h.PROGRAM_BASE, (
+        f"Stacked PC = 0x{stacked_pc:08X}, expected 0x{h.PROGRAM_BASE:08X} "
+        f"(the faulting instruction)"
+    )
 
 
 @cocotb.test()
@@ -312,6 +320,7 @@ async def test_berr_on_iack_is_spurious_only(dut):
 CODE_FAULT_ADDR = 0x0E0000
 PC_ADDR = 0x02000C
 SSW_ADDR = 0x020010
+STORE_WITNESS = 0x020018
 
 # vec 2 handler for fetch faults: record format word, stacked PC and SSW, then
 # finish. The faulted instruction word is gone, so this one does not RTE.
@@ -326,6 +335,18 @@ FETCH_FAULT_HANDLER = [
     0x23C7, 0x0003, 0x0000,          # MOVE.L D7,($30000).L
     0x4E72, 0x2700,                  # STOP #$2700
 ]
+
+# vec 2 handler that reruns: counter++, record stacked PC, RTE. Touches only
+# D0/D1 so the faulted store's source register survives the rerun.
+STORE_FAULT_HANDLER = [
+    0x2039, 0x0002, 0x0000,          # MOVE.L ($20000).L,D0
+    0x5280,                          # ADDQ.L #1,D0
+    0x23C0, 0x0002, 0x0000,          # MOVE.L D0,($20000).L
+    0x222F, 0x0002,                  # MOVE.L 2(A7),D1
+    0x23C1, 0x0002, 0x000C,          # MOVE.L D1,($2000C).L
+    0x4E73,                          # RTE
+]
+
 
 async def _boot(dut, h, bus, program, handler):
     clock = cocotb.clock.Clock(dut.CLK, 10, unit="ns")
@@ -436,4 +457,55 @@ async def test_berr_on_speculative_prefetch_does_not_trap(dut):
     assert found, "Program did not complete past the faulted branch shadow"
     assert h.mem.read(0x020020, 4) == 0x11223344, (
         "The instruction before the branch did not execute correctly"
+    )
+
+
+@cocotb.test(skip=True)
+async def test_berr_on_store_stacks_the_storing_instruction(dut):
+    """UM 8.1.2: a faulted store must stack its own instruction address, or the
+    RTE rerun re-executes the wrong instruction and the store is lost.
+
+    Skipped: the next instruction is dispatched, advancing PC, while the store
+    is still on the bus, and the format A/B frame stacks the live PC
+    (wf68k30L_top_helpers_datapath.svh). Fixing it needs a PC copy frozen while
+    a data cycle is outstanding, next to PC_INSTR_EXH, plus the same treatment
+    for the frame's data cycle fault address, which is snapshotted from the
+    live ADR_EFF at exception entry. Suppressing the overlapping dispatch
+    instead (OW_REQ during WRITE_DEST) makes this test pass but leaves ADR_EFF
+    reading zero at entry, failing
+    test_mmu_instr::test_mmu_runtime_short_descriptor_wp_fault_bus_error_vector2.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrOnceBusModel(dut, h.mem, times=1)
+
+    store_addr = 0x00010C
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x263C, 0x5A5A, 0xA5A5,                   # 0x106 MOVE.L #$5A5AA5A5,D3
+        0x2083,                                   # 0x10C MOVE.L D3,(A0)  <- BERR
+        0x7421,                                   # 0x10E MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x110 MOVE.L D2,($20018).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x116 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x11C MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x122 STOP #$2700
+    ]
+
+    found = await _boot(dut, h, bus, program, STORE_FAULT_HANDLER)
+
+    counter = h.mem.read(COUNTER_ADDR, 4)
+    pc = h.mem.read(PC_ADDR, 4)
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert counter == 1, f"Bus-error handler ran {counter} times (expected 1)"
+    assert pc == store_addr, (
+        f"Stacked PC = 0x{pc:08X}, expected 0x{store_addr:08X}. A later value "
+        f"means the following instruction was dispatched before the store "
+        f"faulted, so RTE resumes past the store and discards it"
+    )
+    assert found, "Program did not complete after the RTE rerun"
+    assert h.mem.read(FAULT_ADDR, 4) == 0x5A5AA5A5, (
+        f"Faulted store was not rerun: 0x{FAULT_ADDR:06X} holds "
+        f"0x{h.mem.read(FAULT_ADDR, 4):08X}"
+    )
+    assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
+        "Execution did not continue correctly after the RTE rerun"
     )
