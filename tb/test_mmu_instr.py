@@ -9,6 +9,7 @@ Coverage in this phase:
   - Minimal translation path: TC[E], SRE root select, DT=1 constant offset, TT matches.
   - PTEST/PLOAD/PFLUSH Phase-3 semantics (MMUSR + ATC side effects).
   - PMOVE FD/PFLUSH flush-side-effect strobe.
+  - Runtime translation faults raise a bus error (vector 2) with a bus-fault frame.
   - MMU instructions are privileged in user mode (vector 8).
 """
 
@@ -21,6 +22,7 @@ from m68k_encode import (
     WORD,
     DN,
     AN_IND,
+    AN_DISP,
     SPECIAL,
     IMMEDIATE,
     move,
@@ -28,6 +30,8 @@ from m68k_encode import (
     moveq,
     move_to_abs_long,
     move_to_sr,
+    jmp_abs,
+    disp16,
     imm_long,
     imm_word,
 )
@@ -40,6 +44,26 @@ MMUSR_I = 1 << 10
 MMUSR_M = 1 << 9
 MMUSR_T = 1 << 6
 MMUSR_N = 0x0007
+
+# Bus-fault stack frames (format $A/$B) hold the format/vector word at frame
+# offset $06 and the data cycle fault address at frame offset $10.
+FRAME_OFFS_FORMAT_VECTOR = 0x06
+FRAME_OFFS_FAULT_ADDR = 0x10
+
+
+def _bus_fault_handler_code(h, marker=0x02):
+    """Vector-2 handler recording the marker, format/vector word and fault address."""
+    return [
+        *moveq(marker, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *move(WORD, AN_DISP, 7, DN, 2),
+        *disp16(FRAME_OFFS_FORMAT_VECTOR),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE + 4),
+        *move(LONG, AN_DISP, 7, DN, 3),
+        *disp16(FRAME_OFFS_FAULT_ADDR),
+        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE + 8),
+        *h.sentinel_program(),
+    ]
 
 
 @cocotb.test()
@@ -1070,12 +1094,12 @@ async def test_mmu_runtime_atc_refill_hit_and_flush(dut):
 
 
 @cocotb.test()
-async def test_mmu_runtime_invalid_root_traps_vector56(dut):
-    """Runtime MMU fault on unsupported root DT should trap to vector 56."""
+async def test_mmu_runtime_invalid_root_bus_error_vector2(dut):
+    """Runtime MMU fault on unsupported root DT should raise a bus error (vector 2)."""
     h = CPUTestHarness(dut)
 
     handler_addr = 0x0007C0
-    vector_addr = 56 * 4
+    vector_addr = 2 * 4
     logical_addr = 0x38000B00
     tt1_src = h.DATA_BASE + 0x6A0
     crp_bad_src = h.DATA_BASE + 0x6C0
@@ -1086,11 +1110,7 @@ async def test_mmu_runtime_invalid_root_traps_vector56(dut):
     crp_bad_lo = 0x00010000
     tc_val = 0x80808880
 
-    handler_code = [
-        *moveq(0x38, 1),
-        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
-        *h.sentinel_program(),
-    ]
+    handler_code = _bus_fault_handler_code(h)
 
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 7),  # A7 = TT1 source
@@ -1106,7 +1126,7 @@ async def test_mmu_runtime_invalid_root_traps_vector56(dut):
 
         *movea(LONG, SPECIAL, IMMEDIATE, 0),  # A0 = faulting logical address
         *imm_long(logical_addr),
-        *move(LONG, AN_IND, 0, DN, 0),        # Runtime MMU fault -> vector 56
+        *move(LONG, AN_IND, 0, DN, 0),        # Runtime MMU fault -> vector 2
         *moveq(0x11, 1),                      # Should not execute
         *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
         *h.sentinel_program(),
@@ -1139,7 +1159,16 @@ async def test_mmu_runtime_invalid_root_traps_vector56(dut):
         assert found, f"Runtime MMU invalid-root fault test did not complete ({debug})"
 
     marker = h.read_result_long(0)
-    assert marker == 0x38, f"Expected MMU configuration vector marker 0x38, got 0x{marker:08X}"
+    assert marker == 0x02, f"Expected bus-error vector marker 0x02, got 0x{marker:08X}"
+    fmt_vect = h.read_result_long(4)
+    assert fmt_vect == 0xB008, (
+        f"Expected format-$B bus-fault frame with vector offset $008, got 0x{fmt_vect:08X}"
+    )
+    fault_adr = h.read_result_long(8)
+    assert fault_adr == logical_addr, (
+        f"Expected fault address 0x{logical_addr:08X}, got 0x{fault_adr:08X}"
+    )
+    assert int(dut.TRAP_MMU_CFG.value) == 0, "Runtime fault must not raise the MMU configuration trap"
     h.cleanup()
 
 
@@ -1265,12 +1294,12 @@ async def test_mmu_runtime_short_descriptor_table_walk(dut):
 
 
 @cocotb.test()
-async def test_mmu_runtime_short_descriptor_wp_fault_vector56(dut):
-    """Short-format page descriptor WP bit should fault writes and vector to 56."""
+async def test_mmu_runtime_short_descriptor_wp_fault_bus_error_vector2(dut):
+    """Short-format page descriptor WP bit should fault writes with a bus error."""
     h = CPUTestHarness(dut)
 
     handler_addr = 0x000860
-    vector_addr = 56 * 4
+    vector_addr = 2 * 4
     logical_addr = 0x1234500C
     page_base = 0x00234000
 
@@ -1294,11 +1323,13 @@ async def test_mmu_runtime_short_descriptor_wp_fault_vector56(dut):
     crp_lo = root_tbl
     tc_val = 0x80C08840
 
-    handler_code = [
-        *moveq(0x38, 1),
-        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
-        *h.sentinel_program(),
-    ]
+    # Untouched witnesses at the physical page and at the identity-mapped
+    # logical address prove the faulted write reached neither.
+    phys_witness_addr = (page_base + (logical_addr & 0xFFF)) & 0xFFFFF
+    logical_witness_addr = logical_addr & 0xFFFFF
+    witness = 0x0F1E2D3C
+
+    handler_code = _bus_fault_handler_code(h)
 
     program = [
         # Prime descriptor shadow with descriptor reads before enabling MMU.
@@ -1348,22 +1379,111 @@ async def test_mmu_runtime_short_descriptor_wp_fault_vector56(dut):
     h.mem.load_long(crp_src + 0, crp_hi)
     h.mem.load_long(crp_src + 4, crp_lo)
     h.mem.load_long(tc_src, tc_val)
+    h.mem.load_long(phys_witness_addr, witness)
+    h.mem.load_long(logical_witness_addr, witness)
 
     found = await h.run_until_sentinel(max_cycles=80000)
     assert found, "Runtime short-table WP MMU fault test did not complete"
 
     marker = h.read_result_long(0)
-    assert marker == 0x38, f"Expected MMU configuration vector marker 0x38, got 0x{marker:08X}"
+    assert marker == 0x02, f"Expected bus-error vector marker 0x02, got 0x{marker:08X}"
+    fmt_vect = h.read_result_long(4)
+    assert fmt_vect == 0xB008, (
+        f"Expected format-$B bus-fault frame with vector offset $008, got 0x{fmt_vect:08X}"
+    )
+    fault_adr = h.read_result_long(8)
+    assert fault_adr == logical_addr, (
+        f"Expected fault address 0x{logical_addr:08X}, got 0x{fault_adr:08X}"
+    )
+    assert h.mem.read(phys_witness_addr, 4) == witness, (
+        "Write-protected write must not reach the physical page"
+    )
+    assert h.mem.read(logical_witness_addr, 4) == witness, (
+        "Write-protected write must not reach the untranslated address"
+    )
     h.cleanup()
 
 
 @cocotb.test()
-async def test_mmu_runtime_short_descriptor_invalid_leaf_vector56(dut):
-    """Short-format DT=0 leaf descriptor should fault cleanly and vector through 56."""
+async def test_mmu_runtime_opcode_fetch_fault_not_faked(dut):
+    """An untranslatable opcode fetch terminates with error, not a substituted NOP.
+
+    Delivery of the resulting bus error at an instruction boundary additionally
+    depends on the core's prefetch-fault path (`ctrl_comb.sv` masks BERR while
+    the controller sits in START_OP/IDLE), so this test checks the MMU side of
+    the contract: the fetch is never acknowledged as valid and vector 56 is
+    never raised.
+    """
+    h = CPUTestHarness(dut)
+
+    unmapped_code_addr = 0x12340000
+
+    # Root DT=2 with an empty table: nothing outside the transparent windows
+    # can be translated, so the fetch from unmapped_code_addr must fault.
+    root_tbl = 0x00003000
+    tt0_src = h.DATA_BASE + 0x8C0
+    tt1_src = h.DATA_BASE + 0x8E0
+    crp_src = h.DATA_BASE + 0x900
+    tc_src = h.DATA_BASE + 0x920
+    tt0_prog = 0x00008260   # E, read, FC=6 (supervisor program), A31:24 = 0x00
+    tt1_prog = 0x00008350   # E, RWM, FC=5 (supervisor data), A31:24 = 0x00
+    crp_hi = 0x7FFF0002
+    crp_lo = root_tbl
+    tc_val = 0x80C08840
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(tt0_src),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(tt1_src),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(crp_src),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(tc_src),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *jmp_abs(unmapped_code_addr),         # Opcode fetch cannot be translated.
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(tt0_src, tt0_prog)
+    h.mem.load_long(tt1_src, tt1_prog)
+    h.mem.load_long(crp_src + 0, crp_hi)
+    h.mem.load_long(crp_src + 4, crp_lo)
+    h.mem.load_long(tc_src, tc_val)
+
+    fault_acks = 0
+    for _ in range(20000):
+        await RisingEdge(dut.CLK)
+        try:
+            ack = int(dut.MMU_FAULT_OPCODE_ACK.value)
+            opcode_valid = int(dut.OPCODE_VALID.value)
+            cfg_trap = int(dut.TRAP_MMU_CFG.value)
+        except ValueError:
+            continue
+        assert cfg_trap == 0, "A translation fault must not raise the MMU configuration trap"
+        if ack:
+            fault_acks += 1
+            assert opcode_valid == 0, (
+                "Untranslatable opcode fetch was acknowledged as a valid instruction word"
+            )
+
+    assert fault_acks > 0, "No untranslatable opcode fetch was observed"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_runtime_short_descriptor_invalid_leaf_bus_error_vector2(dut):
+    """Short-format DT=0 leaf descriptor should fault cleanly through vector 2."""
     h = CPUTestHarness(dut)
 
     handler_addr = 0x000880
-    vector_addr = 56 * 4
+    vector_addr = 2 * 4
     logical_addr = 0x12345008
 
     root_tbl = 0x00000400
@@ -1386,11 +1506,7 @@ async def test_mmu_runtime_short_descriptor_invalid_leaf_vector56(dut):
     crp_lo = root_tbl
     tc_val = 0x80C08840
 
-    handler_code = [
-        *moveq(0x38, 1),
-        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
-        *h.sentinel_program(),
-    ]
+    handler_code = _bus_fault_handler_code(h)
 
     program = [
         # Prime descriptor shadow before enabling MMU.
@@ -1443,7 +1559,15 @@ async def test_mmu_runtime_short_descriptor_invalid_leaf_vector56(dut):
     assert found, "Runtime short-table invalid leaf MMU fault test did not complete"
 
     marker = h.read_result_long(0)
-    assert marker == 0x38, f"Expected MMU configuration vector marker 0x38, got 0x{marker:08X}"
+    assert marker == 0x02, f"Expected bus-error vector marker 0x02, got 0x{marker:08X}"
+    fmt_vect = h.read_result_long(4)
+    assert fmt_vect == 0xB008, (
+        f"Expected format-$B bus-fault frame with vector offset $008, got 0x{fmt_vect:08X}"
+    )
+    fault_adr = h.read_result_long(8)
+    assert fault_adr == logical_addr, (
+        f"Expected fault address 0x{logical_addr:08X}, got 0x{fault_adr:08X}"
+    )
     h.cleanup()
 
 

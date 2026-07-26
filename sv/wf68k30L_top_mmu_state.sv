@@ -272,9 +272,9 @@ always_ff @(posedge CLK) begin : mmu_registers
         pmove_flush_exec = MMU_ATC_FLUSH &&
                            (MMU_TC_WR || MMU_SRP_WR || MMU_CRP_WR || MMU_TT0_WR || MMU_TT1_WR);
         pflush_exec = MMU_ATC_FLUSH && !pmove_flush_exec;
+        // Vector 56 is reserved for PMOVE configuration errors (UM 9.7).
+        // Translation faults are delivered as bus errors (UM 8.1.2).
         TRAP_MMU_CFG <= 1'b0;
-        if (MMU_RUNTIME_REQ && MMU_RUNTIME_FAULT)
-            TRAP_MMU_CFG <= 1'b1;
         if (MMU_ATC_FLUSH)
             MMU_ATC_FLUSH_COUNT <= MMU_ATC_FLUSH_COUNT + 32'd1;
         if (MMU_SRP_WR) begin
