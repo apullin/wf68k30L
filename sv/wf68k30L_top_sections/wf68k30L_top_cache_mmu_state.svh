@@ -14,6 +14,15 @@ localparam logic [31:0] CACR_RW_MASK = 32'h0000_3313; // WA,DBE,FD,ED,IBE,FI,EI
 localparam int ICACHE_LINES = 16;
 localparam int DCACHE_LINES = 16;
 
+// PLOAD table-search request/response between the MMU register file and the
+// runtime walk sequencer.
+logic        MMU_PLOAD_START;
+logic [2:0]  MMU_PLOAD_FC;
+logic [31:0] MMU_PLOAD_LOGICAL;
+logic        MMU_PLOAD_WRITE;
+logic        MMU_PLOAD_DONE;
+logic [35:0] MMU_PLOAD_RESULT;
+
 WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .CLK(CLK),
     .RESET_CPU(RESET_CPU),
@@ -389,6 +398,12 @@ WF68K30L_TOP_MMU_STATE #(
     .ADR_EFF(ADR_EFF),
     .PTEST_WALK_START(MMU_PTEST_START),
     .PTEST_WALK_MMUSR(MMU_PTEST_WALK_MMUSR),
+    .MMU_PLOAD_DONE(MMU_PLOAD_DONE),
+    .MMU_PLOAD_RESULT(MMU_PLOAD_RESULT),
+    .MMU_PLOAD_START(MMU_PLOAD_START),
+    .MMU_PLOAD_FC(MMU_PLOAD_FC),
+    .MMU_PLOAD_LOGICAL(MMU_PLOAD_LOGICAL),
+    .MMU_PLOAD_WRITE(MMU_PLOAD_WRITE),
     .MMU_SRP(MMU_SRP),
     .MMU_CRP(MMU_CRP),
     .MMU_TC(MMU_TC),

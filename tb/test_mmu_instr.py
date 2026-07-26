@@ -32,6 +32,7 @@ from m68k_encode import (
     move_to_abs_long,
     move_to_sr,
     jmp_abs,
+    nop,
     disp16,
     imm_long,
     imm_word,
@@ -1386,6 +1387,94 @@ async def test_mmu_desc_shadow_survives_subword_traffic(dut):
     assert got == expected_value, (
         f"Translation after neighbouring byte traffic expected 0x{expected_value:08X}, "
         f"got 0x{got:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_pload_short_table_walk_then_access(dut):
+    """PLOADR must table-search a short-format tree and load a usable ATC entry.
+
+    UM 9.8: "The PLOAD instruction performs a table search operation for a
+    specified function code and logical address and then loads the translation
+    for the address into the ATC."
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xAA0)
+    mmusr_dst = h.DATA_BASE + 0xB00
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x0F0E0D0C
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 3, DN, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        0xF010, 0x2215,                       # PLOADR #5,(A0)
+        # PLOAD's table search completes asynchronously in this model: the
+        # pipeline has no PLOAD stall handshake, so let the search retire.
+        *[w for _ in range(12) for w in nop()],
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_dst),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=80000)
+    assert found, "PLOAD short-table walk test did not complete"
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_I) == 0, f"PLOAD should leave a valid ATC entry, got MMUSR 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_B) == 0, f"PLOAD must not mark the entry bus-error, got MMUSR 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_W) == 0, f"Unexpected write protection, got MMUSR 0x{mmusr:04X}"
+
+    got = h.read_result_long(0)
+    assert got == expected_value, (
+        f"Access after PLOADR expected 0x{expected_value:08X}, got 0x{got:08X}"
     )
     h.cleanup()
 

@@ -55,6 +55,13 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
 
     input  logic        MMU_TWALK_START,
 
+    input  logic        MMU_PLOAD_START,
+    input  logic [2:0]  MMU_PLOAD_FC,
+    input  logic [31:0] MMU_PLOAD_LOGICAL,
+    input  logic        MMU_PLOAD_WRITE,
+    output logic        MMU_PLOAD_DONE,
+    output logic [35:0] MMU_PLOAD_RESULT,
+
     output logic        DATA_RD,
     output logic        DATA_WR,
     output logic        DATA_RD_BUS,
@@ -140,6 +147,8 @@ logic [31:0] MMU_TWALK_DESC_PAGE_BASE;
 logic [31:0] MMU_TWALK_DESC_TABLE_BASE_NEXT;
 logic [31:0] MMU_TWALK_NEXT_LIMIT_INDEX;
 logic [31:0] MMU_TWALK_OFFSET_MASK_CUR;
+logic        MMU_TWALK_IS_PLOAD;
+logic        MMU_PLOAD_PENDING;
 logic        OPCODE_REQ_BUS_OK;
 
 assign MMU_TWALK_INDIRECT_SHORT_ADDR = {MMU_TWALK_DESC_PTR[31:2], 2'b00};
@@ -466,7 +475,13 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
     logic        walk_fault;
     logic        walk_wp_accum;
     logic        walk_page_m;
+    logic        walk_is_pload;
+    logic [2:0]  walk_start_fc;
+    logic [31:0] walk_start_logical;
+    logic        walk_start_write;
     if (RESET_CPU) begin
+        MMU_TWALK_IS_PLOAD <= 1'b0;
+        MMU_PLOAD_PENDING <= 1'b0;
         MMU_TWALK_BUSY <= 1'b0;
         MMU_TWALK_VALID <= 1'b0;
         MMU_TWALK_FC <= 3'b000;
@@ -495,32 +510,47 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
         MMU_TWALK_FETCH_LO_VALID <= 1'b0;
         MMU_TWALK_FETCH_HI_VALID <= 1'b0;
         MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
-    end else if (BUS_BSY) begin
+    end else if (BUS_BSY && !MMU_TWALK_IS_PLOAD) begin
+        // A runtime walk belongs to the pending access, so it is abandoned once
+        // a bus cycle starts. A PLOAD walk carries its own latched operands.
         MMU_TWALK_BUSY <= 1'b0;
         MMU_TWALK_VALID <= 1'b0;
         MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
         MMU_TWALK_FETCH_LO_VALID <= 1'b0;
         MMU_TWALK_FETCH_HI_VALID <= 1'b0;
+        if (MMU_PLOAD_START)
+            MMU_PLOAD_PENDING <= 1'b1;
     end else begin
+        if (MMU_PLOAD_START)
+            MMU_PLOAD_PENDING <= 1'b1;
         case (MMU_TWALK_STATE_INT)
             MMU_TWALK_ST_IDLE: begin
                 MMU_TWALK_BUSY <= 1'b0;
                 if (!MMU_RUNTIME_REQ)
                     MMU_TWALK_VALID <= 1'b0;
+                if (MMU_TWALK_IS_PLOAD && !MMU_TWALK_BUSY)
+                    MMU_TWALK_IS_PLOAD <= 1'b0;
 
-                if (MMU_TWALK_START && !MMU_TWALK_BUSY) begin
-                    root_ptr = (MMU_TC[25] && MMU_RUNTIME_ATC_FC[2]) ? MMU_SRP : MMU_CRP;
+                walk_is_pload = !MMU_TWALK_START && (MMU_PLOAD_START || MMU_PLOAD_PENDING);
+                if ((MMU_TWALK_START || walk_is_pload) && !MMU_TWALK_BUSY && !BUS_BSY) begin
+                    walk_start_fc = walk_is_pload ? MMU_PLOAD_FC : MMU_RUNTIME_ATC_FC;
+                    walk_start_logical = walk_is_pload ? MMU_PLOAD_LOGICAL : ADR_P;
+                    walk_start_write = walk_is_pload ? MMU_PLOAD_WRITE : DATA_WR;
+                    root_ptr = (MMU_TC[25] && walk_start_fc[2]) ? MMU_SRP : MMU_CRP;
 
-                    MMU_TWALK_FC <= MMU_RUNTIME_ATC_FC;
-                    MMU_TWALK_LOGICAL <= ADR_P;
-                    MMU_TWALK_WRITE <= DATA_WR;
+                    MMU_TWALK_IS_PLOAD <= walk_is_pload;
+                    if (walk_is_pload)
+                        MMU_PLOAD_PENDING <= 1'b0;
+                    MMU_TWALK_FC <= walk_start_fc;
+                    MMU_TWALK_LOGICAL <= walk_start_logical;
+                    MMU_TWALK_WRITE <= walk_start_write;
                     MMU_TWALK_TC <= MMU_TC;
                     MMU_TWALK_ROOT_LIMIT <= root_ptr[62:48];
                     MMU_TWALK_ROOT_LIMIT_LOWER <= root_ptr[63];
                     MMU_TWALK_TABLE_BASE <= {root_ptr[31:4], 4'b0000};
                     MMU_TWALK_DESC_SIZE <= (root_ptr[33:32] == 2'b11) ? 4'd8 : 4'd4;
                     MMU_TWALK_DESC_ADDR <= 32'h0;
-                    MMU_TWALK_PAGE_BASE <= ADR_P;
+                    MMU_TWALK_PAGE_BASE <= walk_start_logical;
                     MMU_TWALK_DESC_PTR <= 32'h0;
                     MMU_TWALK_INDEX <= 32'h0;
                     MMU_TWALK_CONSUMED <= 6'd0;
@@ -537,8 +567,28 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                     MMU_TWALK_FETCH_HI_VALID <= 1'b0;
                     MMU_TWALK_VALID <= 1'b0;
 
-                    if (root_ptr[33:32] != 2'b10 && root_ptr[33:32] != 2'b11) begin
-                        walk_result = mmu_twalk_fault_result(ADR_P, 1'b0, DATA_WR);
+                    if (root_ptr[33:32] == 2'b01) begin
+                        // DT=1 root: the table address field is a page offset.
+                        // Its limit applies only when FCL is clear (UM 9.5.1.2).
+                        walk_index = MMU_TC[24] ? {29'h0, walk_start_fc} :
+                                     mmu_index_extract(walk_start_logical, MMU_TC[19:16], 6'd0, MMU_TC[15:12]);
+                        walk_fault = !MMU_TC[24] &&
+                                     mmu_limit_violation(root_ptr[63], root_ptr[62:48], walk_index);
+                        if (walk_fault)
+                            walk_result = mmu_twalk_fault_result(walk_start_logical, 1'b0, walk_start_write);
+                        else
+                            walk_result = mmu_twalk_page_result(
+                                walk_start_logical + {root_ptr[31:4], 4'b0000},
+                                1'b0,
+                                1'b0,
+                                walk_start_write
+                            );
+                        MMU_TWALK_RESULT <= walk_result;
+                        MMU_TWALK_VALID <= 1'b1;
+                        MMU_TWALK_BUSY <= 1'b0;
+                        MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                    end else if (root_ptr[33:32] != 2'b10 && root_ptr[33:32] != 2'b11) begin
+                        walk_result = mmu_twalk_fault_result(walk_start_logical, 1'b0, walk_start_write);
                         MMU_TWALK_RESULT <= walk_result;
                         MMU_TWALK_VALID <= 1'b1;
                         MMU_TWALK_BUSY <= 1'b0;
@@ -803,6 +853,19 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
             end
         endcase
+    end
+end
+
+// PLOAD collects the result of the walk it started; the sequencer writes
+// MMU_TWALK_RESULT in the same cycle it drops MMU_TWALK_BUSY.
+always_ff @(posedge CLK) begin : mmu_pload_result_capture
+    if (RESET_CPU) begin
+        MMU_PLOAD_DONE <= 1'b0;
+        MMU_PLOAD_RESULT <= 36'h0;
+    end else begin
+        MMU_PLOAD_DONE <= MMU_TWALK_IS_PLOAD && !MMU_TWALK_BUSY;
+        if (MMU_TWALK_IS_PLOAD && !MMU_TWALK_BUSY)
+            MMU_PLOAD_RESULT <= MMU_TWALK_RESULT;
     end
 end
 

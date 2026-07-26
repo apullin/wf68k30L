@@ -34,7 +34,13 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic [31:0] ADR_EFF,
     input  logic        PTEST_WALK_START,
     input  logic [15:0] PTEST_WALK_MMUSR,
+    input  logic        MMU_PLOAD_DONE,
+    input  logic [35:0] MMU_PLOAD_RESULT,
 
+    output logic        MMU_PLOAD_START,
+    output logic [2:0]  MMU_PLOAD_FC,
+    output logic [31:0] MMU_PLOAD_LOGICAL,
+    output logic        MMU_PLOAD_WRITE,
     output logic [63:0] MMU_SRP,
     output logic [63:0] MMU_CRP,
     output logic [31:0] MMU_TC,
@@ -252,6 +258,10 @@ always_ff @(posedge CLK) begin : mmu_registers
         MMU_MMUSR <= 32'h0;
         PTEST_WALK_PENDING <= 1'b0;
         TRAP_MMU_CFG <= 1'b0;
+        MMU_PLOAD_START <= 1'b0;
+        MMU_PLOAD_FC <= 3'b000;
+        MMU_PLOAD_LOGICAL <= 32'h0;
+        MMU_PLOAD_WRITE <= 1'b0;
         MMU_ATC_FLUSH_COUNT <= 32'h0;
         for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin
             MMU_ATC_V[set_i] <= '0;
@@ -275,6 +285,7 @@ always_ff @(posedge CLK) begin : mmu_registers
         // Vector 56 is reserved for PMOVE configuration errors (UM 9.7).
         // Translation faults are delivered as bus errors (UM 8.1.2).
         TRAP_MMU_CFG <= 1'b0;
+        MMU_PLOAD_START <= 1'b0;
         if (MMU_ATC_FLUSH)
             MMU_ATC_FLUSH_COUNT <= MMU_ATC_FLUSH_COUNT + 32'd1;
         if (MMU_SRP_WR) begin
@@ -340,6 +351,9 @@ always_ff @(posedge CLK) begin : mmu_registers
             endcase
         end
 
+        // PLOAD performs a table search for the specified function code and
+        // logical address and loads the translation into the ATC; any existing
+        // entry for that address is flushed first (UM 9.8).
         if (pload_exec) begin
             atc_fc = mmu_fc_decode(BIW_1[4:0], DR_OUT_1, SFC, DFC);
             atc_logical = ADR_EFF;
@@ -348,50 +362,39 @@ always_ff @(posedge CLK) begin : mmu_registers
 
             tt_hit = mmu_tt_match(MMU_TT0, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw) ||
                      mmu_tt_match(MMU_TT1, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw);
-            root_ptr = (MMU_TC[25] && atc_fc[2]) ? MMU_SRP : MMU_CRP;
-            root_offs = {root_ptr[31:4], 4'b0000};
-            atc_valid_result = (!tt_hit) && (atc_fc != FC_CPU_SPACE) && (root_ptr[33:32] == 2'b01);
-            atc_phys = atc_valid_result ? (atc_logical + root_offs) : 32'h0;
-            atc_ptag = mmu_page_tag(MMU_TC, atc_phys);
-            atc_b_result = !atc_valid_result;
-            atc_w_result = 1'b0;
-            atc_m_result = !BIW_1[9];
 
             atc_set_idx = mmu_atc_set_idx(atc_fc, atc_tag);
-            atc_probe = mmu_atc_probe_set(atc_set_idx, atc_fc, atc_tag);
-            atc_hit = atc_probe[2*MMU_ATC_WAY_BITS+1];
-            atc_free = atc_probe[2*MMU_ATC_WAY_BITS];
-            atc_hit_way = atc_probe[2*MMU_ATC_WAY_BITS-1:MMU_ATC_WAY_BITS];
-            atc_free_way = atc_probe[MMU_ATC_WAY_BITS-1:0];
+            for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
+                if (MMU_ATC_V[atc_set_idx][way_i] &&
+                    MMU_ATC_FC[atc_set_idx][way_i] == atc_fc &&
+                    MMU_ATC_TAG[atc_set_idx][way_i] == atc_tag)
+                    MMU_ATC_V[atc_set_idx][way_i] <= 1'b0;
+            end
 
-            atc_ins_way = atc_hit ? atc_hit_way : (atc_free ? atc_free_way : MMU_ATC_REPL_PTR[atc_set_idx]);
-
-            if (!tt_hit) begin
-                for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
-                    if (MMU_ATC_V[atc_set_idx][way_i] &&
-                        MMU_ATC_FC[atc_set_idx][way_i] == atc_fc &&
-                        MMU_ATC_TAG[atc_set_idx][way_i] == atc_tag)
-                        MMU_ATC_V[atc_set_idx][way_i] <= 1'b0;
-                end
-                MMU_ATC_V[atc_set_idx][atc_ins_way] <= 1'b1;
-                MMU_ATC_B[atc_set_idx][atc_ins_way] <= atc_b_result;
-                MMU_ATC_W[atc_set_idx][atc_ins_way] <= atc_w_result;
-                MMU_ATC_M[atc_set_idx][atc_ins_way] <= atc_m_result;
-                MMU_ATC_FC[atc_set_idx][atc_ins_way] <= atc_fc;
-                MMU_ATC_TAG[atc_set_idx][atc_ins_way] <= atc_tag;
-                MMU_ATC_PTAG[atc_set_idx][atc_ins_way] <= atc_ptag;
-                if (!atc_hit && !atc_free)
-                    MMU_ATC_REPL_PTR[atc_set_idx] <= MMU_ATC_REPL_PTR[atc_set_idx] + 1'b1;
+            if (!tt_hit && atc_fc != FC_CPU_SPACE) begin
+                MMU_PLOAD_START <= 1'b1;
+                MMU_PLOAD_FC <= atc_fc;
+                MMU_PLOAD_LOGICAL <= atc_logical;
+                MMU_PLOAD_WRITE <= !BIW_1[9];
             end
         end
 
-        if (MMU_RUNTIME_ATC_REFILL) begin
-            atc_fc = MMU_RUNTIME_ATC_FC;
-            atc_tag = MMU_RUNTIME_ATC_TAG;
-            atc_ptag = MMU_RUNTIME_ATC_PTAG;
-            atc_b_result = MMU_RUNTIME_ATC_B;
-            atc_w_result = MMU_RUNTIME_ATC_W;
-            atc_m_result = MMU_RUNTIME_ATC_M;
+        if (MMU_RUNTIME_ATC_REFILL || MMU_PLOAD_DONE) begin
+            if (MMU_PLOAD_DONE) begin
+                atc_fc = MMU_PLOAD_FC;
+                atc_tag = mmu_page_tag(MMU_TC, MMU_PLOAD_LOGICAL);
+                atc_b_result = MMU_PLOAD_RESULT[32];
+                atc_ptag = atc_b_result ? 32'h0 : mmu_page_tag(MMU_TC, MMU_PLOAD_RESULT[31:0]);
+                atc_w_result = MMU_PLOAD_RESULT[34];
+                atc_m_result = MMU_PLOAD_RESULT[35];
+            end else begin
+                atc_fc = MMU_RUNTIME_ATC_FC;
+                atc_tag = MMU_RUNTIME_ATC_TAG;
+                atc_ptag = MMU_RUNTIME_ATC_PTAG;
+                atc_b_result = MMU_RUNTIME_ATC_B;
+                atc_w_result = MMU_RUNTIME_ATC_W;
+                atc_m_result = MMU_RUNTIME_ATC_M;
+            end
 
             atc_set_idx = mmu_atc_set_idx(atc_fc, atc_tag);
             atc_probe = mmu_atc_probe_set(atc_set_idx, atc_fc, atc_tag);
