@@ -107,7 +107,11 @@ assign EXWORD_RESERVED = (EXT_WORD[5:4] == 2'b00) ||
                          (EXT_WORD[2] && (EXT_WORD[6] || EXT_WORD[1:0] == 2'b00));
 assign NO_AR_HAZARD = !AR_IN_USE;
 assign NO_DR_HAZARD = !DR_IN_USE;
-assign EXWORD_SRC_READY = NO_AR_HAZARD && (BIW_1[15] || NO_DR_HAZARD);
+// The index register of the just-fetched extension word is an An when its D/A
+// bit is set, so the data register hazard only has to be clear for a Dn index.
+// This is EXT_WORD, not BIW_1: they coincide only for a single-word opcode with
+// one effective address.
+assign EXWORD_SRC_READY = NO_AR_HAZARD && (EXT_WORD[15] || NO_DR_HAZARD);
 assign MOVE_PHASE2_EXWORD_READY = (OP == MOVE) && PHASE2 && EXWORD_SRC_READY;
 
 always_comb begin : other_states_dec

@@ -675,3 +675,44 @@ async def test_bfset_spanning_field(dut):
         f"BFSET (A0){{1:32}}: byte at base+4 = 0x{got_byte:02X}, expected 0x80 "
         f"(offset 32 set, offsets 33..39 untouched)"
     )
+
+
+async def _indexed_dest_case(dut, producer):
+    """MOVE.L #$80000000,(0,A2,D3.W) after `producer` writes D3.
+
+    This is the encoding where BIW_1 and the effective-address extension word
+    disagree: BIW_1 holds the immediate high word 0x8000 while EXT_WORD is
+    0x3000, a Dn index. Returns the longword at each candidate destination.
+    """
+    h = CPUTestHarness(dut)
+    base = 0x020200
+    program = [
+        0x247C, 0x0002, 0x0200,      # MOVEA.L #$00020200,A2
+        *producer,
+        0x25BC, 0x8000, 0x0000, 0x3000,   # MOVE.L #$80000000,(0,A2,D3.W)
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "no completion"
+    return {off: h.mem.read(base + off, 4) for off in (2, 4, 8, 16, 32)}
+
+
+@cocotb.test()
+async def test_indexed_dest_uses_settled_index_register(dut):
+    """A Dn-indexed destination EA must use the settled index register.
+
+    D3 = 2, then MULU.W #8,D3 -> 16, so the MOVE must land at (A2)+16. Guards
+    the extension-word keying of the index-register hazard gate: the stall must
+    be required for a Dn index without stalling this case forever.
+    """
+    producer = [
+        0x7602,                      # MOVEQ #2,D3
+        0xC6FC, 0x0008,              # MULU.W #8,D3   -> D3 = 16
+    ]
+    got = await _indexed_dest_case(dut, producer)
+    assert got[16] == 0x80000000, (
+        f"MOVE.L #$80000000,(0,A2,D3.W) after MULU.W #8,D3 landed at offsets "
+        f"{ {k: hex(v) for k, v in got.items() if v} }; expected (A2)+16"
+    )
+    assert got[2] == 0, (
+        "the MOVE landed at (A2)+2, the pre-multiply value of D3"
+    )
