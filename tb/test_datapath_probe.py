@@ -62,6 +62,31 @@ async def test_muls_l_64bit_negative(dut):
 
 
 @cocotb.test()
+async def test_muls_l_32bit_negative_no_overflow(dut):
+    """MULS.L D1,D2 with -2 * 3: product fits in 32 bits -> V=0, N=1."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x223C, 0xFFFF, 0xFFFE,      # MOVE.L #-2,D1
+        0x243C, 0x0000, 0x0003,      # MOVE.L #3,D2
+        0x4C01, 0x2800,              # MULS.L D1,D2 (32-bit)
+        0x42C3,                      # MOVE CCR,D3
+        0x23C2, 0x0002, 0x0000,      # MOVE.L D2,($20000).L
+        0x23C3, 0x0002, 0x0004,      # MOVE.L D3,($20004).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+    d2 = h.mem.read(RES, 4)
+    ccr = h.mem.read(RES + 4, 4) & 0x1F
+    n = (ccr >> 3) & 1
+    z = (ccr >> 2) & 1
+    v = (ccr >> 1) & 1
+    assert (d2, n, z, v) == (0xFFFFFFFA, 1, 0, 0), (
+        f"MULS.L -2*3 (32-bit): D2=0x{d2:08X} N={n} Z={z} V={v}, "
+        f"expected 0xFFFFFFFA N=1 Z=0 V=0"
+    )
+
+
+@cocotb.test()
 async def test_bfffo_leading_zero_count(dut):
     """BFFFO D0{0:32},D1 with D0=0x00008000 must return offset 16."""
     h = CPUTestHarness(dut)
@@ -74,6 +99,28 @@ async def test_bfffo_leading_zero_count(dut):
     assert await _run(h, program), "program did not complete"
     d1 = h.mem.read(RES, 4)
     assert d1 == 16, f"BFFFO: D1={d1}, expected 16 (bit offset from field MSB)"
+
+
+@cocotb.test()
+async def test_bfffo_offset_and_empty_field(dut):
+    """BFFFO adds the field offset to the count; an all-zero field gives offset+width."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x203C, 0x0030, 0x0000,      # MOVE.L #$00300000,D0
+        0xEDC0, 0x1210,              # BFFFO D0{8:16},D1
+        0x23C1, 0x0002, 0x0000,      # MOVE.L D1,($20000).L
+        0x203C, 0x0000, 0x0000,      # MOVE.L #0,D0
+        0xEDC0, 0x1000,              # BFFFO D0{0:32},D1
+        0x23C1, 0x0002, 0x0004,      # MOVE.L D1,($20004).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+    sub = h.mem.read(RES, 4)
+    empty = h.mem.read(RES + 4, 4)
+    assert (sub, empty) == (10, 32), (
+        f"BFFFO: D0=0x00300000{{8:16}} gave {sub} (expected 10); "
+        f"zero field {{0:32}} gave {empty} (expected 32)"
+    )
 
 
 @cocotb.test()
@@ -123,6 +170,34 @@ async def test_cmpa_w_full_width_flags(dut):
 
 
 @cocotb.test()
+async def test_cmpa_w_sign_extend_vs_cmpi_w_sizing(dut):
+    """CMPA.W compares the sign-extended source over 32 bits; CMPI.W stays 16-bit."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x207C, 0xFFFF, 0x8000,      # MOVEA.L #$FFFF8000,A0
+        0xB0FC, 0x8000,              # CMPA.W #$8000,A0 -> sext equal
+        0x42C2,                       # MOVE CCR,D2
+        0x23C2, 0x0002, 0x0000,      # MOVE.L D2,($20000).L
+        0x203C, 0x0001, 0x8000,      # MOVE.L #$00018000,D0
+        0x0C40, 0x8000,              # CMPI.W #$8000,D0 -> low word equal
+        0x42C2,                       # MOVE CCR,D2
+        0x23C2, 0x0002, 0x0004,      # MOVE.L D2,($20004).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+    cmpa = h.mem.read(RES, 4) & 0x0F
+    cmpi = h.mem.read(RES + 4, 4) & 0x0F
+    assert cmpa == 0b0100, (
+        f"CMPA.W #$8000 vs A0=0xFFFF8000: NZVC=0b{cmpa:04b}, expected 0b0100 "
+        f"(sign-extended source makes the 32-bit compare equal)"
+    )
+    assert cmpi == 0b0100, (
+        f"CMPI.W #$8000 vs D0=0x00018000: NZVC=0b{cmpi:04b}, expected 0b0100 "
+        f"(only the low word takes part)"
+    )
+
+
+@cocotb.test()
 async def test_divs_l_64bit_overflow(dut):
     """DIVS.L D2,D1:D0 with 2^32/1: quotient overflows 32 bits -> V=1, regs unchanged."""
     h = CPUTestHarness(dut)
@@ -167,6 +242,76 @@ async def test_nbcd_x0_low_digit(dut):
     x = (ccr >> 4) & 1
     assert (d0, c, x) == (0x95, 1, 1), (
         f"NBCD 0x05 with X=0: got 0x{d0:02X} C={c} X={x}; expected 0x95 C=1 X=1"
+    )
+
+
+@cocotb.test()
+async def test_nbcd_x1_wrap_and_sticky_z(dut):
+    """NBCD with X=1, the 0x99 -> 0x01 borrow case, and the cleared-only Z flag."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x44FC, 0x0010,              # MOVE #$10,CCR (X=1)
+        0x203C, 0x0000, 0x0005,      # MOVE.L #5,D0
+        0x4800,                      # NBCD D0
+        0x42C3,                      # MOVE CCR,D3
+        0x23C0, 0x0002, 0x0000,      # MOVE.L D0,($20000).L
+        0x23C3, 0x0002, 0x0004,      # MOVE.L D3,($20004).L
+        0x44FC, 0x0000,              # MOVE #0,CCR (X=0)
+        0x203C, 0x0000, 0x0099,      # MOVE.L #$99,D0
+        0x4800,                      # NBCD D0
+        0x42C3,                      # MOVE CCR,D3
+        0x23C0, 0x0002, 0x0008,      # MOVE.L D0,($20008).L
+        0x23C3, 0x0002, 0x000C,      # MOVE.L D3,($2000C).L
+        0x44FC, 0x0004,              # MOVE #$04,CCR (Z=1, X=0)
+        0x203C, 0x0000, 0x0000,      # MOVE.L #0,D0
+        0x4800,                      # NBCD D0
+        0x42C3,                      # MOVE CCR,D3
+        0x23C3, 0x0002, 0x0014,      # MOVE.L D3,($20014).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+
+    def xzc(addr):
+        ccr = h.mem.read(addr, 4)
+        return ((ccr >> 4) & 1, (ccr >> 2) & 1, ccr & 1)
+
+    d0_x1 = h.mem.read(RES, 4) & 0xFF
+    assert (d0_x1, xzc(RES + 4)) == (0x94, (1, 0, 1)), (
+        f"NBCD 0x05 with X=1: got 0x{d0_x1:02X} XZC={xzc(RES + 4)}, expected 0x94 (1, 0, 1)"
+    )
+    d0_99 = h.mem.read(RES + 8, 4) & 0xFF
+    assert (d0_99, xzc(RES + 0x0C)) == (0x01, (1, 0, 1)), (
+        f"NBCD 0x99 with X=0: got 0x{d0_99:02X} XZC={xzc(RES + 0x0C)}, expected 0x01 (1, 0, 1)"
+    )
+    assert xzc(RES + 0x14) == (0, 1, 0), (
+        f"NBCD 0x00 with X=0 and Z preset: XZC={xzc(RES + 0x14)}, expected (0, 1, 0) "
+        f"(Z is only ever cleared by the BCD operations)"
+    )
+
+
+@cocotb.test()
+async def test_ccr_reserved_bits_read_as_zero(dut):
+    """Writes to the CCR must not latch bits 7:5; MOVE from SR has to read them as zero."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x44FC, 0x00FF,              # MOVE #$FF,CCR
+        0x40C0,                      # MOVE SR,D0
+        0x23C0, 0x0002, 0x0000,      # MOVE.L D0,($20000).L
+        0x44FC, 0x0000,              # MOVE #0,CCR
+        0x003C, 0x00E0,              # ORI #$E0,CCR
+        0x40C0,                      # MOVE SR,D0
+        0x23C0, 0x0002, 0x0004,      # MOVE.L D0,($20004).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+    sr_move = h.mem.read(RES, 4) & 0xFFFF
+    sr_ori = h.mem.read(RES + 4, 4) & 0xFFFF
+    assert (sr_move & 0x00E0, sr_move & 0x1F) == (0, 0x1F), (
+        f"MOVE #$FF,CCR then MOVE SR: SR=0x{sr_move:04X}, expected bits 7:5 clear "
+        f"and XNZVC all set"
+    )
+    assert sr_ori & 0x00E0 == 0, (
+        f"ORI #$E0,CCR then MOVE SR: SR=0x{sr_ori:04X}, expected bits 7:5 clear"
     )
 
 
