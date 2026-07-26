@@ -61,23 +61,26 @@ Latest representative single-run log (`build/rep_ecp5/nextpnr.log`):
 | TRELLIS_FF | 2,487 / 43,848 (5%) |
 | Fmax @ 25 MHz target | 26.69 MHz (timing pass) |
 
-## Equivalence Validation
+## Equivalence Validation (currently non-functional)
 
-The `validation/` directory contains a co-simulation harness that compares
-the VHDL and SystemVerilog designs cycle-by-cycle. Both are synthesized to
-gate-level Verilog netlists via Yosys (VHDL through the GHDL plugin, SV
-natively), then driven with identical randomized bus stimulus in iverilog.
+The `validation/` directory contains a co-simulation harness that compared the
+VHDL and SystemVerilog designs cycle-by-cycle via gate-level netlists.
 
-Result: 50,000 cycles across 5 random seeds, 0 output mismatches.
+**It does not run against the current design and its result is withdrawn.** The
+previously quoted figure (50,000 cycles across 5 seeds, 0 mismatches) described
+a much earlier tree. `synth/yosys/export_gate.ys` lists 9 SV files where the
+design now needs roughly 28, so `prep` fails on missing modules;
+`validation/equiv_tb.v` also lacks `CIOUTn`/`CBREQn`/`CBACKn`, and its
+comparator skips any bit that is X in either design.
 
-**Important:** This validates equivalence to the original VHDL — it does not
-guarantee correctness to the MC68030 specification. The original design has
-not been verified against the Motorola programmer's manual or any known-good
-68030 emulator.
+More fundamentally, top-level equivalence can no longer hold: the SV top has
+MMU and cache subsystems the VHDL never had. Any revived harness must either
+compare per-module for the modules that exist in both, or be retired.
 
-Run with:
-
-    GHDL_PREFIX=/path/to/oss-cad-suite/lib/ghdl ./validation/run_equiv.sh
+Note also that the July 2026 audit found several defects the VHDL shares, which
+were fixed against the manual — so the SV core is now deliberately *not*
+equivalent to the VHDL in those places. See `notes/AUDIT_2026-07.md` and the
+BUG-R009/R014 amendment in `notes/BUGLIST.md`.
 
 Detailed build requirements and local technical notes are kept in local
 workspace notes (not repository-tracked).
@@ -219,13 +222,30 @@ Example override:
 
 ## Formal Smoke
 
-Lightweight bounded formal checks are available for:
-
-- data-register hazard tracking
-- MMU runtime request gating during stall/fault windows
-- MMU walk-delay state transition safety
-
     make formal-smoke
+
+Checks:
+
+- **data-register file and hazard tracking** — bound to the real
+  `WF68K30L_DATA_REGISTERS`, writes enabled, proven by temporal induction.
+- **MMU runtime request gating** and **MMU walk-delay state transitions** —
+  these two harnesses re-implement the gating equations rather than
+  instantiating the RTL, so they check the intended contract and would not
+  catch an implementation divergence. Binding them to the real modules is
+  pending; the files say so at the top.
+
+`formal-smoke` depends on `formal-selftest`, which asserts false and requires
+FAILED. That guard exists because the flow was previously producing vacuous
+passes for everything: as of Yosys 0.62 an immediate `assert` becomes a
+`$check` cell and `write_smt2` emits nothing for it, so the SMT2 files
+contained zero assertions. `clk2fflogic; chformal -lower` fixes it.
+
+    make formal-deep
+
+Opt-in exhaustive register-file property (symbolic register index plus a 32-bit
+shadow). Kept separate because the UNSAT direction did not complete at depth 10
+under yices, boolector or bitwuzla, while counterexamples are still found in
+seconds.
 
 ## MMU Random Campaign
 

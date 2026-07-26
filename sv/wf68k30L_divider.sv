@@ -146,14 +146,14 @@ always_ff @(posedge CLK) begin : division
 
             if ({REMAINDER_VAR, DIVIDEND[BITCNT]} < {1'b0, DIVISOR}) begin
                 REMAINDER_VAR = {REMAINDER_VAR[30:0], DIVIDEND[BITCNT]};
-            end else if (!DIV_IS_SIGNED && OP_SIZE == LONG && BITCNT > 31) begin
+            end else if (OP_SIZE == LONG && BITCNT > 31) begin
                 // Division overflow in 64-bit mode
                 VFLAG_DIV <= 1'b1;
                 DIV_STATE <= DIV_IDLE;
                 DIV_RDY <= 1'b1;
                 QUOTIENT <= QUOTIENT_REST;
                 REMAINDER <= REMAINDER_REST;
-            end else if (!DIV_IS_SIGNED && OP_SIZE == WORD && BITCNT > 15) begin
+            end else if (OP_SIZE == WORD && BITCNT > 15) begin
                 // Division overflow in word mode
                 VFLAG_DIV <= 1'b1;
                 DIV_STATE <= DIV_IDLE;
