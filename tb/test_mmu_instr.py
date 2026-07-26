@@ -20,6 +20,7 @@ from cpu_harness import CPUTestHarness
 from m68k_encode import (
     LONG,
     WORD,
+    BYTE,
     DN,
     AN_IND,
     AN_DISP,
@@ -1289,6 +1290,209 @@ async def test_mmu_runtime_short_descriptor_table_walk(dut):
         f"Expected translated value 0x{expected_value:08X}, got 0x{got:08X} "
         f"(FAULT_ADR=0x{int(dut.FAULT_ADR.value):08X} FC={int(dut.FC_I.value)} "
         f"SBIT={int(dut.SBIT.value)} PC=0x{int(dut.PC.value):08X})"
+    )
+    h.cleanup()
+
+
+def _short_walk_setup(h, base_offset):
+    """Common short-format three-level descriptor tree used by the shadow tests."""
+    return {
+        "root_tbl": 0x00000400,
+        "lvlb_tbl": 0x00000800,
+        "page_tbl": 0x00000C00,
+        "tt0_src": h.DATA_BASE + base_offset + 0x00,
+        "tt1_src": h.DATA_BASE + base_offset + 0x20,
+        "crp_src": h.DATA_BASE + base_offset + 0x40,
+        "tc_src": h.DATA_BASE + base_offset + 0x60,
+        "tt0_prog": 0x00008360,
+        "tt1_prog": 0x00008350,
+        "tc_val": 0x80C08840,  # E=1, PS=12, IS=0, TIA=8, TIB=8, TIC=4, TID=0.
+    }
+
+
+@cocotb.test()
+async def test_mmu_desc_shadow_survives_subword_traffic(dut):
+    """Byte traffic in the neighbouring longword must not disturb a primed descriptor."""
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x940)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x5EE55EE5
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    neighbour_addr = desc_c_addr + 4          # Adjacent, unused page-table entry.
+    desc_a = (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002
+    desc_b = (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002
+    desc_c = (page_base & 0xFFFFFF00) | 0x00000001
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 3, DN, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+
+        # Subword traffic in the adjacent longword.
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(neighbour_addr),
+        *move(BYTE, AN_IND, 5, DN, 5),
+        *moveq(0x3C, 6),
+        *move(BYTE, DN, 6, AN_IND, 5),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(desc_a_addr, desc_a)
+    h.mem.load_long(desc_b_addr, desc_b)
+    h.mem.load_long(desc_c_addr, desc_c)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "Descriptor shadow subword-traffic test did not complete"
+
+    got = h.read_result_long(0)
+    assert got == expected_value, (
+        f"Translation after neighbouring byte traffic expected 0x{expected_value:08X}, "
+        f"got 0x{got:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_desc_shadow_subword_touch_does_not_fabricate_translation(dut):
+    """A byte write inside a descriptor longword must not synthesize a descriptor.
+
+    `DATA_OUT` carries lane-replicated data for a byte write, so capturing it as
+    a longword used to leave a plausible-looking page descriptor behind and the
+    access silently translated to the wrong physical page. The shadow entry is
+    now invalidated instead, and since walks read descriptors only from the
+    shadow (model scope) the access surfaces as a bus error.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x9A0)
+    handler_addr = 0x000A20
+    vector_addr = 2 * 4
+    logical_addr = 0x12345F00
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0xC0DEC0DE
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    desc_a = (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002
+    desc_b = (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002
+    desc_c = (page_base & 0xFFFFFF00) | 0x00000001
+
+    # A byte write to the low lane leaves 0x00000011 on the bus, which reads
+    # back as a DT=1 page descriptor with page base zero.
+    touch_byte = 0x11
+    fabricated_phys = (logical_addr & 0xFFF) & 0xFFFFF
+    fabricated_value = 0xBAD0BAD0
+
+    handler_code = [
+        *moveq(0x02, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 3, DN, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+
+        # Byte writes into the status byte of the primed page descriptor. Two
+        # writes cover both shadow ways of the set.
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(desc_c_addr + 3),
+        *moveq(touch_byte, 6),
+        *move(BYTE, DN, 6, AN_IND, 5),
+        *move(BYTE, DN, 6, AN_IND, 5),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    h.mem.load_long(desc_a_addr, desc_a)
+    h.mem.load_long(desc_b_addr, desc_b)
+    h.mem.load_long(desc_c_addr, desc_c)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(fabricated_phys, fabricated_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "Descriptor shadow subword-touch test did not complete"
+
+    got = h.read_result_long(0)
+    assert got != fabricated_value, (
+        "Byte write into a descriptor longword fabricated a page descriptor and "
+        f"translated to 0x{fabricated_phys:08X}"
+    )
+    assert got == 0x02, (
+        f"Expected a bus error after the descriptor shadow entry was dropped, got 0x{got:08X}"
     )
     h.cleanup()
 

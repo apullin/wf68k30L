@@ -27,6 +27,7 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     input  logic [63:0] MMU_CRP,
     input  logic [31:0] ADR_P,
     input  logic [31:0] ADR_P_PHYS,
+    input  logic [1:0]  OP_SIZE_BUS,
     input  logic [31:0] DATA_OUT,
     input  logic [31:0] DATA_TO_CORE_BUSIF,
     input  logic        DATA_RDY_BUSIF_CORE,
@@ -114,9 +115,14 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
 logic        MMU_DESC_SHADOW_PENDING;
 logic [31:0] MMU_DESC_SHADOW_PENDING_ADDR;
 logic        MMU_DESC_SHADOW_PENDING_WR;
+logic        MMU_DESC_SHADOW_PENDING_FULL;
+logic        MMU_DESC_SHADOW_PENDING_SPAN;
 logic        MMU_DESC_SHADOW_WR_EN;
+logic        MMU_DESC_SHADOW_WR_VALID;
 logic [31:0] MMU_DESC_SHADOW_WR_ADDR;
 logic [31:0] MMU_DESC_SHADOW_WR_DATA;
+logic        MMU_DESC_SHADOW_INV_EN;
+logic [31:0] MMU_DESC_SHADOW_INV_ADDR;
 logic [31:0] MMU_TWALK_FETCH_LO_WORD;
 logic [31:0] MMU_TWALK_FETCH_HI_WORD;
 logic        MMU_TWALK_FETCH_LO_VALID;
@@ -137,6 +143,30 @@ logic [31:0] MMU_TWALK_OFFSET_MASK_CUR;
 
 assign MMU_TWALK_INDIRECT_SHORT_ADDR = {MMU_TWALK_DESC_PTR[31:2], 2'b00};
 assign MMU_TWALK_INDIRECT_LONG_ADDR = {MMU_TWALK_DESC_PTR[31:3], 3'b000};
+
+// Descriptors are longword entities, so only an aligned longword access carries
+// a complete shadow update; anything else is captured as an invalidation.
+function automatic logic mmu_desc_snoop_full_long(
+    input logic [1:0] size_in,
+    input logic [1:0] a10
+);
+begin
+    mmu_desc_snoop_full_long = (size_in == LONG) && (a10 == 2'b00);
+end
+endfunction
+
+function automatic logic mmu_desc_snoop_spans_long(
+    input logic [1:0] size_in,
+    input logic [1:0] a10
+);
+begin
+    case (size_in)
+        LONG: mmu_desc_snoop_spans_long = (a10 != 2'b00);
+        WORD: mmu_desc_snoop_spans_long = (a10 == 2'b11);
+        default: mmu_desc_snoop_spans_long = 1'b0;
+    endcase
+end
+endfunction
 
 function automatic logic [35:0] mmu_twalk_fault_result(
     input logic [31:0] logical_addr,
@@ -209,8 +239,11 @@ WF68K30L_TOP_DESC_SHADOW_PORT #(
     .RD_ADDR(MMU_TWALK_SHADOW_RD_ADDR),
     .RD_LOOKUP(MMU_TWALK_SHADOW_LOOKUP),
     .WR_EN(MMU_DESC_SHADOW_WR_EN),
+    .WR_VALID(MMU_DESC_SHADOW_WR_VALID),
     .WR_ADDR(MMU_DESC_SHADOW_WR_ADDR),
-    .WR_DATA(MMU_DESC_SHADOW_WR_DATA)
+    .WR_DATA(MMU_DESC_SHADOW_WR_DATA),
+    .INV_EN(MMU_DESC_SHADOW_INV_EN),
+    .INV_ADDR(MMU_DESC_SHADOW_INV_ADDR)
 );
 
 WF68K30L_TOP_DESC_SHADOW_PORT #(
@@ -226,8 +259,11 @@ WF68K30L_TOP_DESC_SHADOW_PORT #(
     .RD_ADDR(MMU_PTEST_SHADOW_RD_ADDR),
     .RD_LOOKUP(MMU_PTEST_SHADOW_LOOKUP),
     .WR_EN(MMU_DESC_SHADOW_WR_EN),
+    .WR_VALID(MMU_DESC_SHADOW_WR_VALID),
     .WR_ADDR(MMU_DESC_SHADOW_WR_ADDR),
-    .WR_DATA(MMU_DESC_SHADOW_WR_DATA)
+    .WR_DATA(MMU_DESC_SHADOW_WR_DATA),
+    .INV_EN(MMU_DESC_SHADOW_INV_EN),
+    .INV_ADDR(MMU_DESC_SHADOW_INV_ADDR)
 );
 
 WF68K30L_TOP_MMU_PTEST I_TOP_MMU_PTEST (
@@ -774,11 +810,15 @@ always_ff @(posedge CLK) begin : mmu_desc_shadow_update
         MMU_DESC_SHADOW_PENDING <= 1'b0;
         MMU_DESC_SHADOW_PENDING_ADDR <= 32'h0;
         MMU_DESC_SHADOW_PENDING_WR <= 1'b0;
+        MMU_DESC_SHADOW_PENDING_FULL <= 1'b0;
+        MMU_DESC_SHADOW_PENDING_SPAN <= 1'b0;
     end else begin
         if (!BUS_BSY && (DATA_RD_BUS || DATA_WR) && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) begin
             MMU_DESC_SHADOW_PENDING <= 1'b1;
             MMU_DESC_SHADOW_PENDING_ADDR <= ADR_P_PHYS;
             MMU_DESC_SHADOW_PENDING_WR <= DATA_WR;
+            MMU_DESC_SHADOW_PENDING_FULL <= mmu_desc_snoop_full_long(OP_SIZE_BUS, ADR_P_PHYS[1:0]);
+            MMU_DESC_SHADOW_PENDING_SPAN <= mmu_desc_snoop_spans_long(OP_SIZE_BUS, ADR_P_PHYS[1:0]);
         end
 
         if (DATA_RDY_BUSIF_CORE && MMU_DESC_SHADOW_PENDING) begin
@@ -790,8 +830,11 @@ always_ff @(posedge CLK) begin : mmu_desc_shadow_update
 end
 
 assign MMU_DESC_SHADOW_WR_EN = DATA_RDY_BUSIF_CORE && MMU_DESC_SHADOW_PENDING;
+assign MMU_DESC_SHADOW_WR_VALID = MMU_DESC_SHADOW_PENDING_FULL;
 assign MMU_DESC_SHADOW_WR_ADDR = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00};
 assign MMU_DESC_SHADOW_WR_DATA = MMU_DESC_SHADOW_PENDING_WR ? DATA_OUT : DATA_TO_CORE_BUSIF;
+assign MMU_DESC_SHADOW_INV_EN = MMU_DESC_SHADOW_WR_EN && MMU_DESC_SHADOW_PENDING_SPAN;
+assign MMU_DESC_SHADOW_INV_ADDR = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00} + 32'd4;
 
 // Core-visible bus requests: direct when idle, held via latches while BUS_BSY.
 assign RD_REQ = !BUS_BSY ? ((DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_DATA_REQ) : RD_REQ_I;
