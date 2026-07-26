@@ -122,7 +122,10 @@ always_comb begin : icache_lookup
     req_tag = 24'h0;
     req_cacheable = 1'b0;
 
-    if (!BUS_BSY && OPCODE_REQ_CORE && CACR[0]) begin
+    // ADR_P_PHYS carries the data address while a data access is outstanding,
+    // and the raw logical address while the MMU walks or faults.
+    if (!BUS_BSY && OPCODE_REQ_CORE && !DATA_RD && !DATA_WR &&
+        !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && CACR[0]) begin
         req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
         req_line = ADR_P_PHYS[7:4];
         req_word = ADR_P_PHYS[3:1];
@@ -146,7 +149,7 @@ always_comb begin : dcache_lookup
     req_tag = 24'h0;
     req_cacheable = 1'b0;
 
-    if (!BUS_BSY && DATA_RD && CACR[8] && !RMC) begin
+    if (!BUS_BSY && DATA_RD && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && CACR[8] && !RMC) begin
         req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
         req_line = ADR_P_PHYS[7:4];
         req_entry = ADR_P_PHYS[3:2];
