@@ -623,7 +623,9 @@ assign SP_ADD_DISPL = (OP == LINK && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) ? 
 // ====================================================================
 
 assign ALU_TRIG = (ALU_BSY || FETCH_STATE != INIT_EXEC_WB) ? 1'b0 :
-                  ((OP == CHK2 || OP == CMP2 || OP == CMPM) && PHASE2) ? 1'b0 :
+                  // Two-operand fetches: trigger only on the second pass, once
+                  // both memory operands and the tested register are loaded.
+                  ((OP == CHK2 || OP == CMP2 || OP == CMPM) && !PHASE2) ? 1'b0 :
                   (OP == MOVE && PHASE2) ? 1'b0 : // no ALU required after second portion of address calculation.
                   (OP == MOVEM && !MOVEM_COND) ? 1'b0 :
                   (OP == MOVEM && BIW_0[10] && !MOVEM_FIRST_RD) ? 1'b0 : // Do not load before the first read access.

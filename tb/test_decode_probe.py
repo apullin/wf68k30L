@@ -439,3 +439,190 @@ async def test_full_format_memory_indirect_still_works(dut):
     assert got == payload, (
         f"D1=0x{got:08X}, expected 0x{payload:08X} from [($20100 + $20)]"
     )
+
+
+# vec 6 (CHK/CHK2 bounds) marker handler
+CHK_HANDLER = [
+    0x203C, 0x6666, 0x0006,          # MOVE.L #$66660006,D0
+    0x23C0, 0x0002, 0x0018,          # MOVE.L D0,($20018).L
+    *SENTINEL,
+    0x4E72, 0x2700,
+]
+
+BOUNDS = 0x020100                    # bounds pair lives here
+SETUP_A0_BOUNDS = [0x207C, 0x0002, 0x0100]   # MOVEA.L #$00020100,A0
+
+
+async def _chk2_case(dut, size_word, ext_word, value, lb, ub, width):
+    """Run CHK2 <ea>,Rn against a bounds pair; return True if vector 6 fired."""
+    h = CPUTestHarness(dut)
+    program = [
+        *SETUP_A0_BOUNDS,
+        0x263C, (value >> 16) & 0xFFFF, value & 0xFFFF,   # MOVE.L #value,D3
+        size_word, ext_word,                              # CHK2.<sz> (A0),D3
+        *SENTINEL, 0x60FE,
+    ]
+    if width == 4:
+        h.mem.load_long(BOUNDS, lb)
+        h.mem.load_long(BOUNDS + 4, ub)
+    else:
+        h.mem.load_words(BOUNDS, [lb & 0xFFFF, ub & 0xFFFF])
+    assert await _run(h, program, [(6 * 4, 0xB00, CHK_HANDLER)]), "no completion"
+    return h.mem.read(RES + 0x18, 4) == 0x66660006
+
+
+@cocotb.test()
+async def test_chk2_l_in_bounds_no_trap(dut):
+    """CHK2.L with bounds [0x100,0x2FF] and D3=0x180 must not trap."""
+    trapped = await _chk2_case(dut, 0x04D0, 0x3800, 0x180, 0x100, 0x2FF, 4)
+    assert not trapped, (
+        "CHK2.L (A0),D3 with D3=0x180 inside bounds [0x100,0x2FF] took the "
+        "vector-6 bounds trap; the ALU is triggered before both bounds and "
+        "the tested register are loaded"
+    )
+
+
+@cocotb.test()
+async def test_chk2_l_below_lower_bound_traps(dut):
+    """CHK2.L with D3 below the lower bound must trap (vector 6)."""
+    trapped = await _chk2_case(dut, 0x04D0, 0x3800, 0x0FF, 0x100, 0x2FF, 4)
+    assert trapped, (
+        "CHK2.L (A0),D3 with D3=0xFF below the lower bound 0x100 did not take "
+        "the vector-6 bounds trap"
+    )
+
+
+@cocotb.test()
+async def test_chk2_l_above_upper_bound_traps(dut):
+    """CHK2.L with D3 above the upper bound must trap (vector 6)."""
+    trapped = await _chk2_case(dut, 0x04D0, 0x3800, 0x300, 0x100, 0x2FF, 4)
+    assert trapped, (
+        "CHK2.L (A0),D3 with D3=0x300 above the upper bound 0x2FF did not take "
+        "the vector-6 bounds trap"
+    )
+
+
+@cocotb.test()
+async def test_chk2_l_at_bounds_no_trap(dut):
+    """PRM: bounds are inclusive, so Rn equal to either bound must not trap."""
+    lo = await _chk2_case(dut, 0x04D0, 0x3800, 0x100, 0x100, 0x2FF, 4)
+    assert not lo, "CHK2.L with D3 equal to the lower bound wrongly trapped"
+
+
+@cocotb.test()
+async def test_chk2_l_at_upper_bound_no_trap(dut):
+    """PRM: Rn equal to the upper bound is in range."""
+    hi = await _chk2_case(dut, 0x04D0, 0x3800, 0x2FF, 0x100, 0x2FF, 4)
+    assert not hi, "CHK2.L with D3 equal to the upper bound wrongly trapped"
+
+
+@cocotb.test()
+async def test_chk2_w_in_bounds_no_trap(dut):
+    """CHK2.W with word bounds [0x100,0x2FF] and D3=0x180 must not trap."""
+    trapped = await _chk2_case(dut, 0x02D0, 0x3800, 0x180, 0x100, 0x2FF, 2)
+    assert not trapped, (
+        "CHK2.W (A0),D3 with D3=0x180 inside word bounds [0x100,0x2FF] took "
+        "the vector-6 bounds trap"
+    )
+
+
+@cocotb.test()
+async def test_chk2_w_above_upper_bound_traps(dut):
+    """CHK2.W with D3 above the word upper bound must trap."""
+    trapped = await _chk2_case(dut, 0x02D0, 0x3800, 0x0300, 0x100, 0x2FF, 2)
+    assert trapped, (
+        "CHK2.W (A0),D3 with D3=0x300 above the word upper bound 0x2FF did "
+        "not take the vector-6 bounds trap"
+    )
+
+
+async def _cmp2_an_case(dut, value, lb, ub):
+    """CMP2.L (A0),A3 - never traps; return (C_flag_set, took_vec6)."""
+    h = CPUTestHarness(dut)
+    program = [
+        *SETUP_A0_BOUNDS,
+        0x267C, (value >> 16) & 0xFFFF, value & 0xFFFF,   # MOVEA.L #value,A3
+        0x7000,                                            # MOVEQ #0,D0
+        0x04D0, 0xB000,                                    # CMP2.L (A0),A3
+        0x55C0,                                            # SCS D0 (C set -> 0xFF)
+        0x23C0, 0x0002, 0x0000,                            # MOVE.L D0,($20000).L
+        *SENTINEL, 0x60FE,
+    ]
+    h.mem.load_long(BOUNDS, lb)
+    h.mem.load_long(BOUNDS + 4, ub)
+    assert await _run(h, program, [(6 * 4, 0xB00, CHK_HANDLER)]), "no completion"
+    return (h.mem.read(RES, 4) & 0xFF) != 0, h.mem.read(RES + 0x18, 4) == 0x66660006
+
+
+@cocotb.test()
+async def test_cmp2_l_an_in_bounds_clears_c(dut):
+    """CMP2.L (A0),A3 with A3 in range: C clear, and CMP2 never traps."""
+    c_set, trapped = await _cmp2_an_case(dut, 0x180, 0x100, 0x2FF)
+    assert not trapped, "CMP2 must never trap, but vector 6 was taken"
+    assert not c_set, (
+        "CMP2.L (A0),A3 with A3=0x180 inside bounds [0x100,0x2FF] set C; "
+        "PRM: C is set only when the register is out of bounds"
+    )
+
+
+@cocotb.test()
+async def test_cmp2_l_an_above_upper_bound_sets_c(dut):
+    """CMP2.L (A0),A3 with A3 above the upper bound: C set, no trap."""
+    c_set, trapped = await _cmp2_an_case(dut, 0x400, 0x100, 0x2FF)
+    assert not trapped, "CMP2 must never trap, but vector 6 was taken"
+    assert c_set, (
+        "CMP2.L (A0),A3 with A3=0x400 above the upper bound 0x2FF left C "
+        "clear; PRM: C is set when the register is out of bounds"
+    )
+
+
+@cocotb.test()
+async def test_cmp2_l_an_below_lower_bound_sets_c(dut):
+    """CMP2.L (A0),A3 with A3 below the lower bound: C set, no trap."""
+    c_set, trapped = await _cmp2_an_case(dut, 0x0FF, 0x100, 0x2FF)
+    assert not trapped, "CMP2 must never trap, but vector 6 was taken"
+    assert c_set, (
+        "CMP2.L (A0),A3 with A3=0xFF below the lower bound 0x100 left C "
+        "clear; PRM: C is set when the register is out of bounds"
+    )
+
+
+async def _cmpm_l_case(dut, a_val, b_val):
+    """CMPM.L (A0)+,(A1)+ - return (Z_set, A0_after, A1_after)."""
+    h = CPUTestHarness(dut)
+    src = 0x020100
+    dst = 0x020200
+    program = [
+        0x207C, 0x0002, 0x0100,      # MOVEA.L #$00020100,A0
+        0x227C, 0x0002, 0x0200,      # MOVEA.L #$00020200,A1
+        0x7000,                      # MOVEQ #0,D0
+        0xB388,                      # CMPM.L (A0)+,(A1)+
+        0x57C0,                      # SEQ D0 (Z set -> 0xFF)
+        0x23C0, 0x0002, 0x0000,      # MOVE.L D0,($20000).L
+        0x23C8, 0x0002, 0x0004,      # MOVE.L A0,($20004).L
+        0x23C9, 0x0002, 0x0008,      # MOVE.L A1,($20008).L
+        *SENTINEL, 0x60FE,
+    ]
+    h.mem.load_long(src, a_val)
+    h.mem.load_long(dst, b_val)
+    assert await _run(h, program), "no completion"
+    return ((h.mem.read(RES, 4) & 0xFF) != 0,
+            h.mem.read(RES + 4, 4), h.mem.read(RES + 8, 4))
+
+
+@cocotb.test()
+async def test_cmpm_l_equal_sets_z(dut):
+    """CMPM.L with equal operands sets Z and postincrements both registers."""
+    z, a0, a1 = await _cmpm_l_case(dut, 0x12345678, 0x12345678)
+    assert a0 == 0x020104, f"A0=0x{a0:08X}, expected 0x00020104 (postincrement by 4)"
+    assert a1 == 0x020204, f"A1=0x{a1:08X}, expected 0x00020204 (postincrement by 4)"
+    assert z, "CMPM.L of two equal longwords left Z clear"
+
+
+@cocotb.test()
+async def test_cmpm_l_unequal_clears_z(dut):
+    """CMPM.L with different operands clears Z."""
+    z, a0, a1 = await _cmpm_l_case(dut, 0x12345678, 0x12345679)
+    assert a0 == 0x020104, f"A0=0x{a0:08X}, expected 0x00020104"
+    assert a1 == 0x020204, f"A1=0x{a1:08X}, expected 0x00020204"
+    assert not z, "CMPM.L of two different longwords set Z"
