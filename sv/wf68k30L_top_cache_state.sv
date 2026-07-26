@@ -107,6 +107,9 @@ logic [7:0]  ICACHE_VALID [0:15];
 logic [23:0] DCACHE_TAG [0:15];
 logic [3:0]  DCACHE_VALID [0:15];
 logic        ICACHE_HIT_PENDING;
+logic        DCACHE_READ_HIT_REQ;
+logic        DCACHE_MERGE_REQ;
+logic        DCACHE_MERGE_RDY;
 
 always_comb begin : icache_lookup
     logic [3:0]  req_line;
@@ -119,7 +122,10 @@ always_comb begin : icache_lookup
     req_tag = 24'h0;
     req_cacheable = 1'b0;
 
-    if (!BUS_BSY && OPCODE_REQ_CORE && CACR[0]) begin
+    // ADR_P_PHYS carries the data address while a data access is outstanding,
+    // and the raw logical address while the MMU walks or faults.
+    if (!BUS_BSY && OPCODE_REQ_CORE && !DATA_RD && !DATA_WR &&
+        !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && CACR[0]) begin
         req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
         req_line = ADR_P_PHYS[7:4];
         req_word = ADR_P_PHYS[3:1];
@@ -143,7 +149,7 @@ always_comb begin : dcache_lookup
     req_tag = 24'h0;
     req_cacheable = 1'b0;
 
-    if (!BUS_BSY && DATA_RD && CACR[8] && !RMC) begin
+    if (!BUS_BSY && DATA_RD && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && CACR[8] && !RMC) begin
         req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
         req_line = ADR_P_PHYS[7:4];
         req_entry = ADR_P_PHYS[3:2];
@@ -156,6 +162,20 @@ always_comb begin : dcache_lookup
         end
     end
 end
+
+// WF68K30L_SYNC_RAM_1R1W registers its read port: data addressed while RD_EN is
+// high is only readable in the following cycle. The enables are therefore
+// combinational so the *_HIT_PENDING stage below reads the value it requested.
+assign ICACHE_RAM_RD_EN = !ICACHE_HIT_PENDING && !BUS_BSY && OPCODE_REQ_CORE && ICACHE_HIT_NOW;
+assign ICACHE_RAM_RD_ADDR = {ADR_P_PHYS[7:4], ADR_P_PHYS[3:1]};
+assign DCACHE_READ_HIT_REQ = !DCACHE_HIT_PENDING && !BUS_BSY && DATA_RD && DCACHE_HIT_NOW &&
+                             !DATA_RDY_BUSIF_CORE;
+assign DCACHE_MERGE_REQ = !DCACHE_READ_HIT_REQ && DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE &&
+                          CACR[8] && DCACHE_WRITE_SIZE != LONG &&
+                          dcache_access_supported(OP_SIZETYPE'(DCACHE_WRITE_SIZE), DCACHE_WRITE_ADDR[1:0]);
+assign DCACHE_RAM_RD_EN = DCACHE_READ_HIT_REQ || DCACHE_MERGE_REQ;
+assign DCACHE_RAM_RD_ADDR = DCACHE_READ_HIT_REQ ? {ADR_P_PHYS[7:4], ADR_P_PHYS[3:2]} :
+                                                  {DCACHE_WRITE_ADDR[7:4], DCACHE_WRITE_ADDR[3:2]};
 
 always_ff @(posedge CLK) begin : cache_registers
     integer i;
@@ -173,14 +193,14 @@ always_ff @(posedge CLK) begin : cache_registers
     logic [3:0]  dcache_valid_after;
     logic [3:0]  dcache_burst_pending_after;
     logic        dcache_hit;
+    logic [31:0] dcache_write_end;
+    logic        dcache_write_spans;
     if (RESET_CPU) begin
         CACR <= 32'h0;
         CAAR <= 32'h0;
         ICACHE_RDY <= 1'b0;
         ICACHE_OPCODE_WORD <= 16'h0000;
         ICACHE_HIT_PENDING <= 1'b0;
-        ICACHE_RAM_RD_EN <= 1'b0;
-        ICACHE_RAM_RD_ADDR <= 7'h00;
         ICACHE_RAM_WR_EN <= 1'b0;
         ICACHE_RAM_WR_ADDR <= 7'h00;
         ICACHE_RAM_WR_DATA <= 16'h0000;
@@ -202,10 +222,9 @@ always_ff @(posedge CLK) begin : cache_registers
         DATA_TO_CORE_CACHE <= 32'h0;
         DATA_LAST_FROM_CACHE <= 1'b0;
         DCACHE_HIT_PENDING <= 1'b0;
+        DCACHE_MERGE_RDY <= 1'b0;
         DCACHE_HIT_SIZE_PENDING <= LONG;
         DCACHE_HIT_ADDR10_PENDING <= 2'b00;
-        DCACHE_RAM_RD_EN <= 1'b0;
-        DCACHE_RAM_RD_ADDR <= 6'h00;
         DCACHE_RAM_WR_EN <= 1'b0;
         DCACHE_RAM_WR_ADDR <= 6'h00;
         DCACHE_RAM_WR_DATA <= 32'h0000_0000;
@@ -238,12 +257,11 @@ always_ff @(posedge CLK) begin : cache_registers
         end
     end else begin
         ICACHE_RDY <= 1'b0;
-        ICACHE_RAM_RD_EN <= 1'b0;
         ICACHE_RAM_WR_EN <= 1'b0;
-        DCACHE_RAM_RD_EN <= 1'b0;
         DCACHE_RAM_WR_EN <= 1'b0;
         DATA_RDY_CACHE <= 1'b0;
         DATA_VALID_CACHE <= 1'b0;
+        DCACHE_MERGE_RDY <= DCACHE_MERGE_REQ;
 
         if (DATA_RDY_CACHE)
             DATA_LAST_FROM_CACHE <= 1'b1;
@@ -254,9 +272,7 @@ always_ff @(posedge CLK) begin : cache_registers
             ICACHE_OPCODE_WORD <= ICACHE_RAM_RD_DATA;
             ICACHE_RDY <= 1'b1;
             ICACHE_HIT_PENDING <= 1'b0;
-        end else if (!BUS_BSY && OPCODE_REQ_CORE && ICACHE_HIT_NOW) begin
-            ICACHE_RAM_RD_EN <= 1'b1;
-            ICACHE_RAM_RD_ADDR <= {ADR_P_PHYS[7:4], ADR_P_PHYS[3:1]};
+        end else if (ICACHE_RAM_RD_EN) begin
             ICACHE_HIT_PENDING <= 1'b1;
         end
 
@@ -269,11 +285,7 @@ always_ff @(posedge CLK) begin : cache_registers
             DATA_RDY_CACHE <= 1'b1;
             DATA_VALID_CACHE <= 1'b1;
             DCACHE_HIT_PENDING <= 1'b0;
-        end else if (!BUS_BSY && DATA_RD && DCACHE_HIT_NOW && !DATA_RDY_BUSIF_CORE) begin
-            dcache_line = ADR_P_PHYS[7:4];
-            dcache_entry = ADR_P_PHYS[3:2];
-            DCACHE_RAM_RD_EN <= 1'b1;
-            DCACHE_RAM_RD_ADDR <= {dcache_line, dcache_entry};
+        end else if (DCACHE_RAM_RD_EN) begin
             DCACHE_HIT_SIZE_PENDING <= OP_SIZE_BUS;
             DCACHE_HIT_ADDR10_PENDING <= ADR_P_PHYS[1:0];
             DCACHE_HIT_PENDING <= 1'b1;
@@ -414,22 +426,44 @@ always_ff @(posedge CLK) begin : cache_registers
         end
 
         if (DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn &&
-            DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE &&
-            CACR[8] && dcache_access_supported(OP_SIZETYPE'(DCACHE_WRITE_SIZE), DCACHE_WRITE_ADDR[1:0])) begin
+            DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE && CACR[8]) begin
             dcache_line = DCACHE_WRITE_ADDR[7:4];
             dcache_entry = DCACHE_WRITE_ADDR[3:2];
             dcache_tag = DCACHE_WRITE_ADDR[31:8];
             dcache_hit = (DCACHE_TAG[dcache_line] == dcache_tag) && DCACHE_VALID[dcache_line][dcache_entry];
+            dcache_write_end = DCACHE_WRITE_ADDR + {30'd0, dcache_size_last_byte(OP_SIZETYPE'(DCACHE_WRITE_SIZE))};
+            dcache_write_spans = (dcache_write_end[31:2] != DCACHE_WRITE_ADDR[31:2]);
             if (dcache_hit) begin
                 if (DCACHE_WRITE_SIZE == LONG && DCACHE_WRITE_ADDR[1:0] == 2'b00) begin
                     DCACHE_RAM_WR_EN <= 1'b1;
                     DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
                     DCACHE_RAM_WR_DATA <= DCACHE_WRITE_DATA;
                     DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
+                end else if (DCACHE_MERGE_RDY &&
+                             dcache_access_supported(OP_SIZETYPE'(DCACHE_WRITE_SIZE), DCACHE_WRITE_ADDR[1:0])) begin
+                    DCACHE_RAM_WR_EN <= 1'b1;
+                    DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
+                    DCACHE_RAM_WR_DATA <= dcache_write_merge(
+                        DCACHE_RAM_RD_DATA,
+                        DCACHE_WRITE_DATA,
+                        OP_SIZETYPE'(DCACHE_WRITE_SIZE),
+                        DCACHE_WRITE_ADDR[1:0]
+                    );
+                    DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
                 end else begin
                     DCACHE_VALID[dcache_line][dcache_entry] <= 1'b0;
                 end
-            end else if (CACR[13] && !CACR[9] && DCACHE_WRITE_SIZE == LONG && DCACHE_WRITE_ADDR[1:0] == 2'b00) begin
+            end
+
+            // A misaligned transfer spans a second entry, hit or miss
+            // independently of the first (UM 6.1.2).
+            if (dcache_write_spans &&
+                DCACHE_TAG[dcache_write_end[7:4]] == dcache_write_end[31:8]) begin
+                DCACHE_VALID[dcache_write_end[7:4]][dcache_write_end[3:2]] <= 1'b0;
+            end
+
+            if (!dcache_hit &&
+                CACR[13] && !CACR[9] && DCACHE_WRITE_SIZE == LONG && DCACHE_WRITE_ADDR[1:0] == 2'b00) begin
                 if (DCACHE_TAG[dcache_line] != dcache_tag)
                     DCACHE_VALID[dcache_line] <= 4'h0;
                 DCACHE_TAG[dcache_line] <= dcache_tag;

@@ -51,6 +51,19 @@ begin
 end
 endfunction
 
+function automatic logic [1:0] dcache_size_last_byte(
+    input OP_SIZETYPE  size_in
+);
+begin
+    case (size_in)
+        BYTE: dcache_size_last_byte = 2'd0;
+        WORD: dcache_size_last_byte = 2'd1;
+        LONG: dcache_size_last_byte = 2'd3;
+        default: dcache_size_last_byte = 2'd0;
+    endcase
+end
+endfunction
+
 function automatic logic [31:0] dcache_read_extract(
     input logic [31:0] line_word,
     input OP_SIZETYPE  size_in,

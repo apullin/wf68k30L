@@ -49,6 +49,11 @@ CR_CAAR = 0x802
 CACR_RW_MASK = 0x0000_3313
 
 
+def cache_state(dut):
+    """Tag/valid arrays live inside the extracted cache-state submodule."""
+    return dut.I_TOP_CACHE_STATE
+
+
 def movec_dn_to_cr(dn: int, cr_sel: int):
     """Encode MOVEC Dn,Cr."""
     ext = ((dn & 0x7) << 12) | (cr_sel & 0x0FFF)
@@ -352,6 +357,80 @@ async def test_dcache_word_read_hits_after_long_fill(dut):
 
 
 @cocotb.test()
+async def test_dcache_subword_reads_hit_at_every_offset(dut):
+    """ED=1: every byte and word offset in a filled longword should hit with the right lane."""
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x360
+    res = h.RESULT_BASE + 0xB0
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0100),                    # ED=1
+        *movec_dn_to_cr(0, CR_CACR),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # miss/fill the whole longword
+        *move(BYTE, AN_IND, 0, DN, 2),             # byte at +0
+        *addq(LONG, 1, AN, 0),
+        *move(BYTE, AN_IND, 0, DN, 3),             # byte at +1
+        *addq(LONG, 1, AN, 0),
+        *move(BYTE, AN_IND, 0, DN, 4),             # byte at +2
+        *addq(LONG, 1, AN, 0),
+        *move(BYTE, AN_IND, 0, DN, 5),             # byte at +3
+        *subq(LONG, 3, AN, 0),
+        *move(WORD, AN_IND, 0, DN, 6),             # word at +0
+        *addq(LONG, 2, AN, 0),
+        *move(WORD, AN_IND, 0, DN, 0),             # word at +2 (D0 held 0x00000100)
+        *move_to_abs_long(LONG, DN, 2, res + 0x00),
+        *move_to_abs_long(LONG, DN, 3, res + 0x04),
+        *move_to_abs_long(LONG, DN, 4, res + 0x08),
+        *move_to_abs_long(LONG, DN, 5, res + 0x0C),
+        *move_to_abs_long(LONG, DN, 6, res + 0x10),
+        *move_to_abs_long(LONG, DN, 0, res + 0x14),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x12_34_56_78)
+    await h.setup(program)
+
+    found = False
+    prev_as_n = 1
+    line_addrs = {data_addr + i for i in range(4)}
+    data_reads = 0
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+        except ValueError:
+            continue
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr in line_addrs:
+            data_reads += 1
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, "D-cache subword offset test did not complete"
+    # MOVE.B/MOVE.W only replace the low byte/word of the destination; D2-D6
+    # start at zero and D0 held 0x00000100 from the CACR setup.
+    expected = [
+        (0x00, 0x0000_0012, "byte +0"),
+        (0x04, 0x0000_0034, "byte +1"),
+        (0x08, 0x0000_0056, "byte +2"),
+        (0x0C, 0x0000_0078, "byte +3"),
+        (0x10, 0x0000_1234, "word +0"),
+        (0x14, 0x0000_5678, "word +2"),
+    ]
+    for offset, want, what in expected:
+        got = h.mem.read(res + offset, 4)
+        assert got == want, f"{what} read wrong lane: got 0x{got:08X}, expected 0x{want:08X}"
+    assert data_reads == 1, f"Expected one external read (warm fill only), saw {data_reads}"
+    h.cleanup()
+
+
+@cocotb.test()
 async def test_dcache_byte_write_hit_merges_cached_longword(dut):
     """ED=1: byte write hit should merge into cached longword and subsequent long read should hit updated data."""
     h = CPUTestHarness(dut)
@@ -546,6 +625,64 @@ async def test_dcache_write_hit_updates_entry(dut):
     assert found, "D-cache write-hit update test did not complete"
     assert h.mem.read(res, 4) == 0x1122_3344, "Post-write read did not return updated value"
     assert data_reads == 1, f"Expected one external read (warm fill only), saw {data_reads}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_dcache_misaligned_write_invalidates_overlapping_entry(dut):
+    """ED=1: a misaligned long write must not leave a stale hit on the entry it overlaps."""
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x400        # Aligned entry that gets cached.
+    write_addr = data_addr - 2             # Misaligned long spanning into data_addr.
+    res = h.RESULT_BASE + 0x68
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0100),                    # ED=1
+        *movec_dn_to_cr(0, CR_CACR),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # miss/fill entry for data_addr
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(0x1122_3344),
+        *move_to_abs_long(LONG, DN, 2, write_addr),  # misaligned write over data_addr[0:1]
+        *move(LONG, AN_IND, 0, DN, 3),             # must not be served from the stale entry
+        *move_to_abs_long(LONG, DN, 3, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(write_addr, 0x0000_0000)
+    h.mem.load_long(data_addr, 0xAABB_CCDD)
+    await h.setup(program)
+
+    found = False
+    prev_as_n = 1
+    data_reads = 0
+    for _ in range(28000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+        except ValueError:
+            continue
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and int(dut.ADR_OUT.value) == data_addr:
+            data_reads += 1
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, "D-cache misaligned-write invalidation test did not complete"
+    # The write put 0x33,0x44 over the first two bytes of the cached longword.
+    assert h.mem.read(data_addr, 4) == 0x3344_CCDD, (
+        f"Memory not updated as expected, got 0x{h.mem.read(data_addr, 4):08X}"
+    )
+    assert h.mem.read(res, 4) == 0x3344_CCDD, (
+        f"Post-write read returned pre-write bytes, got 0x{h.mem.read(res, 4):08X}"
+    )
+    assert data_reads == 2, (
+        f"Expected the overlapped entry to be invalidated and refetched, saw {data_reads} reads"
+    )
     h.cleanup()
 
 
@@ -1126,8 +1263,8 @@ async def test_icache_phase8_autonomous_line_completion(dut):
     for _ in range(120000):
         await RisingEdge(dut.CLK)
         try:
-            icache_mask = int(dut.ICACHE_VALID[line_idx].value)
-            icache_tag = int(dut.ICACHE_TAG[line_idx].value)
+            icache_mask = int(cache_state(dut).ICACHE_VALID[line_idx].value)
+            icache_tag = int(cache_state(dut).ICACHE_TAG[line_idx].value)
             adr_p_phys = int(dut.ADR_P_PHYS.value)
             cbreq_inst_req_now = int(dut.CBREQ_INST_REQ_NOW.value)
             icache_burst_fill_valid = int(dut.ICACHE_BURST_FILL_VALID.value)
@@ -1181,7 +1318,7 @@ async def test_dcache_phase8_autonomous_line_completion(dut):
     for _ in range(90000):
         await RisingEdge(dut.CLK)
         try:
-            dcache_mask = int(dut.DCACHE_VALID[line_idx].value)
+            dcache_mask = int(cache_state(dut).DCACHE_VALID[line_idx].value)
         except (ValueError, TypeError, IndexError):
             dcache_mask = 0
         if dcache_mask == 0xF:
@@ -1254,7 +1391,7 @@ async def test_dcache_miss_bus_error_does_not_allocate_line(dut):
     assert found, "D-cache bus-error miss test did not reach sentinel"
     assert h.mem.read(res, 4) == 0x0000_0002, "Expected bus-error handler marker"
 
-    dcache_mask = int(dut.DCACHE_VALID[line_idx].value)
+    dcache_mask = int(cache_state(dut).DCACHE_VALID[line_idx].value)
     assert ((dcache_mask >> entry_idx) & 0x1) == 0, (
         "Bus-error read miss must not allocate/update D-cache entry"
     )
@@ -1328,8 +1465,8 @@ async def test_icache_miss_bus_error_does_not_allocate_word(dut):
     assert found, "I-cache bus-error miss test did not reach sentinel"
     assert h.mem.read(res, 4) == 0x0000_0002, "Expected bus-error handler marker"
 
-    icache_mask = int(dut.ICACHE_VALID[line_idx].value)
-    icache_tag = int(dut.ICACHE_TAG[line_idx].value)
+    icache_mask = int(cache_state(dut).ICACHE_VALID[line_idx].value)
+    icache_tag = int(cache_state(dut).ICACHE_TAG[line_idx].value)
     word_valid = (icache_mask >> word_idx) & 0x1
     assert not (icache_tag == line_tag and word_valid == 1), (
         "Opcode bus-error miss must not mark target I-cache word valid"
