@@ -16,6 +16,7 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     input  logic        DATA_WR_EXH,
     input  logic        DATA_WR_MAIN,
     input  logic        OPCODE_RD,
+    input  logic        RMC,
 
     input  logic        MMU_RUNTIME_REQ,
     input  logic        MMU_RUNTIME_FAULT,
@@ -150,6 +151,18 @@ logic [31:0] MMU_TWALK_OFFSET_MASK_CUR;
 logic        MMU_TWALK_IS_PLOAD;
 logic        MMU_PLOAD_PENDING;
 logic        OPCODE_REQ_BUS_OK;
+logic        BURST_PREFETCH_OP_REQ_NOW;
+logic        BURST_PREFETCH_DATA_REQ_NOW;
+logic [2:0]  BURST_PREFETCH_OP_WORD_NOW;
+logic [1:0]  BURST_PREFETCH_DATA_ENTRY_NOW;
+logic [31:0] BURST_PREFETCH_ADDR_NOW;
+logic [2:0]  BURST_PREFETCH_FC_NOW;
+logic        BURST_PREFETCH_OP_REQ_HELD;
+logic        BURST_PREFETCH_DATA_REQ_HELD;
+logic [2:0]  BURST_PREFETCH_OP_WORD_HELD;
+logic [1:0]  BURST_PREFETCH_DATA_ENTRY_HELD;
+logic [31:0] BURST_PREFETCH_ADDR_HELD;
+logic [2:0]  BURST_PREFETCH_FC_HELD;
 
 assign MMU_TWALK_INDIRECT_SHORT_ADDR = {MMU_TWALK_DESC_PTR[31:2], 2'b00};
 assign MMU_TWALK_INDIRECT_LONG_ADDR = {MMU_TWALK_DESC_PTR[31:3], 3'b000};
@@ -308,58 +321,89 @@ always_comb begin : burst_prefetch_select
     logic [2:0]  icache_scan_word;
     logic        dcache_found;
     logic [1:0]  dcache_scan_entry;
-    BURST_PREFETCH_OP_REQ = 1'b0;
-    BURST_PREFETCH_DATA_REQ = 1'b0;
-    BURST_PREFETCH_OP_WORD = 3'b000;
-    BURST_PREFETCH_DATA_ENTRY = 2'b00;
-    BURST_PREFETCH_ADDR = 32'h0000_0000;
-    BURST_PREFETCH_FC = FC_USER_PROG;
+    BURST_PREFETCH_OP_REQ_NOW = 1'b0;
+    BURST_PREFETCH_DATA_REQ_NOW = 1'b0;
+    BURST_PREFETCH_OP_WORD_NOW = 3'b000;
+    BURST_PREFETCH_DATA_ENTRY_NOW = 2'b00;
+    BURST_PREFETCH_ADDR_NOW = 32'h0000_0000;
+    BURST_PREFETCH_FC_NOW = FC_USER_PROG;
     scan_idx = 0;
     icache_found = 1'b0;
     icache_scan_word = ICACHE_BURST_FILL_NEXT_WORD;
     dcache_found = 1'b0;
     dcache_scan_entry = DCACHE_BURST_FILL_NEXT_ENTRY;
 
-    if (!BUS_BSY && !DATA_WR && !DATA_RD && !OPCODE_RD && !BUSY_EXH) begin
+    // UM 7.3.7: RMC is asserted for the whole indivisible read-modify-write
+    // sequence and no burst filling occurs during it, so no background fill
+    // cycle may be injected between its halves either.
+    if (!BUS_BSY && !DATA_WR && !DATA_RD && !OPCODE_RD && !BUSY_EXH && !RMC) begin
         if (ICACHE_BURST_FILL_VALID && ICACHE_BURST_FILL_PENDING != 8'h00) begin
             for (scan_idx = 0; scan_idx < 8; scan_idx = scan_idx + 1) begin
                 if (!icache_found) begin
                     icache_scan_word = ICACHE_BURST_FILL_NEXT_WORD + scan_idx[2:0];
                     if (ICACHE_BURST_FILL_PENDING[icache_scan_word]) begin
-                        BURST_PREFETCH_OP_WORD = icache_scan_word;
+                        BURST_PREFETCH_OP_WORD_NOW = icache_scan_word;
                         icache_found = 1'b1;
                     end
                 end
             end
-            BURST_PREFETCH_OP_REQ = 1'b1;
-            BURST_PREFETCH_ADDR = {
+            BURST_PREFETCH_OP_REQ_NOW = 1'b1;
+            BURST_PREFETCH_ADDR_NOW = {
                 ICACHE_BURST_FILL_TAG,
                 ICACHE_BURST_FILL_LINE,
-                BURST_PREFETCH_OP_WORD,
+                BURST_PREFETCH_OP_WORD_NOW,
                 1'b0
             };
-            BURST_PREFETCH_FC = ICACHE_BURST_FILL_FC;
+            BURST_PREFETCH_FC_NOW = ICACHE_BURST_FILL_FC;
         end else if (DCACHE_BURST_FILL_VALID && DCACHE_BURST_FILL_PENDING != 4'h0) begin
             for (scan_idx = 0; scan_idx < 4; scan_idx = scan_idx + 1) begin
                 if (!dcache_found) begin
                     dcache_scan_entry = DCACHE_BURST_FILL_NEXT_ENTRY + scan_idx[1:0];
                     if (DCACHE_BURST_FILL_PENDING[dcache_scan_entry]) begin
-                        BURST_PREFETCH_DATA_ENTRY = dcache_scan_entry;
+                        BURST_PREFETCH_DATA_ENTRY_NOW = dcache_scan_entry;
                         dcache_found = 1'b1;
                     end
                 end
             end
-            BURST_PREFETCH_DATA_REQ = 1'b1;
-            BURST_PREFETCH_ADDR = {
+            BURST_PREFETCH_DATA_REQ_NOW = 1'b1;
+            BURST_PREFETCH_ADDR_NOW = {
                 DCACHE_BURST_FILL_TAG,
                 DCACHE_BURST_FILL_LINE,
-                BURST_PREFETCH_DATA_ENTRY,
+                BURST_PREFETCH_DATA_ENTRY_NOW,
                 2'b00
             };
-            BURST_PREFETCH_FC = DCACHE_BURST_FILL_FC;
+            BURST_PREFETCH_FC_NOW = DCACHE_BURST_FILL_FC;
         end
     end
 end
+
+// The bus controller samples address, size and function code live for the whole
+// cycle, so the selected burst context must be held until the cycle completes
+// instead of collapsing when BUS_BSY rises.
+always_ff @(posedge CLK) begin : burst_prefetch_hold
+    if (RESET_CPU) begin
+        BURST_PREFETCH_OP_REQ_HELD <= 1'b0;
+        BURST_PREFETCH_DATA_REQ_HELD <= 1'b0;
+        BURST_PREFETCH_OP_WORD_HELD <= 3'b000;
+        BURST_PREFETCH_DATA_ENTRY_HELD <= 2'b00;
+        BURST_PREFETCH_ADDR_HELD <= 32'h0000_0000;
+        BURST_PREFETCH_FC_HELD <= FC_USER_PROG;
+    end else if (!BUS_BSY) begin
+        BURST_PREFETCH_OP_REQ_HELD <= BURST_PREFETCH_OP_REQ_NOW;
+        BURST_PREFETCH_DATA_REQ_HELD <= BURST_PREFETCH_DATA_REQ_NOW;
+        BURST_PREFETCH_OP_WORD_HELD <= BURST_PREFETCH_OP_WORD_NOW;
+        BURST_PREFETCH_DATA_ENTRY_HELD <= BURST_PREFETCH_DATA_ENTRY_NOW;
+        BURST_PREFETCH_ADDR_HELD <= BURST_PREFETCH_ADDR_NOW;
+        BURST_PREFETCH_FC_HELD <= BURST_PREFETCH_FC_NOW;
+    end
+end
+
+assign BURST_PREFETCH_OP_REQ = BUS_BSY ? BURST_PREFETCH_OP_REQ_HELD : BURST_PREFETCH_OP_REQ_NOW;
+assign BURST_PREFETCH_DATA_REQ = BUS_BSY ? BURST_PREFETCH_DATA_REQ_HELD : BURST_PREFETCH_DATA_REQ_NOW;
+assign BURST_PREFETCH_OP_WORD = BUS_BSY ? BURST_PREFETCH_OP_WORD_HELD : BURST_PREFETCH_OP_WORD_NOW;
+assign BURST_PREFETCH_DATA_ENTRY = BUS_BSY ? BURST_PREFETCH_DATA_ENTRY_HELD : BURST_PREFETCH_DATA_ENTRY_NOW;
+assign BURST_PREFETCH_ADDR = BUS_BSY ? BURST_PREFETCH_ADDR_HELD : BURST_PREFETCH_ADDR_NOW;
+assign BURST_PREFETCH_FC = BUS_BSY ? BURST_PREFETCH_FC_HELD : BURST_PREFETCH_FC_NOW;
 
 // Request/fault latches that decouple core-side combinational logic from bus FSM timing.
 always_ff @(posedge CLK) begin : bus_req_latch
