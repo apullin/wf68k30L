@@ -581,8 +581,8 @@ assign CHK_CMP_COND = (OP == CHK && OP2_SIGNEXT[MSB]) || // Negative destination
                       ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == LONG && OP2 > OP3) ||
                       ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == WORD && OP2[15:0] < OP1[15:0]) ||
                       ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == WORD && OP2[15:0] > OP3[15:0]) ||
-                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP2[7:0] < OP1[7:0]) ||
-                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP2[7:0] > OP3[7:0]) ||
+                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == BYTE && OP2[7:0] < OP1[7:0]) ||
+                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == BYTE && OP2[7:0] > OP3[7:0]) ||
                       ((OP == CHK2 || OP == CMP2) && !CHK2CMP2_DR && $signed(OP2_SIGNEXT) < $signed(OP1_SIGNEXT)) ||
                       ((OP == CHK2 || OP == CMP2) && !CHK2CMP2_DR && $signed(OP2_SIGNEXT) > $signed(OP3_SIGNEXT));
 
@@ -789,9 +789,9 @@ always_comb begin : cond_codes_comb
                 Z = 1'b1;
             else if (USE_DREG && OP_SIZE == WORD && OP2[15:0] == OP3[15:0])
                 Z = 1'b1;
-            else if (USE_DREG && OP2[7:0] == OP1[7:0])
+            else if (USE_DREG && OP_SIZE == BYTE && OP2[7:0] == OP1[7:0])
                 Z = 1'b1;
-            else if (USE_DREG && OP2[7:0] == OP3[7:0])
+            else if (USE_DREG && OP_SIZE == BYTE && OP2[7:0] == OP3[7:0])
                 Z = 1'b1;
             else if (!USE_DREG && OP2_SIGNEXT == OP1_SIGNEXT)
                 Z = 1'b1;
