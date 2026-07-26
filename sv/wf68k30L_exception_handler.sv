@@ -676,7 +676,8 @@ assign IPIPE_FILL = (EX_STATE == EXS_REFILL_PIPE);
 assign PC_INC = (EX_STATE != EXS_BUILD_STACK && NEXT_EX_STATE == EXS_BUILD_STACK) &&
                 (EXCEPTION == EX_CHK || EXCEPTION == EX_DIVZERO || EXCEPTION == EX_INT ||
                  EXCEPTION == EX_TRAP || EXCEPTION == EX_TRAPcc || EXCEPTION == EX_TRAPV ||
-                 EXCEPTION == EX_TRACE || EXCEPTION == EX_CP_POST);
+                 EXCEPTION == EX_TRACE || EXCEPTION == EX_MMU_CFG ||
+                 EXCEPTION == EX_CP_POST);
 
 assign ISP_DEC = (EX_STATE == EXS_INIT && EXCEPTION != EX_RESET_EX && EXCEPTION != EX_RTE) ||
                  (EX_STATE == EXS_BUILD_STACK && DATA_RDY && NEXT_EX_STATE == EXS_BUILD_STACK) ||
@@ -744,11 +745,11 @@ always_ff @(posedge CLK) begin : stack_ctrl
         STACK_FORMAT_I <= 4'h1; // Throwaway frame (format 1).
     end else if (EX_STATE != EXS_BUILD_STACK && NEXT_EX_STATE == EXS_BUILD_STACK) begin
         case (EXCEPTION)
-            EX_INT, EX_ILLEGAL, EX_1010, EX_1111, EX_MMU_CFG, EX_FORMAT, EX_PRIV, EX_TRAP, EX_CP_PRE: begin
+            EX_INT, EX_ILLEGAL, EX_1010, EX_1111, EX_FORMAT, EX_PRIV, EX_TRAP, EX_CP_PRE: begin
                 STACK_POS_VAR = 6'd4;   // Format 0: 4-word stack frame.
                 STACK_FORMAT_I <= 4'h0;
             end
-            EX_CHK, EX_TRAPcc, EX_TRAPV, EX_TRACE, EX_DIVZERO, EX_CP_POST: begin
+            EX_CHK, EX_TRAPcc, EX_TRAPV, EX_TRACE, EX_DIVZERO, EX_MMU_CFG, EX_CP_POST: begin
                 STACK_POS_VAR = 6'd6;   // Format 2: 6-word stack frame.
                 STACK_FORMAT_I <= 4'h2;
             end
