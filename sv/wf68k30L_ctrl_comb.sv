@@ -527,10 +527,15 @@ assign TRAP_ILLEGAL = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && !
 assign TRAP_cc = (OP == TRAPcc && ALU_COND && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
 assign TRAP_V = (OP == TRAPV && ALU_COND && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
 
-assign BERR = (FETCH_STATE == START_OP && EXEC_WB_STATE == IDLE) ? 1'b0 : // Disable when controller is not active.
-              (OP == BKPT) ? 1'b0 : // No bus error during breakpoint cycle.
-              (DATA_RDY && !DATA_VALID) ? 1'b1 :
+// OW_VALID covers only the pipe stages the acknowledged instruction actually
+// uses, so a faulted opcode word reaches this term only when the instruction
+// needing it is being started; speculative prefetch faults never do. The
+// acknowledge arrives while the controller still sits in START_OP, so this
+// term must be evaluated ahead of the idle mask.
+assign BERR = (OP == BKPT) ? 1'b0 : // No bus error during breakpoint cycle.
               (OPD_ACK && !OW_VALID) ? 1'b1 :
+              (FETCH_STATE == START_OP && EXEC_WB_STATE == IDLE) ? 1'b0 : // Disable when controller is not active.
+              (DATA_RDY && !DATA_VALID) ? 1'b1 :
               (EW_ACK && !OW_VALID) ? 1'b1 : 1'b0;
 
 // ====================================================================

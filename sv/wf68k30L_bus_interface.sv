@@ -566,11 +566,14 @@ always_ff @(posedge CLK) begin : validation
     else if (OPCODE_RDY_I)
         OPCODE_VALID <= 1'b1;
 
+    // DATA_VALID is only re-armed by a completing data cycle, so an opcode
+    // cycle must not clear it: the next data cycle would otherwise read back
+    // as faulted, which during bus-error stacking is a double bus fault.
     if (RESET_CPU_I)
         DATA_VALID <= 1'b1;
     else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY && !HALT_In)
         ; // RETRY condition: no bus error.
-    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY)
+    else if ((READ_ACCESS || WRITE_ACCESS) && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY)
         DATA_VALID <= 1'b0;
     else if (DATA_RDY_I)
         DATA_VALID <= 1'b1;
