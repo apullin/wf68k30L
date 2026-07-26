@@ -76,29 +76,30 @@ Latest representative single-run log (`build/rep_ecp5/nextpnr.log`):
 | TRELLIS_FF | 2,487 / 43,848 (5%) |
 | Fmax @ 25 MHz target | 26.69 MHz (timing pass) |
 
-## Equivalence Validation (currently non-functional)
+## Equivalence Checking (SV revision vs SV revision)
 
-The `validation/` directory contains a co-simulation harness that compared the
-VHDL and SystemVerilog designs cycle-by-cycle via gate-level netlists.
+    ./validation/run_equiv.sh [GOLD_REV] [CYCLES]
 
-**It does not run against the current design and its result is withdrawn.** The
-previously quoted figure (50,000 cycles across 5 seeds, 0 mismatches) described
-a much earlier tree. `synth/yosys/export_gate.ys` lists 9 SV files where the
-design now needs roughly 28, so `prep` fails on missing modules;
-`validation/equiv_tb.v` also lacks `CIOUTn`/`CBREQn`/`CBACKn`, and its
-comparator skips any bit that is X in either design.
+Proves bounded sequential equivalence between a git revision (default `HEAD`)
+and the working tree, by elaborating both, building a miter and discharging it
+with Yosys's SAT engine. Exhaustive over all inputs within the bound, unlike a
+randomized testbench. Intended as a refactoring guard.
 
-More fundamentally, top-level equivalence can no longer hold: the SV top has
-MMU and cache subsystems the VHDL never had. Any revived harness must either
-compare per-module for the modules that exist in both, or be retired.
+Read the scope limits in the script before trusting a pass. In short: it detects
+*change*, not correctness, and the bound is small — 12 cycles from reset is
+barely one bus cycle, so it catches changes observable at the ports early and
+will not catch anything requiring an instruction to execute. Both directions are
+verified: tying `CIOUTn` low is caught, while forcing `TRAP_DIVZERO` low is not,
+because reaching a divide takes far longer than the bound. Roughly 60-75s at
+8-12 cycles, climbing steeply after.
 
-Note also that the July 2026 audit found several defects the VHDL shares, which
-were fixed against the manual — so the SV core is now deliberately *not*
-equivalent to the VHDL in those places. See `notes/AUDIT_2026-07.md` and the
-BUG-R009/R014 amendment in `notes/BUGLIST.md`.
-
-Detailed build requirements and local technical notes are kept in local
-workspace notes (not repository-tracked).
+**The former VHDL-vs-SV comparison is retired**, and the figure that used to
+appear here (50,000 cycles, 5 seeds, 0 mismatches) is withdrawn. It cannot be
+revived meaningfully: the SV top has MMU, cache and coprocessor subsystems the
+VHDL never had, so the port lists cannot correspond; and the July 2026 audit
+fixed a number of defects the SV had inherited faithfully from the VHDL, so the
+SV is now deliberately *not* equivalent to it in those places. See
+`notes/AUDIT_2026-07.md` and the BUG-R009/R014 amendment in `notes/BUGLIST.md`.
 
 ## Software Smoke Battery
 
