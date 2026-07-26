@@ -22,6 +22,7 @@ from m68k_encode import (
     WORD,
     BYTE,
     DN,
+    AN,
     AN_IND,
     AN_DISP,
     SPECIAL,
@@ -2804,4 +2805,160 @@ async def test_mmu_page_without_ci_is_cached_and_leaves_ciout_negated(dut):
         f"Expected the second read of a cacheable page to hit the D-cache, saw {page_reads} bus reads"
     )
     assert not ciout_low, "CIOUTn asserted on a page whose descriptor has CI clear"
+    h.cleanup()
+
+
+PTEST_AN_MARKER = 0x1111_2222
+
+
+def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst):
+    """Three-level short walk followed by `ptest_words`; stores A3 and the MMUSR."""
+    logical_addr = 0x12345008
+    root_tbl = 0x00000400
+    lvlb_tbl = 0x00000800
+    page_tbl = 0x00000C00
+    page_base = 0x00123000
+
+    desc_a_addr = root_tbl + (0x12 << 2)
+    desc_b_addr = lvlb_tbl + (0x34 << 2)
+    desc_c_addr = page_tbl + (0x5 << 2)
+    desc_a = (lvlb_tbl & 0xFFFFFFF0) | 0x00000002
+    desc_b = (page_tbl & 0xFFFFFFF0) | 0x00000002
+    desc_c = (page_base & 0xFFFFFF00) | 0x00000001  # DT=1 short page descriptor
+
+    tt0_src = h.DATA_BASE + 0xC00
+    tt1_src = h.DATA_BASE + 0xC20
+    crp_src = h.DATA_BASE + 0xC40
+    tc_src = h.DATA_BASE + 0xC60
+
+    program = [
+        # Prime descriptor shadow while MMU is disabled.
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 5, DN, 5),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(tt0_src),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(tt1_src),
+        0xF015, 0x0C00,                       # PMOVE (A5),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(crp_src),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(tc_src),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        # A3 carries a marker so an absent write is distinguishable from a wrong one.
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(PTEST_AN_MARKER),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *ptest_words,
+        *move_to_abs_long(LONG, AN, 3, an_dst),
+        *move_to_abs_long(LONG, AN, 0, an_dst + 4),
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(mmusr_dst),
+        0xF016, 0x6200,                       # PMOVE MMUSR,(A6)
+
+        *h.sentinel_program(),
+    ]
+
+    loads = {
+        desc_a_addr: desc_a,
+        desc_b_addr: desc_b,
+        desc_c_addr: desc_c,
+        tt0_src: 0x00008360,
+        tt1_src: 0x00008350,
+        crp_src + 0: 0x7FFF0002,
+        crp_src + 4: root_tbl,
+        tc_src: 0x80C08840,
+    }
+    return program, loads, desc_c_addr, logical_addr
+
+
+@cocotb.test(skip=True)
+async def test_mmu_ptest_returns_last_descriptor_address_in_an(dut):
+    """PTEST <ea>,#level,An writes the last descriptor's physical address to An (UM 9.8).
+
+    Skipped: the address-register file writes AR[AR_PNTR_WB_1], and AR_PNTR_WB_1 is
+    only loaded from AR_SEL_WR_1 when AR_MARK_USED strobes at the end of
+    INIT_EXEC_WB. AR_MARK_USED (wf68k30L_ctrl_comb.sv) has no PTEST arm, so the
+    write lands on whichever register the previous instruction marked. Enable this
+    test together with that arm.
+    """
+    h = CPUTestHarness(dut)
+    an_dst = h.DATA_BASE + 0xC80
+    mmusr_dst = h.DATA_BASE + 0xCA0
+
+    # PTESTR #5,(A0),#7,A3 : level=7, R/W=1, A=1, register=011, FC=10101.
+    program, loads, desc_c_addr, logical_addr = _ptest_an_program(
+        h, [0xF010, 0x9F75], an_dst, mmusr_dst
+    )
+
+    await h.setup(program)
+    for addr, value in loads.items():
+        h.mem.load_long(addr, value)
+
+    found = await h.run_until_sentinel(max_cycles=100000)
+    assert found, "PTEST address-register-option test did not complete"
+
+    got_a3 = h.mem.read(an_dst, 4)
+    assert got_a3 == desc_c_addr, (
+        f"Expected A3 = last descriptor address 0x{desc_c_addr:08X}, got 0x{got_a3:08X}"
+    )
+    got_a0 = h.mem.read(an_dst + 4, 4)
+    assert got_a0 == logical_addr, (
+        f"PTEST clobbered A0: expected 0x{logical_addr:08X}, got 0x{got_a0:08X}"
+    )
+
+    # The extra writeback cycle must not disturb the MMUSR result.
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_I) == 0, f"Expected valid translation (I=0), got 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_N) == 0x3, f"Expected N=3 levels, got 0x{mmusr:04X}"
+    assert (mmusr & (MMUSR_B | MMUSR_L | MMUSR_S | MMUSR_T)) == 0, (
+        f"Unexpected fault/transparent bits set: 0x{mmusr:04X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_ptest_without_a_field_leaves_an_unchanged(dut):
+    """With the A field clear, PTEST must not write any address register."""
+    h = CPUTestHarness(dut)
+    an_dst = h.DATA_BASE + 0xC80
+    mmusr_dst = h.DATA_BASE + 0xCA0
+
+    # PTESTR #5,(A0),#7 : identical apart from A=0 and a zero register field.
+    program, loads, _desc_c_addr, logical_addr = _ptest_an_program(
+        h, [0xF010, 0x9E15], an_dst, mmusr_dst
+    )
+
+    await h.setup(program)
+    for addr, value in loads.items():
+        h.mem.load_long(addr, value)
+
+    found = await h.run_until_sentinel(max_cycles=100000)
+    assert found, "PTEST without address-register option did not complete"
+
+    got_a3 = h.mem.read(an_dst, 4)
+    assert got_a3 == PTEST_AN_MARKER, (
+        f"PTEST with A=0 modified A3: expected 0x{PTEST_AN_MARKER:08X}, got 0x{got_a3:08X}"
+    )
+    got_a0 = h.mem.read(an_dst + 4, 4)
+    assert got_a0 == logical_addr, (
+        f"PTEST with A=0 modified A0: expected 0x{logical_addr:08X}, got 0x{got_a0:08X}"
+    )
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_I) == 0, f"Expected valid translation (I=0), got 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_N) == 0x3, f"Expected N=3 levels, got 0x{mmusr:04X}"
     h.cleanup()
