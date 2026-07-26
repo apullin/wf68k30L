@@ -27,6 +27,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
 
 from cpu_harness import CPUTestHarness
+from bus_model import BusModel
 from m68k_encode import (
     BYTE, WORD, LONG,
     DN, AN, AN_IND, AN_DISP, SPECIAL, ABS_L, IMMEDIATE,
@@ -891,4 +892,109 @@ async def test_misaligned_long_read_retry_recovers(dut):
     )
     assert h.mem.read(res + 4, 4) == 0x0000005A, "Program did not continue after retry recovery"
     assert h.mem.read(res + 8, 4) != 0x0000006E, "Bus-error handler fired; retry was not recovered"
+    h.cleanup()
+
+
+# ===================================================================
+# 6. Reset Operation (UM 7.8)
+# ===================================================================
+
+async def _bringup_reset_only(dut, h, program):
+    """Bring the CPU up driving RESET_INn alone, with HALT_INn left negated.
+
+    This is what a standard MC68030 reset circuit does: HALT is an input the
+    reset logic never touches, so it sits pulled up.
+    """
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    h._init_idle_inputs()
+    h._load_memory(program)
+    await RisingEdge(dut.CLK)
+    await RisingEdge(dut.CLK)
+
+    dut.RESET_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+
+    h.bus = BusModel(dut, h.mem, h.wait_states)
+    await h.bus.start()
+
+    dut.RESET_INn.value = 1
+    await ClockCycles(dut.CLK, 4)
+
+
+@cocotb.test()
+async def test_external_reset_without_halt(dut):
+    """UM 7.8: RESET alone resets the processor logic; HALT is not involved."""
+    h = CPUTestHarness(dut)
+    await _bringup_reset_only(dut, h, _arithmetic_program(h))
+
+    assert int(dut.HALT_INn.value) == 1, "HALT_INn must stay negated in this test"
+
+    found = await h.run_until_sentinel(max_cycles=4000)
+    assert found, "CPU never ran: RESET alone did not reset the core"
+    assert h.read_result_long(0) == EXPECTED_D0, (
+        f"D0: expected {EXPECTED_D0}, got 0x{h.read_result_long(0):08X}")
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_repeated_external_reset_without_halt(dut):
+    """A later RESET-only assertion must reset the core again (UM 7.8)."""
+    h = CPUTestHarness(dut)
+    await _bringup_reset_only(dut, h, _arithmetic_program(h))
+    assert await h.run_until_sentinel(max_cycles=4000), "first run did not complete"
+
+    # Clear the completion markers, then pulse RESET only.
+    h.mem.load_long(h.SENTINEL_ADDR, 0)
+    h.mem.load_long(h.RESULT_BASE, 0)
+    dut.RESET_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+    dut.RESET_INn.value = 1
+    await ClockCycles(dut.CLK, 4)
+
+    found = await h.run_until_sentinel(max_cycles=6000)
+    assert found, "CPU did not restart after a second RESET-only assertion"
+    assert h.read_result_long(0) == EXPECTED_D0, (
+        f"D0 after re-reset: expected {EXPECTED_D0}, "
+        f"got 0x{h.read_result_long(0):08X}")
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_reset_instruction_does_not_reset_core(dut):
+    """UM 5.8.1/7.8: RESET resets external devices only, never the core itself.
+
+    RESET_OUT and RESET_INn share one open-drain net in a real system, so the
+    core sees its own assertion on RESET_INn and must ignore it.
+    """
+    h = CPUTestHarness(dut)
+    counter = h.RESULT_BASE
+    program = [
+        *move(LONG, SPECIAL, ABS_L, DN, 0),      # D0 = run counter
+        *abs_long(counter),
+        *addq(LONG, 1, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, counter),
+        0x4E70,                                   # RESET
+        *h.sentinel_program(),
+    ]
+    await _bringup_reset_only(dut, h, program)
+
+    found = False
+    saw_reset_out = False
+    for _ in range(40000):
+        await RisingEdge(dut.CLK)
+        try:
+            reset_out = int(dut.RESET_OUT.value)
+        except ValueError:
+            reset_out = 0
+        dut.RESET_INn.value = 0 if reset_out else 1
+        saw_reset_out |= bool(reset_out)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert saw_reset_out, "RESET instruction never asserted RESET_OUT"
+    assert found, "core reset itself from its own RESET instruction output"
+    runs = h.read_result_long(0)
+    assert runs == 1, f"program ran {runs} times; RESET restarted the core"
     h.cleanup()

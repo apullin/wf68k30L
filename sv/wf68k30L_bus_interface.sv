@@ -714,14 +714,15 @@ end
 assign BGn = (ARB_STATE == GRANT) ? 1'b0 : 1'b1;
 
 // ---- Reset input filter ----
-// Requires RESET_IN held low with HALTn low for ~10 clock cycles to trigger.
+// Requires RESET_IN asserted for ~10 clock cycles to trigger. The core must
+// not reset on its own RESET instruction output, hence the RESET_OUT_I mask.
 always_ff @(posedge CLK) begin : reset_filter
     logic STARTUP;
     logic [3:0] TMP;
 
-    if (RESET_IN && !HALT_In && !RESET_OUT_I && TMP < 4'hF)
+    if (RESET_IN && !RESET_OUT_I && TMP < 4'hF)
         TMP = TMP + 1'b1;
-    else if (!RESET_IN || HALT_In || RESET_OUT_I)
+    else if (!RESET_IN || RESET_OUT_I)
         TMP = 4'h0;
 
     if (TMP > 4'hA) begin
