@@ -952,6 +952,15 @@ def rte():
     return [0x4E73]
 
 
+def rtd(disp):
+    """RTD #<displacement> - Return and Deallocate.
+
+    Encoding: 0100 1110 0111 0100 = 0x4E74, then a 16-bit displacement.
+    Operation: (SP) -> PC; SP + 4 + dn -> SP.
+    """
+    return [0x4E74, _w(disp)]
+
+
 def rtr():
     """RTR - Return and Restore Condition Codes.
 
@@ -1112,6 +1121,24 @@ def trap(vector):
     vector: 0-15
     """
     return [_w(0x4E40 | _mask(vector, 4))]
+
+
+def trapcc(condition, operand=None, size=None):
+    """TRAPcc [#<operand>] - Trap on Condition.
+
+    Encoding: 0101 condition 11111 opmode
+    opmode 100 = no operand, 010 = word operand, 011 = long operand.
+    Pass size="W" or "L" with an operand; omit both for the no-operand form.
+    """
+    if size is None:
+        assert operand is None, "an operand requires size='W' or 'L'"
+        return [_w(0x50FC | (_mask(condition, 4) << 8))]
+    if size == "W":
+        return [_w(0x50FA | (_mask(condition, 4) << 8)), _w(operand)]
+    if size == "L":
+        return ([_w(0x50FB | (_mask(condition, 4) << 8))] +
+                [(operand >> 16) & 0xFFFF, operand & 0xFFFF])
+    raise ValueError(f"bad TRAPcc size {size!r}")
 
 
 def trapv():

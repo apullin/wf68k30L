@@ -375,8 +375,8 @@ function automatic OP_68K decode_4xxx(input logic [15:0] iw, input logic [15:0] 
         end
     end
 
-    // --- CHK (size must be 10 or 11, opmode not 001) ---
-    if (!matched && iw[8:7] >= 2'b10) begin
+    // --- CHK (size must be 10 or 11, bit 6 is fixed 0, opmode not 001) ---
+    if (!matched && iw[8:7] >= 2'b10 && !iw[6]) begin
         if (mode == 3'b111) begin
             if (reg_fld < 3'b101) begin
                 decode_4xxx = CHK;  matched = 1'b1;
@@ -412,8 +412,9 @@ function automatic OP_68K decode_5xxx(input logic [15:0] iw);
 
         if (ea_ok)
             decode_5xxx = iw[8] ? SUBQ : ADDQ;
-    end else if (iw[7:3] == 5'b11111) begin
-        // TRAPcc
+    end else if (iw[7:3] == 5'b11111 && iw[2:0] >= 3'b010 && iw[2:0] <= 3'b100) begin
+        // TRAPcc: opmode 010 = word operand, 011 = long operand, 100 = none.
+        // Opmodes 000/001 are Scc (xxx).W/(xxx).L; 101..111 are reserved.
         decode_5xxx = TRAPcc;
     end
 endfunction

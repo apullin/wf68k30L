@@ -393,6 +393,7 @@ WF68K30L_CTRL_COMB #(
     .BIW_2              (BIW_2),
     .BIW_0_WB           (BIW_0_WB),
     .BIW_1_WB           (BIW_1_WB),
+    .EXT_WORD           (EXT_WORD),
     .OPD_ACK            (OPD_ACK),
     .OW_VALID           (OW_VALID),
     .OW_RDY             (OW_RDY),
@@ -718,7 +719,9 @@ end
         endcase
         //
         case (OP)
-            LINK, MOVEP: DISPLACEMENT <= DISPL_VAR;
+            // The +2 is the PC relative correction required by Bcc, BRA, BSR
+            // and DBcc only. LINK, MOVEP and RTD use the raw displacement.
+            LINK, MOVEP, RTD: DISPLACEMENT <= DISPL_VAR;
             default: DISPLACEMENT <= DISPL_VAR + 32'd2;
         endcase
     end

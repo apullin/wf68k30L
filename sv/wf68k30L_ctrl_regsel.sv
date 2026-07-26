@@ -270,7 +270,10 @@ assign DR_SEL_RD_1 = (FETCH_STATE == FETCH_EXWORD_1) ? EXT_WORD[14:12] : // Inde
                      (OP == EXG && BIW_0[7:3] == 5'b10001) ? BIW_0[11:9] : // Data and address register.
                      (OP == DIVS || OP == DIVU || OP == EXG) ? BIW_0[2:0] :
                      (OP == MOVE || OP == MOVEA || OP == MOVE_TO_CCR || OP == MOVE_TO_SR || OP == MULS || OP == MULU || OP == PACK) ? BIW_0[2:0] :
-                     (OP == SBCD || OP == SUBA || OP == SUBX || OP == UNPK) ? BIW_0[2:0] : 3'b000;
+                     (OP == SBCD || OP == SUBA || OP == SUBX || OP == UNPK) ? BIW_0[2:0] :
+                     // FC-from-Dn operand form: PRM PFLUSH/PTEST FC field 01DDD
+                     // takes the function code from bits 2:0 of data register DDD.
+                     (OP == PFLUSH || OP == PLOAD || OP == PTEST) ? BIW_1[2:0] : 3'b000;
 
 assign DR_SEL_WR_1 = (OP == BFEXTS || OP == BFEXTU || OP == BFFFO) ? BIW_1[14:12] :
                      (OP == MOVEC || OP == MOVES) ? BIW_1[14:12] :

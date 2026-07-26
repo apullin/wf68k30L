@@ -28,6 +28,7 @@ module WF68K30L_CTRL_COMB #(
     input  logic [15:0] BIW_2,
     input  logic [11:0] BIW_0_WB,
     input  logic [15:0] BIW_1_WB,
+    input  logic [15:0] EXT_WORD,
 
     // Data availability
     input  logic        OPD_ACK,
@@ -400,7 +401,7 @@ assign LOAD_OP2 = (OP == PMOVE && !BIW_1[9] && (PMOVE_SRP_SEL || PMOVE_CRP_SEL) 
 assign LOAD_OP3 = ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 :
                   ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 :
                   ((OP == BFCHG || OP == BFCLR) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
-                  ((OP == BFINS || OP == BSET) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
+                  ((OP == BFINS || OP == BFSET) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   ((OP == BFEXTS || OP == BFEXTU) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   ((OP == BFFFO || OP == BFTST) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   (OP == CAS2 && INIT_ENTRY && !PHASE2) ? 1'b1 : // Memory operand 2.
@@ -514,7 +515,14 @@ assign BKPT_CYCLE = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && DATA_RD_I) ? 
 assign BKPT_INSERT = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID) ? 1'b1 : 1'b0;
 
 // All traps must be modeled as strobes.
-assign TRAP_ILLEGAL = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && !DATA_VALID) ? 1'b1 : 1'b0;
+// Reserved full format extension word encodings, PRM Table 2-1 and Table 2-2:
+// BD SIZE = 00, plus I/IS = 100 with IS = 0 and I/IS = 100..111 with IS = 1.
+// Must stay identical to EXWORD_RESERVED in wf68k30L_ctrl_fetch_other.sv,
+// which abandons the effective address in the same cycle.
+assign TRAP_ILLEGAL = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && !DATA_VALID) ? 1'b1 :
+                      (FETCH_STATE == FETCH_EXWORD_1 && EW_ACK && EXT_WORD[8] &&
+                       ((EXT_WORD[5:4] == 2'b00) ||
+                        (EXT_WORD[2] && (EXT_WORD[6] || EXT_WORD[1:0] == 2'b00)))) ? 1'b1 : 1'b0;
 
 assign TRAP_cc = (OP == TRAPcc && ALU_COND && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
 assign TRAP_V = (OP == TRAPV && ALU_COND && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
@@ -615,7 +623,9 @@ assign SP_ADD_DISPL = (OP == LINK && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) ? 
 // ====================================================================
 
 assign ALU_TRIG = (ALU_BSY || FETCH_STATE != INIT_EXEC_WB) ? 1'b0 :
-                  ((OP == CHK2 || OP == CMP2 || OP == CMPM) && PHASE2) ? 1'b0 :
+                  // Two-operand fetches: trigger only on the second pass, once
+                  // both memory operands and the tested register are loaded.
+                  ((OP == CHK2 || OP == CMP2 || OP == CMPM) && !PHASE2) ? 1'b0 :
                   (OP == MOVE && PHASE2) ? 1'b0 : // no ALU required after second portion of address calculation.
                   (OP == MOVEM && !MOVEM_COND) ? 1'b0 :
                   (OP == MOVEM && BIW_0[10] && !MOVEM_FIRST_RD) ? 1'b0 : // Do not load before the first read access.
