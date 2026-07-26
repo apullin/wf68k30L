@@ -117,12 +117,17 @@ async def test_unallocated_4b40_is_illegal(dut):
     )
 
 
-async def _illegal_case(dut, opcode):
-    """Run a single suspect opcode; return True if vector 4 was taken."""
+async def _illegal_program(dut, words):
+    """Run a suspect instruction sequence; return True if vector 4 was taken."""
     h = CPUTestHarness(dut)
-    program = [opcode, *SENTINEL, 0x60FE]
+    program = [*words, *SENTINEL, 0x60FE]
     assert await _run(h, program, [(4 * 4, 0x900, ILLEGAL_HANDLER)]), "no completion"
     return h.mem.read(RES + 0x10, 4) == 0x111E6A11
+
+
+async def _illegal_case(dut, opcode):
+    """Run a single suspect opcode; return True if vector 4 was taken."""
+    return await _illegal_program(dut, [opcode])
 
 
 @cocotb.test()
@@ -334,3 +339,103 @@ async def test_ptest_fc_from_nonzero_dn(dut):
         f"translation, so the function code was not read from D3 (D0 held 1)"
     )
     h.cleanup()
+
+
+# MOVE.L <ea>,D1 with ea = mode 110 / reg 000 (A0 with an extension word).
+MOVE_L_EXT_D1 = 0x2230
+# MOVEA.L #$00020100,A0 - a base pointing into writable test memory.
+SETUP_A0 = [0x207C, 0x0002, 0x0100]
+
+
+async def _full_format_illegal(dut, ext_word, trailing=()):
+    """MOVE.L (ext_word...),D1 - true if the encoding took vector 4."""
+    return await _illegal_program(
+        dut, [*SETUP_A0, MOVE_L_EXT_D1, ext_word, *trailing])
+
+
+@cocotb.test()
+async def test_full_format_reserved_bd_size_is_illegal(dut):
+    """BD SIZE = 00 is reserved (PRM Table 2-1) and must not be abandoned silently."""
+    # bit8=1 full format, BS=0, IS=1, BD SIZE=00, I/IS=000.
+    assert await _full_format_illegal(dut, 0x0140), (
+        "a full-format extension word with the reserved BD SIZE = 00 did not "
+        "take the illegal-instruction vector; the instruction was abandoned "
+        "silently and following operand words decode as opcodes"
+    )
+
+
+@cocotb.test()
+async def test_full_format_reserved_iis_index_suppressed_is_illegal(dut):
+    """IS = 1 with I/IS = 100 is reserved (PRM Table 2-2)."""
+    # bit8=1, BS=0, IS=1, BD SIZE=10 (word), I/IS=100.
+    assert await _full_format_illegal(dut, 0x0164, [0x0010]), (
+        "a full-format extension word with IS = 1 and the reserved I/IS = 100 "
+        "did not take the illegal-instruction vector"
+    )
+
+
+@cocotb.test()
+async def test_full_format_reserved_iis_indexed_is_illegal(dut):
+    """IS = 0 with I/IS = 100 is reserved (PRM Table 2-2)."""
+    # bit8=1, BS=0, IS=0, BD SIZE=10 (word), I/IS=100.
+    assert await _full_format_illegal(dut, 0x0124, [0x0010]), (
+        "a full-format extension word with IS = 0 and the reserved I/IS = 100 "
+        "did not take the illegal-instruction vector"
+    )
+
+
+@cocotb.test()
+async def test_full_format_reserved_iis_111_index_suppressed_is_illegal(dut):
+    """IS = 1 with I/IS = 111 is reserved (PRM Table 2-2)."""
+    # bit8=1, BS=0, IS=1, BD SIZE=10 (word), I/IS=111.
+    assert await _full_format_illegal(dut, 0x0167, [0x0010]), (
+        "a full-format extension word with IS = 1 and the reserved I/IS = 111 "
+        "did not take the illegal-instruction vector"
+    )
+
+
+@cocotb.test()
+async def test_full_format_word_bd_still_works(dut):
+    """Guard against over-tightening: (bd16,A0) with IS=1, I/IS=000 must execute."""
+    h = CPUTestHarness(dut)
+    payload = 0x5A5AA5A5
+    program = [
+        *SETUP_A0,                   # A0 = $00020100
+        # bit8=1, BS=0, IS=1, BD SIZE=10 (word), I/IS=000 -> EA = A0 + $20
+        MOVE_L_EXT_D1, 0x0160, 0x0020,
+        0x23C1, 0x0002, 0x0000,      # MOVE.L D1,($20000).L
+        *SENTINEL, 0x60FE,
+    ]
+    h.mem.load_long(0x020120, payload)
+    assert await _run(h, program, [(4 * 4, 0x900, ILLEGAL_HANDLER)]), "no completion"
+    assert h.mem.read(RES + 0x10, 4) == 0, (
+        "a valid (bd16,A0) full-format EA wrongly took the illegal vector"
+    )
+    got = h.mem.read(RES, 4)
+    assert got == payload, (
+        f"D1=0x{got:08X}, expected 0x{payload:08X} from ($20100 + $20)"
+    )
+
+
+@cocotb.test()
+async def test_full_format_memory_indirect_still_works(dut):
+    """Guard against over-tightening: IS=1, I/IS=001 memory indirect must execute."""
+    h = CPUTestHarness(dut)
+    payload = 0x0BADF00D
+    program = [
+        *SETUP_A0,                   # A0 = $00020100
+        # bit8=1, BS=0, IS=1, BD SIZE=10 (word), I/IS=001 -> EA = [(A0 + $20)]
+        MOVE_L_EXT_D1, 0x0161, 0x0020,
+        0x23C1, 0x0002, 0x0000,      # MOVE.L D1,($20000).L
+        *SENTINEL, 0x60FE,
+    ]
+    h.mem.load_long(0x020120, 0x00020200)   # intermediate pointer
+    h.mem.load_long(0x020200, payload)
+    assert await _run(h, program, [(4 * 4, 0x900, ILLEGAL_HANDLER)]), "no completion"
+    assert h.mem.read(RES + 0x10, 4) == 0, (
+        "a valid memory-indirect full-format EA wrongly took the illegal vector"
+    )
+    got = h.mem.read(RES, 4)
+    assert got == payload, (
+        f"D1=0x{got:08X}, expected 0x{payload:08X} from [($20100 + $20)]"
+    )

@@ -98,8 +98,13 @@ logic NO_AR_HAZARD;
 logic NO_DR_HAZARD;
 logic EXWORD_SRC_READY;
 logic MOVE_PHASE2_EXWORD_READY;
+logic EXWORD_RESERVED;
 
 assign EW_SEEN = EW_ACK || EW_RDY;
+// Reserved full format extension word encodings, PRM Table 2-1 and Table 2-2:
+// BD SIZE = 00, plus I/IS = 100 with IS = 0 and I/IS = 100..111 with IS = 1.
+assign EXWORD_RESERVED = (EXT_WORD[5:4] == 2'b00) ||
+                         (EXT_WORD[2] && (EXT_WORD[6] || EXT_WORD[1:0] == 2'b00));
 assign NO_AR_HAZARD = !AR_IN_USE;
 assign NO_DR_HAZARD = !DR_IN_USE;
 assign EXWORD_SRC_READY = NO_AR_HAZARD && (BIW_1[15] || NO_DR_HAZARD);
@@ -169,12 +174,14 @@ always_comb begin : other_states_dec
         FETCH_EXWORD_1: begin
             // Be aware that the An registers which will be addressed by EXWORD_1 and are used for several addressing modes
             // are valid right after this state (because every address register manipulation requires no more than two clock cycles).
-            if (EW_ACK && EXT_WORD[8] && EXT_WORD[5:4] == 2'b11) begin // 32 bit displacement.
+            if (EW_ACK && EXT_WORD[8] && EXWORD_RESERVED) begin
+                // Abandon the effective address before any bd/od word is
+                // fetched; TRAP_ILLEGAL is raised in the same cycle.
+                NEXT_FETCH_STATE = START_OP;
+            end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[5:4] == 2'b11) begin // 32 bit displacement.
                 NEXT_FETCH_STATE = FETCH_D_HI;
             end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[5:4] == 2'b10) begin // 16 bit displacement.
                 NEXT_FETCH_STATE = FETCH_D_LO;
-            end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[5:4] == 2'b00) begin // Reserved.
-                NEXT_FETCH_STATE = START_OP;
             end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[1:0] == 2'b11) begin
                 NEXT_FETCH_STATE = FETCH_OD_HI; // Long outer displacement.
             end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[1:0] == 2'b10) begin

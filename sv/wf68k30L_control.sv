@@ -393,6 +393,7 @@ WF68K30L_CTRL_COMB #(
     .BIW_2              (BIW_2),
     .BIW_0_WB           (BIW_0_WB),
     .BIW_1_WB           (BIW_1_WB),
+    .EXT_WORD           (EXT_WORD),
     .OPD_ACK            (OPD_ACK),
     .OW_VALID           (OW_VALID),
     .OW_RDY             (OW_RDY),

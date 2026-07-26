@@ -28,6 +28,7 @@ module WF68K30L_CTRL_COMB #(
     input  logic [15:0] BIW_2,
     input  logic [11:0] BIW_0_WB,
     input  logic [15:0] BIW_1_WB,
+    input  logic [15:0] EXT_WORD,
 
     // Data availability
     input  logic        OPD_ACK,
@@ -514,7 +515,14 @@ assign BKPT_CYCLE = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && DATA_RD_I) ? 
 assign BKPT_INSERT = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID) ? 1'b1 : 1'b0;
 
 // All traps must be modeled as strobes.
-assign TRAP_ILLEGAL = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && !DATA_VALID) ? 1'b1 : 1'b0;
+// Reserved full format extension word encodings, PRM Table 2-1 and Table 2-2:
+// BD SIZE = 00, plus I/IS = 100 with IS = 0 and I/IS = 100..111 with IS = 1.
+// Must stay identical to EXWORD_RESERVED in wf68k30L_ctrl_fetch_other.sv,
+// which abandons the effective address in the same cycle.
+assign TRAP_ILLEGAL = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && !DATA_VALID) ? 1'b1 :
+                      (FETCH_STATE == FETCH_EXWORD_1 && EW_ACK && EXT_WORD[8] &&
+                       ((EXT_WORD[5:4] == 2'b00) ||
+                        (EXT_WORD[2] && (EXT_WORD[6] || EXT_WORD[1:0] == 2'b00)))) ? 1'b1 : 1'b0;
 
 assign TRAP_cc = (OP == TRAPcc && ALU_COND && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
 assign TRAP_V = (OP == TRAPV && ALU_COND && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
