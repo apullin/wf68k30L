@@ -278,3 +278,59 @@ async def test_trapf_long_operand_skips_operand(dut):
         f"D0=0x{h.mem.read(RES, 4):08X}: a TRAPF.L operand word was executed "
         f"as an opcode instead of being skipped"
     )
+
+
+MMUSR_T = 1 << 6
+
+
+@cocotb.test()
+async def test_ptest_fc_from_nonzero_dn(dut):
+    """PTESTR D3,(A0),#0 must take the function code from D3, not from D0.
+
+    TT0 is programmed to match only FC=5. D3 holds 5, D0 holds 1, so a TT hit
+    (MMUSR.T) proves the encoded register was used. This mirrors the immediate
+    form in test_mmu_instr.test_mmu_ptest_level0_vs_level7_t_bit.
+    """
+    h = CPUTestHarness(dut)
+
+    logical_addr = 0x12000600
+    tt1_src = h.DATA_BASE + 0x460
+    mmusr_dst = h.DATA_BASE + 0x480
+
+    tt_prog = 0x00008143   # TT1: supervisor program pass-through for low addresses
+    tt_data = 0x12008150   # TT0: transparent for top-byte 0x12, FC base 5, mask 000
+
+    program = [
+        *enc.movea(enc.LONG, enc.SPECIAL, enc.IMMEDIATE, 0),  # A0 = address to test
+        *enc.imm_long(logical_addr),
+        *enc.movea(enc.LONG, enc.SPECIAL, enc.IMMEDIATE, 1),  # A1 = TT1 source
+        *enc.imm_long(tt1_src),
+        0xF011, 0x0C00,                       # PMOVE (A1),TT1
+        *enc.movea(enc.LONG, enc.SPECIAL, enc.IMMEDIATE, 2),  # A2 = TT0 source
+        *enc.imm_long(tt1_src + 4),
+        0xF012, 0x0800,                       # PMOVE (A2),TT0
+
+        *enc.moveq(1, 0),                     # D0 = 1 (the wrong function code)
+        *enc.moveq(5, 3),                     # D3 = 5 (the encoded function code)
+
+        0xF010, 0x820B,                       # PTESTR D3,(A0),#0   (FC field 01011)
+        *enc.movea(enc.LONG, enc.SPECIAL, enc.IMMEDIATE, 3),  # A3 = MMUSR dump
+        *enc.imm_long(mmusr_dst),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(tt1_src, tt_prog)
+    h.mem.load_long(tt1_src + 4, tt_data)
+
+    found = await h.run_until_sentinel(max_cycles=24000)
+    assert found, "PTEST FC-from-Dn test did not complete"
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_T) != 0, (
+        f"MMUSR=0x{mmusr:04X}: PTESTR D3,(A0),#0 did not hit the FC=5 transparent "
+        f"translation, so the function code was not read from D3 (D0 held 1)"
+    )
+    h.cleanup()
