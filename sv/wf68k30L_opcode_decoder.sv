@@ -87,6 +87,7 @@ module WF68K30L_OPCODE_DECODER #(
     input  logic        PC_INC_EXH,
     output logic [7:0]  PC_ADR_OFFSET,
     output logic [3:0]  PC_EW_OFFSET,
+    output logic [3:0]  PC_EW_BASE,      // EA base: always the first extension word.
     output logic [7:0]  PC_OFFSET,
     input  logic        PC_REDIRECT_FLUSH,
 
@@ -561,6 +562,16 @@ always_ff @(posedge CLK) begin : pc_offset
         PC_VAR = PC_VAR + 7'd1;
     end
     //
+    if (OW_REQ && BKPT_REQ) begin
+        PC_EW_BASE <= 4'b0010;
+    end else if (OW_REQ && PIPE_RDY) begin
+        case (INSTR_LVL)
+            LVL_D:   PC_EW_BASE <= 4'b0010;
+            LVL_C:   PC_EW_BASE <= 4'b0100;
+            default: PC_EW_BASE <= 4'b0110;
+        endcase
+    end
+
     if (OW_REQ && BKPT_REQ) begin
         PC_EW_OFFSET <= 4'b0010; // Always level D operations.
     end else if (OW_REQ && PIPE_RDY && OP_I == JSR) begin // Initialize.

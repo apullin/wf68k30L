@@ -2,10 +2,19 @@
 // Exception handler data multiplexer
 // ========================================================================
 
+// Table 8-6 distinguishes the stacked PC (next instruction) from the format $2
+// instruction address (the faulting instruction). PC advances only via the
+// handler's PC_INC, which fires after BUSY_EXH is already asserted, so the
+// pre-entry value is the faulting instruction's address.
+always_ff @(posedge CLK) begin
+    if (!BUSY_EXH)
+        PC_INSTR_EXH <= PC;
+end
+
 assign DATA_EXH = (STACK_POS == 2) ? {SR_CPY, PC[31:16]} :
                    (STACK_POS == 4) ? {PC[15:0], STACK_FORMAT, 2'b00, IVECT_OFFS} :
-                   (STACK_FORMAT == 4'h2 && STACK_POS == 6) ? PC :
-                   (STACK_FORMAT == 4'h9 && STACK_POS == 6) ? PC :
+                   (STACK_FORMAT == 4'h2 && STACK_POS == 6) ? PC_INSTR_EXH :
+                   (STACK_FORMAT == 4'h9 && STACK_POS == 6) ? PC_INSTR_EXH :
                    (STACK_POS == 6) ? {BIW_0, FC, FB, RC, RB, 3'b000, SSW_80} : // Format A and B.
                    (STACK_POS == 8) ? {BIW_1, BIW_2} : // Format A and B.
                    (STACK_FORMAT == 4'h9 && STACK_POS == 10) ? FAULT_ADR :

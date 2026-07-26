@@ -93,7 +93,7 @@
         .RESTORE_ISP_PC         (RESTORE_ISP_PC),
         .DISPLACEMENT           (DISPLACEMENT),
         .PC_ADD_DISPL           (PC_ADD_DISPL),
-        .PC_EW_OFFSET           (PC_EW_OFFSET),
+        .PC_EW_OFFSET           (PC_EW_BASE),
         .PC_INC                 (PC_INC),
         .PC_LOAD                (PC_LOAD),
         .PC_RESTORE             (PC_RESTORE_EXH),
@@ -498,6 +498,7 @@
         .PC_INC_EXH             (PC_INC_EXH_I),
         .PC_ADR_OFFSET          (PC_ADR_OFFSET),
         .PC_EW_OFFSET           (PC_EW_OFFSET),
+        .PC_EW_BASE             (PC_EW_BASE),
         .PC_OFFSET              (PC_OFFSET_OPD),
         .PC_REDIRECT_FLUSH      (PC_ADD_DISPL || PC_LOAD_MAIN || PC_LOAD_EXH),
 

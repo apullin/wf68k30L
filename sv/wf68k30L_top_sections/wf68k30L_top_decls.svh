@@ -236,6 +236,8 @@ logic        PHASE2_MAIN;
 logic        PC_ADD_DISPL;
 logic [7:0]  PC_ADR_OFFSET;
 logic [3:0]  PC_EW_OFFSET;
+logic [3:0]  PC_EW_BASE;
+logic [31:0] PC_INSTR_EXH;   // PC frozen at exception entry (format $2 IA field).
 logic        PC_INC;
 logic        PC_INC_EXH;
 logic        PC_INC_EXH_I;
