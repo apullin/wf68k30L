@@ -262,6 +262,8 @@ logic        RESET_CPU;
 logic        RESET_IN;
 logic        RESET_STRB;
 logic        CIOUT_ASSERT;
+logic        CIOUT_ASSERT_NOW;
+logic        CIOUT_LATCH;
 logic        CBREQ_ASSERT;
 logic        CBREQ_REQ_NOW;
 logic        CBREQ_REQ_LATCH;

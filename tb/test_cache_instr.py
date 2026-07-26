@@ -1616,3 +1616,77 @@ async def test_dcache_phase8_wrap_order_from_midline_miss(dut):
     assert burst_fill_seen, "D-cache burst-fill context never became active"
     assert bg_order_entries, "Did not observe any D-cache background burst selection"
     h.cleanup()
+
+
+@cocotb.test()
+async def test_ciout_holds_for_the_whole_cycle(dut):
+    """CIOUTn must stay asserted for every clock of the cycle it belongs to.
+
+    UM 7.3.1 drives CIOUT with the address and keeps it valid until the cycle
+    terminates. This TT entry has RWM clear, so the CI decision depends on the
+    read/write request strobes, which the request latches drop after the first
+    clock of the cycle.
+    """
+    h = CPUTestHarness(dut)
+    tt_addr = h.DATA_BASE + 0x260
+    data_addr = h.DATA_BASE + 0x220
+    res = h.RESULT_BASE + 0x7C
+
+    # E=1, CI=1, R/W=1 (read), RWM=0, FC base=supervisor data, FC mask=000.
+    tt0_ci_super_data_read = 0x00FF_8650
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(tt_addr),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(tt0_ci_super_data_read),
+        *move(LONG, DN, 0, AN_IND, 0),             # (A0) = TT0 value
+        *pmove_an_to_tt0(0),                       # PMOVE (A0),TT0
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # supervisor data read
+        *move_to_abs_long(LONG, DN, 1, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x5566_7788)
+    await h.setup(program)
+
+    found = False
+    saw_data_read = False
+    ciout_low_clocks = 0
+    ciout_high_clocks = 0
+
+    for _ in range(28000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            ciout_n = int(dut.CIOUTn.value)
+        except ValueError:
+            continue
+
+        # Every clock of the read cycle, not just its first.
+        if as_n == 0 and rw_n == 1 and addr == data_addr:
+            saw_data_read = True
+            if ciout_n == 0:
+                ciout_low_clocks += 1
+            else:
+                ciout_high_clocks += 1
+
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, "CIOUT hold test did not complete"
+    assert h.mem.read(res, 4) == 0x5566_7788, "Result writeback mismatch in CIOUT hold test"
+    assert saw_data_read, "Did not observe the TT-CI-matched data read cycle"
+    assert ciout_low_clocks >= 2, (
+        f"Expected the read cycle to span at least two clocks with CIOUTn asserted, saw {ciout_low_clocks}"
+    )
+    assert ciout_high_clocks == 0, (
+        f"CIOUTn negated for {ciout_high_clocks} clock(s) inside a cache-inhibited read cycle"
+    )
+    h.cleanup()
