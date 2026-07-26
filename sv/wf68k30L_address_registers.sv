@@ -141,7 +141,6 @@ logic [3:0] AR_USED_1;
 logic [3:0] AR_USED_2;
 logic B_S; // Base register suppress.
 logic [1:0] BD_SIZE; // Indexed / Indirect.
-logic [2:0] DFC_REG_sig; // Special function code registers.
 logic F_E; // Full extension word.
 logic [2:0] I_IS; // Indexed / Indirect.
 logic I_S; // Index suppress.
@@ -150,7 +149,6 @@ logic [1:0] MSBIT;
 logic [31:0] MSP_REG; // Master stack pointer (refers to A7' in the supervisor mode).
 logic [31:0] PC_I; // Active program counter.
 logic [1:0] SCALE; // Scale information for the index.
-logic [2:0] SFC_REG_sig; // Special function code registers.
 logic [31:0] USP_REG; // User stack pointer (refers to A7 in the user mode.).
 logic [31:0] ADR_EFF_TMP_REG;
 
@@ -763,13 +761,10 @@ end
 always_ff @(posedge CLK) begin : fcodes
     // Alternate function code registers.
     if (DFC_WR)
-        DFC_REG_sig <= AR_IN_1[2:0];
+        DFC <= AR_IN_1[2:0];
 
     if (SFC_WR)
-        SFC_REG_sig <= AR_IN_1[2:0];
-
-    DFC <= DFC_REG_sig;
-    SFC <= SFC_REG_sig;
+        SFC <= AR_IN_1[2:0];
 end
 
 endmodule

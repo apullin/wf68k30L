@@ -8,13 +8,14 @@ Tests the address register file independently:
   - PC load and increment
   - Hazard detection (AR_IN_USE)
   - Reset clears all registers
+  - SFC/DFC visibility timing
 
 Set TOPLEVEL=WF68K30L_ADDRESS_REGISTERS when running this test.
 """
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, ClockCycles
+from cocotb.triggers import RisingEdge, ClockCycles, Timer
 
 
 # OP_SIZE encoding from wf68k30L_pkg.svh:
@@ -354,3 +355,34 @@ async def test_hazard_detection(dut):
     in_use = int(dut.AR_IN_USE.value)
     assert in_use == 0, f"AR_IN_USE should be 0 after UNMARK, got {in_use}"
     dut._log.info("PASS: AR_IN_USE cleared after UNMARK")
+
+
+@cocotb.test()
+async def test_sfc_dfc_visible_next_cycle(dut):
+    """A written SFC/DFC must be on the output in the cycle after the write.
+
+    MOVES drives FC_I from SFC/DFC for the bus cycle that immediately follows
+    the MOVEC that loaded them, so an extra cycle of latency puts the previous
+    function code on the bus.
+    """
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    init_signals(dut)
+    await RisingEdge(dut.CLK)
+    await do_reset(dut)
+
+    for wr, out, name in ((dut.SFC_WR, dut.SFC, "SFC"), (dut.DFC_WR, dut.DFC, "DFC")):
+        for code in (0b101, 0b010, 0b111):
+            dut.AR_IN_1.value = code
+            wr.value = 1
+            await RisingEdge(dut.CLK)
+            wr.value = 0
+            # Sample inside the cycle that follows the write edge.
+            await Timer(1, unit="ns")
+            got = int(out.value)
+            assert got == code, (
+                f"{name} should read {code:#05b} in the cycle after the write, got {got:#05b}"
+            )
+            await RisingEdge(dut.CLK)
+
+    dut._log.info("PASS: SFC/DFC visible on the cycle after the write")
