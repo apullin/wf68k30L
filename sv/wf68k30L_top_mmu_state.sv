@@ -28,6 +28,7 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic        MMU_RUNTIME_ATC_W,
     input  logic        MMU_RUNTIME_ATC_M,
     input  logic        MMU_RUNTIME_ATC_M_SET,
+    input  logic        MMU_RUNTIME_ATC_CI,
     input  logic [15:0] BIW_1,
     input  logic [31:0] DR_OUT_1,
     input  logic [2:0]  SFC,
@@ -54,6 +55,7 @@ module WF68K30L_TOP_MMU_STATE #(
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_B_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_W_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_M_FLAT,
+    output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_CI_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS*3-1:0] MMU_ATC_FC_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT
@@ -72,6 +74,7 @@ logic [MMU_ATC_WAYS-1:0] MMU_ATC_V [0:MMU_ATC_SETS-1];
 logic [MMU_ATC_WAYS-1:0] MMU_ATC_B [0:MMU_ATC_SETS-1];
 logic [MMU_ATC_WAYS-1:0] MMU_ATC_W [0:MMU_ATC_SETS-1];
 logic [MMU_ATC_WAYS-1:0] MMU_ATC_M [0:MMU_ATC_SETS-1];
+logic [MMU_ATC_WAYS-1:0] MMU_ATC_CI [0:MMU_ATC_SETS-1];
 logic [2:0]  MMU_ATC_FC [0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [31:0] MMU_ATC_TAG[0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [31:0] MMU_ATC_PTAG[0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
@@ -85,6 +88,7 @@ for (genvar set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin : gen_pack
         assign MMU_ATC_B_FLAT[IDX] = MMU_ATC_B[set_i][way_i];
         assign MMU_ATC_W_FLAT[IDX] = MMU_ATC_W[set_i][way_i];
         assign MMU_ATC_M_FLAT[IDX] = MMU_ATC_M[set_i][way_i];
+        assign MMU_ATC_CI_FLAT[IDX] = MMU_ATC_CI[set_i][way_i];
         assign MMU_ATC_FC_FLAT[(IDX*3) +: 3] = MMU_ATC_FC[set_i][way_i];
         assign MMU_ATC_TAG_FLAT[(IDX*32) +: 32] = MMU_ATC_TAG[set_i][way_i];
         assign MMU_ATC_PTAG_FLAT[(IDX*32) +: 32] = MMU_ATC_PTAG[set_i][way_i];
@@ -240,6 +244,7 @@ always_ff @(posedge CLK) begin : mmu_registers
     logic        atc_b_result;
     logic        atc_w_result;
     logic        atc_m_result;
+    logic        atc_ci_result;
     logic        atc_rmw;
     logic [31:0] atc_phys;
     logic [35:0] atc_lookup;
@@ -269,6 +274,7 @@ always_ff @(posedge CLK) begin : mmu_registers
             MMU_ATC_B[set_i] <= '0;
             MMU_ATC_W[set_i] <= '0;
             MMU_ATC_M[set_i] <= '0;
+            MMU_ATC_CI[set_i] <= '0;
             MMU_ATC_REPL_PTR[set_i] <= '0;
             for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
                 MMU_ATC_FC[set_i][way_i] <= 3'b000;
@@ -399,6 +405,7 @@ always_ff @(posedge CLK) begin : mmu_registers
                 atc_ptag = atc_b_result ? 32'h0 : mmu_page_tag(MMU_TC, MMU_PLOAD_RESULT[31:0]);
                 atc_w_result = MMU_PLOAD_RESULT[34];
                 atc_m_result = MMU_PLOAD_RESULT[35];
+                atc_ci_result = MMU_PLOAD_RESULT[33];
             end else begin
                 atc_fc = MMU_RUNTIME_ATC_FC;
                 atc_tag = MMU_RUNTIME_ATC_TAG;
@@ -406,6 +413,7 @@ always_ff @(posedge CLK) begin : mmu_registers
                 atc_b_result = MMU_RUNTIME_ATC_B;
                 atc_w_result = MMU_RUNTIME_ATC_W;
                 atc_m_result = MMU_RUNTIME_ATC_M;
+                atc_ci_result = MMU_RUNTIME_ATC_CI;
             end
 
             atc_set_idx = mmu_atc_set_idx(atc_fc, atc_tag);
@@ -427,6 +435,7 @@ always_ff @(posedge CLK) begin : mmu_registers
             MMU_ATC_B[atc_set_idx][atc_ins_way] <= atc_b_result;
             MMU_ATC_W[atc_set_idx][atc_ins_way] <= atc_w_result;
             MMU_ATC_M[atc_set_idx][atc_ins_way] <= atc_m_result;
+            MMU_ATC_CI[atc_set_idx][atc_ins_way] <= atc_ci_result;
             MMU_ATC_FC[atc_set_idx][atc_ins_way] <= atc_fc;
             MMU_ATC_TAG[atc_set_idx][atc_ins_way] <= atc_tag;
             MMU_ATC_PTAG[atc_set_idx][atc_ins_way] <= atc_ptag;

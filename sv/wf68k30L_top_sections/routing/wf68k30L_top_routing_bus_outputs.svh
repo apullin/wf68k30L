@@ -42,7 +42,7 @@ always_comb begin : ciout_generation
     write_access = WR_REQ;
     rmw_access = RMC;
 
-    CIOUT_ASSERT = mmu_ci_out(FC_I, ADR_P, read_access, write_access, rmw_access, MMU_TT0, MMU_TT1);
+    CIOUT_ASSERT = mmu_ci_out(FC_I, ADR_P, read_access, write_access, rmw_access, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
 end
 
 assign CIOUTn = (ASn == 1'b0) ? !CIOUT_ASSERT : 1'b1;
@@ -65,14 +65,14 @@ always_comb begin : cbreq_generation
 
     // Instruction burst-request candidate: I-cache enabled + burst enabled + miss fillable.
     if (!BUS_BSY && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && OPCODE_REQ_CORE_MISS && CACR[0] && CACR[4] && !CACR[1]) begin
-        CBREQ_INST_REQ_NOW = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1) &&
+        CBREQ_INST_REQ_NOW = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI) &&
                              !icache_same_burst_line;
     end
 
     // Data burst-request candidate: D-cache read miss fill on aligned longword access.
     if (!BUS_BSY && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && DATA_RD_BUS && CACR[8] && CACR[12] && !CACR[9] && !RMC &&
         OP_SIZE == LONG && ADR_P_PHYS[1:0] == 2'b00) begin
-        CBREQ_DATA_REQ_NOW = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1) &&
+        CBREQ_DATA_REQ_NOW = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI) &&
                              !dcache_same_burst_line;
     end
 

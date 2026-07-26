@@ -17,6 +17,7 @@ module WF68K30L_TOP_CACHE_STATE (
     input  logic [2:0]  FC_I,
     input  logic [31:0] MMU_TT0,
     input  logic [31:0] MMU_TT1,
+    input  logic        MMU_RUNTIME_ATC_CI,
     input  logic [2:0]  FC_BUS_REQ,
     input  logic        OPCODE_RDY_BUSIF,
     input  logic        DATA_RD_BUS,
@@ -126,7 +127,7 @@ always_comb begin : icache_lookup
     // and the raw logical address while the MMU walks or faults.
     if (!BUS_BSY && OPCODE_REQ_CORE && !DATA_RD && !DATA_WR &&
         !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && CACR[0]) begin
-        req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
+        req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
         req_line = ADR_P_PHYS[7:4];
         req_word = ADR_P_PHYS[3:1];
         req_tag = ADR_P_PHYS[31:8];
@@ -150,7 +151,7 @@ always_comb begin : dcache_lookup
     req_cacheable = 1'b0;
 
     if (!BUS_BSY && DATA_RD && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && CACR[8] && !RMC) begin
-        req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
+        req_cacheable = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
         req_line = ADR_P_PHYS[7:4];
         req_entry = ADR_P_PHYS[3:2];
         req_tag = ADR_P_PHYS[31:8];
@@ -295,7 +296,7 @@ always_ff @(posedge CLK) begin : cache_registers
             ICACHE_FILL_PENDING <= 1'b1;
             ICACHE_FILL_ADDR <= ADR_BUS_REQ_PHYS;
             ICACHE_FILL_CACHEABLE <= BURST_PREFETCH_OP_REQ ? 1'b1 :
-                                     !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1);
+                                     !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
             ICACHE_FILL_FC <= FC_BUS_REQ;
         end else if (OPCODE_RDY_BUSIF) begin
             ICACHE_FILL_PENDING <= 1'b0;
@@ -306,7 +307,7 @@ always_ff @(posedge CLK) begin : cache_registers
             DCACHE_READ_FILL_ADDR <= ADR_BUS_REQ_PHYS;
             DCACHE_READ_FILL_SIZE <= BURST_PREFETCH_DATA_REQ ? LONG : OP_SIZE_BUS;
             DCACHE_READ_FILL_CACHEABLE <= BURST_PREFETCH_DATA_REQ ? 1'b1 :
-                                          !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, RMC, MMU_TT0, MMU_TT1);
+                                          !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, RMC, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
             DCACHE_READ_FILL_FC <= FC_BUS_REQ;
         end else if (DATA_RDY_BUSIF) begin
             DCACHE_READ_FILL_PENDING <= 1'b0;
@@ -317,7 +318,7 @@ always_ff @(posedge CLK) begin : cache_registers
             DCACHE_WRITE_ADDR <= ADR_P_PHYS;
             DCACHE_WRITE_SIZE <= OP_SIZE_BUS;
             DCACHE_WRITE_DATA <= DATA_FROM_CORE;
-            DCACHE_WRITE_CACHEABLE <= !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b0, 1'b1, RMC, MMU_TT0, MMU_TT1);
+            DCACHE_WRITE_CACHEABLE <= !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b0, 1'b1, RMC, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
         end else if (DATA_RDY_BUSIF_CORE && DCACHE_WRITE_PENDING) begin
             DCACHE_WRITE_PENDING <= 1'b0;
         end

@@ -228,12 +228,14 @@ function automatic logic [35:0] mmu_twalk_page_result(
     input logic [31:0] phys_addr,
     input logic        fault,
     input logic        wp_accum,
-    input logic        page_m
+    input logic        page_m,
+    input logic        page_ci
 );
 begin
     mmu_twalk_page_result = 36'h0;
     mmu_twalk_page_result[31:0] = phys_addr;
     mmu_twalk_page_result[32] = fault;
+    mmu_twalk_page_result[33] = page_ci;
     mmu_twalk_page_result[34] = wp_accum;
     mmu_twalk_page_result[35] = page_m;
 end
@@ -650,7 +652,8 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                                 walk_start_logical + {root_ptr[31:4], 4'b0000},
                                 1'b0,
                                 1'b0,
-                                walk_start_write
+                                walk_start_write,
+                                1'b0
                             );
                         MMU_TWALK_RESULT <= walk_result;
                         MMU_TWALK_VALID <= 1'b1;
@@ -808,7 +811,8 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                                 MMU_TWALK_DESC_PAGE_BASE + (MMU_TWALK_LOGICAL & MMU_TWALK_OFFSET_MASK_CUR),
                                 walk_fault,
                                 walk_wp_accum,
-                                walk_page_m
+                                walk_page_m,
+                                walk_desc[6]
                             );
                             if (MMU_TWALK_WRITE && walk_wp_accum)
                                 walk_result[32] = 1'b1;
@@ -896,7 +900,8 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                             {walk_lookup[31:8], 8'h00} + (MMU_TWALK_LOGICAL & MMU_TWALK_OFFSET_MASK_CUR),
                             1'b0,
                             walk_wp_accum,
-                            walk_page_m
+                            walk_page_m,
+                            walk_lookup[6]
                         );
                     end
                 end else begin
@@ -914,7 +919,8 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                                 {MMU_TWALK_SHADOW_LOOKUP[31:8], 8'h00} + (MMU_TWALK_LOGICAL & MMU_TWALK_OFFSET_MASK_CUR),
                                 1'b0,
                                 walk_wp_accum,
-                                walk_page_m
+                                walk_page_m,
+                                walk_lookup[6]
                             );
                         end
                     end

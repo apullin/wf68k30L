@@ -32,6 +32,7 @@ module WF68K30L_TOP_ROUTING_MMU_TRANSLATE #(
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_B_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_W_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_M_FLAT,
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_CI_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*3-1:0] MMU_ATC_FC_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT,
@@ -50,6 +51,7 @@ module WF68K30L_TOP_ROUTING_MMU_TRANSLATE #(
     output logic        MMU_RUNTIME_ATC_W,
     output logic        MMU_RUNTIME_ATC_M,
     output logic        MMU_RUNTIME_ATC_M_SET,
+    output logic        MMU_RUNTIME_ATC_CI,
     output logic        MMU_RUNTIME_STALL,
     output logic        MMU_TWALK_START
 );
@@ -74,6 +76,7 @@ always_comb begin : mmu_address_translate
     logic        atc_w;
     logic        atc_m;
     logic        atc_m_stored;
+    logic        atc_ci;
     logic        root_valid;
     logic        root_short_table;
     logic        root_long_table;
@@ -128,6 +131,7 @@ always_comb begin : mmu_address_translate
     atc_w = 1'b0;
     atc_m = write_access;
     atc_m_stored = 1'b0;
+    atc_ci = 1'b0;
 
     atc_set_idx = atc_tag[MMU_ATC_SET_BITS-1:0] ^ atc_fc[MMU_ATC_SET_BITS-1:0];
     for (way = 0; way < MMU_ATC_WAYS; way = way + 1) begin
@@ -145,6 +149,7 @@ always_comb begin : mmu_address_translate
             atc_w = MMU_ATC_W_FLAT[atc_way_idx];
             atc_m_stored = MMU_ATC_M_FLAT[atc_way_idx];
             atc_m = atc_m_stored || write_access;
+            atc_ci = MMU_ATC_CI_FLAT[atc_way_idx];
         end
     end
 
@@ -166,6 +171,9 @@ always_comb begin : mmu_address_translate
     MMU_RUNTIME_ATC_W = 1'b0;
     MMU_RUNTIME_ATC_M = write_access;
     MMU_RUNTIME_ATC_M_SET = 1'b0;
+    // Only an access the ATC (or a completed walk) resolved may report CI; a
+    // TT hit bypasses translation and must not see a stale entry's CI bit.
+    MMU_RUNTIME_ATC_CI = 1'b0;
     MMU_RUNTIME_STALL = 1'b0;
     MMU_TWALK_START = 1'b0;
 
@@ -178,6 +186,7 @@ always_comb begin : mmu_address_translate
         if (atc_hit && !atc_fault) begin
             ADR_P_PHYS_CALC = atc_phys;
             MMU_RUNTIME_ATC_M = atc_m;
+            MMU_RUNTIME_ATC_CI = atc_ci;
             // UM 9.4: a valid write to the page sets M in the entry.
             MMU_RUNTIME_ATC_M_SET = mmu_req_now && write_access && !atc_m_stored;
         end else if (atc_hit && atc_fault) begin
@@ -216,6 +225,7 @@ always_comb begin : mmu_address_translate
                 MMU_RUNTIME_ATC_PTAG = mmu_page_tag(MMU_TC, MMU_TWALK_RESULT[31:0]);
                 MMU_RUNTIME_ATC_W = MMU_TWALK_RESULT[34];
                 MMU_RUNTIME_ATC_M = MMU_TWALK_RESULT[35];
+                MMU_RUNTIME_ATC_CI = MMU_TWALK_RESULT[33];
             end
         end else begin
             ADR_P_PHYS_CALC = ADR_P;

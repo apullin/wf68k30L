@@ -2658,3 +2658,150 @@ async def test_mmu_privilege_violation_user_mode(dut):
     marker = h.read_result_long(0)
     assert marker == 0x08, f"Expected privilege vector handler marker 0x08, got 0x{marker:08X}"
     h.cleanup()
+
+
+PAGE_CI_LOGICAL = 0x12345008
+PAGE_CI_PAGE_BASE = 0x00234000
+PAGE_CI_PHYS = PAGE_CI_PAGE_BASE + (PAGE_CI_LOGICAL & 0xFFF)
+PAGE_CI_VALUE = 0x5A6B7C8D
+
+
+def _page_ci_program(h, page_ci):
+    """Short-format three-level tree whose leaf page descriptor has CI = page_ci.
+
+    Two back-to-back long reads of the same mapped address let the caller count
+    external cycles: with CI clear the second read is a D-cache hit, with CI set
+    the page must bypass the cache entirely (UM 9.2.1).
+    """
+    root_tbl = 0x00000400
+    lvlb_tbl = 0x00000800
+    page_tbl = 0x00000C00
+    desc_a_addr = root_tbl + (0x12 << 2)
+    desc_b_addr = lvlb_tbl + (0x34 << 2)
+    desc_c_addr = page_tbl + (0x5 << 2)
+    desc_a = (lvlb_tbl & 0xFFFFFFF0) | 0x00000002   # DT=2 short table descriptor
+    desc_b = (page_tbl & 0xFFFFFFF0) | 0x00000002   # DT=2 short table descriptor
+    # DT=1 short page descriptor; bit 6 is CI (UM Figure 9-12).
+    desc_c = (PAGE_CI_PAGE_BASE & 0xFFFFFF00) | (0x40 if page_ci else 0x00) | 0x00000001
+
+    tt0_src = h.DATA_BASE + 0xB00
+    tt1_src = h.DATA_BASE + 0xB20
+    crp_src = h.DATA_BASE + 0xB40
+    tc_src = h.DATA_BASE + 0xB60
+
+    program = [
+        # Prime the descriptor shadow with explicit long reads while MMU is off.
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 3, DN, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+
+        # Keep low-address supervisor program/data traffic transparent.
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(tt0_src),
+        0xF015, 0x0800,                       # PMOVE (A5),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(tt1_src),
+        0xF016, 0x0C00,                       # PMOVE (A6),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(crp_src),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0100),               # CACR: ED=1 (data cache enabled)
+        0x4E7B, 0x0002,                       # MOVEC D0,CACR
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(tc_src),
+        0xF012, 0x4000,                       # PMOVE (A2),TC (enables translation)
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(PAGE_CI_LOGICAL),
+        *move(LONG, AN_IND, 0, DN, 1),        # first translated read
+        *move(LONG, AN_IND, 0, DN, 2),        # second read of the same address
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE + 0),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE + 4),
+
+        *h.sentinel_program(),
+    ]
+
+    loads = {
+        desc_a_addr: desc_a,
+        desc_b_addr: desc_b,
+        desc_c_addr: desc_c,
+        PAGE_CI_PHYS & 0xFFFFF: PAGE_CI_VALUE,
+        tt0_src: 0x00008360,                  # E=1, CI=0, RWM, FC=supervisor program
+        tt1_src: 0x00008350,                  # E=1, CI=0, RWM, FC=supervisor data
+        crp_src + 0: 0x7FFF0002,              # Root DT=2 (short), upper-limit mode
+        crp_src + 4: root_tbl,
+        tc_src: 0x80C08840,                   # E=1, PS=12, IS=0, TIA=8, TIB=8, TIC=4
+    }
+    return program, loads
+
+
+async def _run_page_ci_reads(dut, h, page_ci):
+    """Run the two-read program and return (bus reads of the page, all CIOUTn low)."""
+    program, loads = _page_ci_program(h, page_ci)
+    await h.setup(program)
+    for addr, value in loads.items():
+        h.mem.load_long(addr, value)
+
+    found = False
+    prev_as_n = 1
+    page_reads = 0
+    page_read_ciout_low = True
+    for _ in range(90000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            ciout_n = int(dut.CIOUTn.value)
+        except ValueError:
+            continue
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr == PAGE_CI_PHYS:
+            page_reads += 1
+            page_read_ciout_low &= (ciout_n == 0)
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, f"Page-descriptor CI test (CI={page_ci}) did not complete"
+    for idx in range(2):
+        got = h.read_result_long(idx * 4)
+        assert got == PAGE_CI_VALUE, (
+            f"Read {idx} through CI={page_ci} page returned 0x{got:08X}, "
+            f"expected 0x{PAGE_CI_VALUE:08X}"
+        )
+    return page_reads, page_read_ciout_low
+
+
+@cocotb.test()
+async def test_mmu_page_ci_inhibits_dcache_and_asserts_ciout(dut):
+    """A page descriptor with CI set must bypass the D-cache and assert CIOUTn."""
+    h = CPUTestHarness(dut)
+    page_reads, ciout_low = await _run_page_ci_reads(dut, h, page_ci=True)
+    assert page_reads == 2, (
+        f"Expected both reads of a CI-marked page to reach the bus, saw {page_reads}"
+    )
+    assert ciout_low, "CIOUTn not asserted on read cycle(s) to a CI-marked page"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_page_without_ci_is_cached_and_leaves_ciout_negated(dut):
+    """Control for the CI case: a page with CI clear caches and keeps CIOUTn negated."""
+    h = CPUTestHarness(dut)
+    page_reads, ciout_low = await _run_page_ci_reads(dut, h, page_ci=False)
+    assert page_reads == 1, (
+        f"Expected the second read of a cacheable page to hit the D-cache, saw {page_reads} bus reads"
+    )
+    assert not ciout_low, "CIOUTn asserted on a page whose descriptor has CI clear"
+    h.cleanup()
