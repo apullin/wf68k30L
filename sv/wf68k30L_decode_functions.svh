@@ -412,8 +412,9 @@ function automatic OP_68K decode_5xxx(input logic [15:0] iw);
 
         if (ea_ok)
             decode_5xxx = iw[8] ? SUBQ : ADDQ;
-    end else if (iw[7:3] == 5'b11111) begin
-        // TRAPcc
+    end else if (iw[7:3] == 5'b11111 && iw[2:0] >= 3'b010 && iw[2:0] <= 3'b100) begin
+        // TRAPcc: opmode 010 = word operand, 011 = long operand, 100 = none.
+        // Opmodes 000/001 are Scc (xxx).W/(xxx).L; 101..111 are reserved.
         decode_5xxx = TRAPcc;
     end
 endfunction

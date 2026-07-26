@@ -161,25 +161,120 @@ async def test_chk_bit6_set_an_is_illegal(dut):
     )
 
 
+# vec 7 (TRAPcc) marker handler, so vector 4 and vector 7 can be told apart
+TRAPCC_HANDLER = [
+    0x203C, 0x7777, 0x0007,          # MOVE.L #$77770007,D0
+    0x23C0, 0x0002, 0x0014,          # MOVE.L D0,($20014).L
+    *SENTINEL,
+    0x4E72, 0x2700,
+]
+
+
+async def _trapcc_case(dut, words):
+    """Run a TRAPcc encoding; return (took_vec4, took_vec7)."""
+    h = CPUTestHarness(dut)
+    program = [*words, *SENTINEL, 0x60FE]
+    assert await _run(h, program, [(4 * 4, 0x900, ILLEGAL_HANDLER),
+                                   (7 * 4, 0xA00, TRAPCC_HANDLER)]), "no completion"
+    return (h.mem.read(RES + 0x10, 4) == 0x111E6A11,
+            h.mem.read(RES + 0x14, 4) == 0x77770007)
+
+
 @cocotb.test()
 async def test_trapcc_reserved_opmode_is_illegal(dut):
     """0x50FD (TRAPT with reserved opmode 101) -> illegal instruction."""
+    illegal, trapcc = await _trapcc_case(dut, [0x50FD])
+    assert illegal, (
+        f"0x50FD took vector {'7 (TRAPcc)' if trapcc else 'none'} "
+        f"instead of vector 4; TRAPcc opmode 101 is reserved and must be illegal"
+    )
+
+
+@cocotb.test()
+async def test_trapcc_reserved_opmode_110_is_illegal(dut):
+    """0x50FE (TRAPT with reserved opmode 110) -> illegal instruction."""
+    illegal, trapcc = await _trapcc_case(dut, [0x50FE])
+    assert illegal, (
+        f"0x50FE took vector {'7 (TRAPcc)' if trapcc else 'none'} "
+        f"instead of vector 4; TRAPcc opmode 110 is reserved"
+    )
+
+
+@cocotb.test()
+async def test_trapcc_reserved_opmode_111_is_illegal(dut):
+    """0x50FF (TRAPT with reserved opmode 111) -> illegal instruction."""
+    illegal, trapcc = await _trapcc_case(dut, [0x50FF])
+    assert illegal, (
+        f"0x50FF took vector {'7 (TRAPcc)' if trapcc else 'none'} "
+        f"instead of vector 4; TRAPcc opmode 111 is reserved"
+    )
+
+
+@cocotb.test()
+async def test_trapt_no_operand_traps(dut):
+    """TRAPT (opmode 100) is legal and must take vector 7."""
+    illegal, trapcc = await _trapcc_case(dut, enc.trapcc(enc.CC_T))
+    assert trapcc and not illegal, (
+        f"TRAPT (0x50FC, opmode 100) took vector "
+        f"{'4 (illegal)' if illegal else 'none'} instead of vector 7"
+    )
+
+
+@cocotb.test()
+async def test_trapt_word_operand_traps(dut):
+    """TRAPT.W #$1234 (opmode 010) is legal and must take vector 7."""
+    illegal, trapcc = await _trapcc_case(dut, enc.trapcc(enc.CC_T, 0x1234, "W"))
+    assert trapcc and not illegal, (
+        f"TRAPT.W (0x50FA, opmode 010) took vector "
+        f"{'4 (illegal)' if illegal else 'none'} instead of vector 7"
+    )
+
+
+@cocotb.test()
+async def test_trapt_long_operand_traps(dut):
+    """TRAPT.L #$12345678 (opmode 011) is legal and must take vector 7."""
+    illegal, trapcc = await _trapcc_case(dut, enc.trapcc(enc.CC_T, 0x12345678, "L"))
+    assert trapcc and not illegal, (
+        f"TRAPT.L (0x50FB, opmode 011) took vector "
+        f"{'4 (illegal)' if illegal else 'none'} instead of vector 7"
+    )
+
+
+@cocotb.test()
+async def test_trapf_word_operand_skips_operand(dut):
+    """TRAPF.W must not trap and must skip its operand word, not execute it."""
     h = CPUTestHarness(dut)
-    trapcc_handler = [                # vec 7 marker, so we can tell them apart
-        0x203C, 0x7777, 0x0007,
-        0x23C0, 0x0002, 0x0014,
-        *SENTINEL,
-        0x4E72, 0x2700,
-    ]
     program = [
-        0x50FD,                       # TRAPT, opmode 101 (reserved)
+        0x7000,                                  # MOVEQ #0,D0
+        *enc.trapcc(enc.CC_F, 0x7001, "W"),      # TRAPF.W #$7001 (= MOVEQ #1,D0)
+        0x23C0, 0x0002, 0x0000,                  # MOVE.L D0,($20000).L
         *SENTINEL, 0x60FE,
     ]
     assert await _run(h, program, [(4 * 4, 0x900, ILLEGAL_HANDLER),
-                                   (7 * 4, 0xA00, trapcc_handler)]), "no completion"
-    illegal = h.mem.read(RES + 0x10, 4)
-    trapcc = h.mem.read(RES + 0x14, 4)
-    assert illegal == 0x111E6A11, (
-        f"0x50FD took vector {'7 (TRAPcc)' if trapcc == 0x77770007 else 'none'} "
-        f"instead of vector 4; TRAPcc opmode 101 is reserved and must be illegal"
+                                   (7 * 4, 0xA00, TRAPCC_HANDLER)]), "no completion"
+    assert h.mem.read(RES + 0x10, 4) == 0, "TRAPF.W wrongly took vector 4"
+    assert h.mem.read(RES + 0x14, 4) == 0, "TRAPF.W wrongly took vector 7"
+    assert h.mem.read(RES, 4) == 0, (
+        f"D0=0x{h.mem.read(RES, 4):08X}: the TRAPF.W operand word was executed "
+        f"as an opcode instead of being skipped"
+    )
+
+
+@cocotb.test()
+async def test_trapf_long_operand_skips_operand(dut):
+    """TRAPF.L must not trap and must skip both operand words."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x7000,                                        # MOVEQ #0,D0
+        *enc.trapcc(enc.CC_F, 0x70017002, "L"),        # TRAPF.L (two MOVEQ words)
+        0x23C0, 0x0002, 0x0000,                        # MOVE.L D0,($20000).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program, [(4 * 4, 0x900, ILLEGAL_HANDLER),
+                                   (7 * 4, 0xA00, TRAPCC_HANDLER)]), "no completion"
+    assert h.mem.read(RES + 0x10, 4) == 0, "TRAPF.L wrongly took vector 4"
+    assert h.mem.read(RES + 0x14, 4) == 0, "TRAPF.L wrongly took vector 7"
+    assert h.mem.read(RES, 4) == 0, (
+        f"D0=0x{h.mem.read(RES, 4):08X}: a TRAPF.L operand word was executed "
+        f"as an opcode instead of being skipped"
     )
