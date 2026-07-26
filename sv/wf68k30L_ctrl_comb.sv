@@ -453,8 +453,8 @@ assign OP_SIZE_I = (FETCH_STATE == FETCH_MEMADR && !RD_RDY) ? LONG : // (RD_RDY:
                    ((OP == BCHG || OP == BCLR || OP == BTST || OP == BSET) && BIW_0[5:3] == 3'b000) ? LONG :
                    ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BIW_0[5:3] == 3'b000) ? LONG :
                    ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BIW_0[5:3] == 3'b000) ? LONG :
-                   ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BF_BYTES > 2) ? LONG :
-                   ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BF_BYTES > 2) ? LONG :
+                   ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BF_BYTES > 0 && BF_HILOn) ? LONG :
+                   ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BF_BYTES > 0 && BF_HILOn) ? LONG :
                    (OP == EXT && BIW_0[8:6] == 3'b011) ? LONG :
                    (OP == BSR || OP == EXG || OP == EXTB || OP == JSR || OP == LEA || OP == LINK || OP == PEA || OP == SWAP || OP == UNLK) ? LONG :
                    ((OP == CAS || OP == CAS2) && BIW_0[10:9] == 2'b11) ? LONG :
@@ -488,7 +488,8 @@ assign OP_SIZE_I = (FETCH_STATE == FETCH_MEMADR && !RD_RDY) ? LONG : // (RD_RDY:
                    (OP == PMOVE && BIW_1[15:13] == 3'b011 && BIW_1[12:10] == 3'b000) ? WORD : // MMUSR
                    (OP == MOVEM || OP == RTR) ? WORD :
                    (OP == DIVS || OP == DIVU || OP == MULS || OP == MULU) ? WORD :
-                   (OP == PACK && (NEXT_FETCH_STATE == FETCH_OPERAND || FETCH_STATE == FETCH_OPERAND) && !INIT_ENTRY) ? WORD : // Read data is word wide.
+                   (OP == PACK && (NEXT_FETCH_STATE == FETCH_OPERAND || FETCH_STATE == FETCH_OPERAND ||
+                                   NEXT_FETCH_STATE == CALC_AEFF) && !INIT_ENTRY) ? WORD : // Read data is word wide.
                    ((OP == ROTL || OP == ROTR) && BIW_0[7:6] == 2'b11) ? WORD : // Memory shifts.
                    ((OP == ROXL || OP == ROXR) && BIW_0[7:6] == 2'b11) ? WORD : // Memory shifts.
                    (OP == UNPK && (INIT_ENTRY || FETCH_STATE == INIT_EXEC_WB)) ? WORD : // Writeback data is a word.

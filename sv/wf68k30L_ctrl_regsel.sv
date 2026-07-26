@@ -222,7 +222,8 @@ always_comb begin
     case (OP)
         ABCD, ADD, ADDA, ADDI, ADDQ, ADDX, AND_B, ANDI, ASL, ASR, BCHG, BCLR, BSET, BTST, CHK, CMP, CMPA, CMPI,
         DIVS, DIVU, EOR, EORI, LSL, LSR, MOVE, MOVEA, MOVE_TO_CCR, MOVE_TO_SR, MOVES, MULS, MULU, NBCD, NEG, NEGX,
-        NOT_B, OR_B, ORI, ROTL, ROTR, ROXL, ROXR, SBCD, SUB, SUBA, SUBI, SUBQ, SUBX, TAS, TST:
+        NOT_B, OR_B, ORI, PACK, ROTL, ROTR, ROXL, ROXR, SBCD, SUB, SUBA, SUBI, SUBQ, SUBX, TAS, TST,
+        UNPK:
             AR_DEC_I = 1'b1;
         default:
             AR_DEC_I = 1'b0;
