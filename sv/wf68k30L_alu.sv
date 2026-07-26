@@ -265,7 +265,7 @@ always_comb begin : bcd_op
         ABCD:
             TEMP1 = {1'b0, OP2[7:4]} + {1'b0, OP1[7:4]} + {4'b0000, C_0};
         NBCD:
-            TEMP1 = OP1[4:0] - {1'b0, OP2[7:4]} - {4'b0000, X_IN_I};
+            TEMP1 = OP1[4:0] - {1'b0, OP2[7:4]} - {4'b0000, C_0};
         default: // Valid for SBCD.
             TEMP1 = {1'b0, OP2[7:4]} - {1'b0, OP1[7:4]} - {4'b0000, C_0};
     endcase

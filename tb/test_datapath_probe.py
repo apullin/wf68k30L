@@ -246,6 +246,50 @@ async def test_nbcd_x0_low_digit(dut):
 
 
 @cocotb.test()
+async def test_nbcd_x1_wrap_and_sticky_z(dut):
+    """NBCD with X=1, the 0x99 -> 0x01 borrow case, and the cleared-only Z flag."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x44FC, 0x0010,              # MOVE #$10,CCR (X=1)
+        0x203C, 0x0000, 0x0005,      # MOVE.L #5,D0
+        0x4800,                      # NBCD D0
+        0x42C3,                      # MOVE CCR,D3
+        0x23C0, 0x0002, 0x0000,      # MOVE.L D0,($20000).L
+        0x23C3, 0x0002, 0x0004,      # MOVE.L D3,($20004).L
+        0x44FC, 0x0000,              # MOVE #0,CCR (X=0)
+        0x203C, 0x0000, 0x0099,      # MOVE.L #$99,D0
+        0x4800,                      # NBCD D0
+        0x42C3,                      # MOVE CCR,D3
+        0x23C0, 0x0002, 0x0008,      # MOVE.L D0,($20008).L
+        0x23C3, 0x0002, 0x000C,      # MOVE.L D3,($2000C).L
+        0x44FC, 0x0004,              # MOVE #$04,CCR (Z=1, X=0)
+        0x203C, 0x0000, 0x0000,      # MOVE.L #0,D0
+        0x4800,                      # NBCD D0
+        0x42C3,                      # MOVE CCR,D3
+        0x23C3, 0x0002, 0x0014,      # MOVE.L D3,($20014).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+
+    def xzc(addr):
+        ccr = h.mem.read(addr, 4)
+        return ((ccr >> 4) & 1, (ccr >> 2) & 1, ccr & 1)
+
+    d0_x1 = h.mem.read(RES, 4) & 0xFF
+    assert (d0_x1, xzc(RES + 4)) == (0x94, (1, 0, 1)), (
+        f"NBCD 0x05 with X=1: got 0x{d0_x1:02X} XZC={xzc(RES + 4)}, expected 0x94 (1, 0, 1)"
+    )
+    d0_99 = h.mem.read(RES + 8, 4) & 0xFF
+    assert (d0_99, xzc(RES + 0x0C)) == (0x01, (1, 0, 1)), (
+        f"NBCD 0x99 with X=0: got 0x{d0_99:02X} XZC={xzc(RES + 0x0C)}, expected 0x01 (1, 0, 1)"
+    )
+    assert xzc(RES + 0x14) == (0, 1, 0), (
+        f"NBCD 0x00 with X=0 and Z preset: XZC={xzc(RES + 0x14)}, expected (0, 1, 0) "
+        f"(Z is only ever cleared by the BCD operations)"
+    )
+
+
+@cocotb.test()
 async def test_chk2_l_in_bounds_no_trap(dut):
     """CHK2.L (A0),D3 with bounds 0x100..0x200 and D3=0x180 must not trap."""
     h = CPUTestHarness(dut)
