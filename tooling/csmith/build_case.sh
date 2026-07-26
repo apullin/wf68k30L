@@ -85,10 +85,15 @@ read -r -a CSMITH_EXTRA_ARR <<< "${CSMITH_EXTRA_FLAGS:-}"
 # compiler defaults (including jump-table generation when applicable).
 read -r -a CSMITH_CC_EXTRA_ARR <<< "${CSMITH_CC_EXTRA_FLAGS--fno-jump-tables}"
 
+# The checksum is what makes this a correctness check rather than a
+# termination check, so it stays enabled: csmith's own main() hashes every
+# global after func_1() and hands the result to platform_main_end(), which
+# runtime/csmith.h publishes to memory along with the sentinel. That requires
+# csmith's main (not --nomain) and --no-argc, since the argv-parsing form of
+# main dereferences argv and nothing passes one here.
 CSMITH_FLAGS=(
   --seed "${SEED}"
-  --nomain
-  --no-checksum
+  --no-argc
   --no-safe-math
   --no-packed-struct
   --no-float
@@ -98,21 +103,6 @@ CSMITH_FLAGS=(
 )
 
 "${CSMITH_BIN}" "${CSMITH_FLAGS[@]}" "${CSMITH_EXTRA_ARR[@]}" > "${GEN_C}"
-
-cat >> "${GEN_C}" <<'EOF'
-
-/* Harness wrapper injected by WF68K30L Csmith tooling. */
-#define WF_SENTINEL_ADDR ((volatile uint32_t*)0x00030000u)
-#define WF_SENTINEL_VAL  0xDEADCAFEu
-
-int main(void)
-{
-    (void)func_1();
-    *WF_SENTINEL_ADDR = WF_SENTINEL_VAL;
-    for (;;) {
-    }
-}
-EOF
 
 "${CC_BIN}" -mcpu="${CPU}" -Os -ffreestanding -fno-builtin -w \
   "${CSMITH_CC_EXTRA_ARR[@]}" \

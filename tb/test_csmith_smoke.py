@@ -2,15 +2,23 @@
 Bare-metal Csmith smoke tests for WF68K30L.
 
 Flow per seed:
-  1. Generate random C via csmith.
+  1. Generate random C via csmith, with its checksum enabled.
   2. Cross-compile to m68k bare-metal binary.
-  3. Load binary at PROGRAM_BASE and run until sentinel.
+  3. Run the same binary on qemu-system-m68k (CPU m68030) and read the
+     checksum it computed out of QEMU's RAM.
+  4. Load the binary at PROGRAM_BASE, run until sentinel, and require the
+     checksum the core computed to match QEMU's.
+
+Step 3/4 are what make this a correctness check. Previously csmith ran with
+--no-checksum and the runtime threw the CRC away, so a program that computed
+entirely wrong values passed as long as it reached the sentinel.
 
 Environment knobs:
   CSMITH_SEEDS       Seed expression, e.g. "1-10" or "1,4,13,20"
                      (default: 1,4,5,6,7,8,10,12,13,19)
   CSMITH_MAX_CYCLES  Cycle budget per seed (default: 400000)
   CSMITH_CC_EXTRA_FLAGS Extra compiler flags for csmith build script
+  CSMITH_QEMU_SETTLE_S  Seconds to let the QEMU reference run (default: 2.0)
 """
 
 import os
@@ -21,6 +29,7 @@ from pathlib import Path
 import cocotb
 
 from cpu_harness import CPUTestHarness
+from qemu_m68k_ref import qemu_m68030_image_memory
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,10 +37,15 @@ BUILD_SCRIPT = REPO_ROOT / "tooling" / "csmith" / "build_case.sh"
 DEFAULT_SEED_EXPR = "1,4,5,6,7,8,10,12,13,19"
 DEFAULT_MAX_CYCLES = 400000
 
+# Memory contract with tooling/csmith/runtime/csmith.h.
+CRC_ADDR = CPUTestHarness.RESULT_BASE          # computed checksum
+CRC_FLAG_ADDR = CPUTestHarness.RESULT_BASE + 4  # magic once published
+CRC_MAGIC = 0xC50FC50F
+
 
 def _missing_tools():
     missing = []
-    for tool in ("csmith", "m68k-elf-gcc", "m68k-elf-objcopy"):
+    for tool in ("csmith", "m68k-elf-gcc", "m68k-elf-objcopy", "qemu-system-m68k"):
         if shutil.which(tool) is None:
             missing.append(tool)
     if not BUILD_SCRIPT.exists():
@@ -88,9 +102,31 @@ def _build_csmith_bin(seed):
     return bin_path
 
 
+def _qemu_reference_crc(seed, image):
+    """Checksum the same image computes under qemu-system-m68k."""
+    settle = float(os.environ.get("CSMITH_QEMU_SETTLE_S", "2.0"))
+    dump = qemu_m68030_image_memory(
+        image,
+        [(CRC_ADDR, 2)],
+        load_addr=CPUTestHarness.PROGRAM_BASE,
+        stack_pointer=0x0001FF00,
+        expect=(CPUTestHarness.SENTINEL_ADDR, CPUTestHarness.SENTINEL_VAL),
+        settle_s=settle,
+    )
+    crc, flag = dump[CRC_ADDR]
+    assert flag == CRC_MAGIC, (
+        f"Csmith seed {seed}: the QEMU reference run reached the sentinel but "
+        f"did not publish a checksum (flag=0x{flag:08X}). The image was built "
+        f"without csmith's checksum, or the runtime contract in "
+        f"tooling/csmith/runtime/csmith.h changed."
+    )
+    return crc
+
+
 async def _run_csmith_seed(dut, seed, max_cycles):
     bin_path = _build_csmith_bin(seed)
     image = bin_path.read_bytes()
+    expected_crc = _qemu_reference_crc(seed, image)
 
     h = CPUTestHarness(dut)
 
@@ -105,10 +141,23 @@ async def _run_csmith_seed(dut, seed, max_cycles):
         check_bus_invariants=True,
         max_bus_cycle_cycles=512,
     )
+    got_crc = h.mem.read(CRC_ADDR, 4)
+    got_flag = h.mem.read(CRC_FLAG_ADDR, 4)
     h.cleanup()
 
     assert found, (
         f"Csmith seed {seed} did not reach sentinel within {max_cycles} cycles"
+    )
+    assert got_flag == CRC_MAGIC, (
+        f"Csmith seed {seed}: sentinel reached but no checksum was published "
+        f"(flag=0x{got_flag:08X}); the run did not go through "
+        f"platform_main_end()"
+    )
+    assert got_crc == expected_crc, (
+        f"Csmith seed {seed}: checksum mismatch on the identical binary -- "
+        f"core computed 0x{got_crc:08X}, qemu-system-m68k (m68030) computed "
+        f"0x{expected_crc:08X}. The program terminated, so this is a wrong "
+        f"computed result rather than a hang. Image: {bin_path}"
     )
 
 

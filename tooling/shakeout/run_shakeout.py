@@ -23,7 +23,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT_ROOT = REPO_ROOT / "build" / "shakeout"
 _COCOTB_COUNTS_RE = re.compile(r"TESTS=(\d+)\s+PASS=(\d+)\s+FAIL=(\d+)\s+SKIP=(\d+)")
-_COREMARK_ROW_RE = re.compile(r"^(O0|O1|O2|Os)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*$")
+# Status is followed by CoreMark's own CRC verdict (crc-ok / crc-ERRORS /
+# no-known-crc / none); the group stays optional so an older log still parses.
+_COREMARK_ROW_RE = re.compile(
+    r"^(O0|O1|O2|Os)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)(?:\s+(\S+))?\s*$"
+)
 
 
 def _timestamp():
@@ -65,6 +69,7 @@ def _parse_coremark_rows(text):
                     "cycles": int(match.group(3)),
                     "ticks": int(match.group(4)),
                     "status": match.group(5),
+                    "validation": match.group(6) or "none",
                 }
             )
     return rows
@@ -214,14 +219,19 @@ def _run_software_campaign(args, run_dir):
         out["ok"] = False
         return out
 
-    coremark_env = _merge_env(
-        {
-            "COREMARK_OPTS": args.coremark_opts,
-            "COREMARK_MAX_CYCLES": str(args.coremark_max_cycles),
-            "COREMARK_ITERATIONS": str(args.coremark_iterations),
-            "COREMARK_TOTAL_DATA_SIZE": str(args.coremark_total_data_size),
-        }
-    )
+    # test-coremark-smoke now gates on row status itself. Forward the required
+    # set so the direct target and this campaign agree on which levels must
+    # complete; an empty --coremark-required-opts means "all", which is also
+    # the target's default, so nothing is forwarded in that case.
+    coremark_env_vars = {
+        "COREMARK_OPTS": args.coremark_opts,
+        "COREMARK_MAX_CYCLES": str(args.coremark_max_cycles),
+        "COREMARK_ITERATIONS": str(args.coremark_iterations),
+        "COREMARK_TOTAL_DATA_SIZE": str(args.coremark_total_data_size),
+    }
+    if args.coremark_required_opts.strip():
+        coremark_env_vars["COREMARK_REQUIRED_OPTS"] = args.coremark_required_opts
+    coremark_env = _merge_env(coremark_env_vars)
     coremark_result = _run_command(
         "coremark",
         ["make", "-s", "test-coremark-smoke"],
@@ -232,8 +242,15 @@ def _run_software_campaign(args, run_dir):
     required_opts = _parse_opt_list(args.coremark_required_opts)
     if not required_opts:
         required_opts = _parse_opt_list(args.coremark_opts)
-    non_ok_rows = [row for row in rows if row["status"] != "ok"]
-    non_ok_required = [row for row in rows if row["opt"] in required_opts and row["status"] != "ok"]
+    def _row_bad(row):
+        # A row that terminates but fails CoreMark's own CRC check is a
+        # correctness failure, not a pass.
+        return row["status"] != "ok" or row["validation"] == "crc-ERRORS"
+
+    non_ok_rows = [row for row in rows if _row_bad(row)]
+    non_ok_required = [
+        row for row in rows if row["opt"] in required_opts and _row_bad(row)
+    ]
     coremark_ok = (
         coremark_result["returncode"] == 0 and bool(rows) and not non_ok_required
     )
