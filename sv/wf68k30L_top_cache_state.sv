@@ -107,6 +107,9 @@ logic [7:0]  ICACHE_VALID [0:15];
 logic [23:0] DCACHE_TAG [0:15];
 logic [3:0]  DCACHE_VALID [0:15];
 logic        ICACHE_HIT_PENDING;
+logic        DCACHE_READ_HIT_REQ;
+logic        DCACHE_MERGE_REQ;
+logic        DCACHE_MERGE_RDY;
 
 always_comb begin : icache_lookup
     logic [3:0]  req_line;
@@ -162,9 +165,14 @@ end
 // combinational so the *_HIT_PENDING stage below reads the value it requested.
 assign ICACHE_RAM_RD_EN = !ICACHE_HIT_PENDING && !BUS_BSY && OPCODE_REQ_CORE && ICACHE_HIT_NOW;
 assign ICACHE_RAM_RD_ADDR = {ADR_P_PHYS[7:4], ADR_P_PHYS[3:1]};
-assign DCACHE_RAM_RD_EN = !DCACHE_HIT_PENDING && !BUS_BSY && DATA_RD && DCACHE_HIT_NOW &&
-                          !DATA_RDY_BUSIF_CORE;
-assign DCACHE_RAM_RD_ADDR = {ADR_P_PHYS[7:4], ADR_P_PHYS[3:2]};
+assign DCACHE_READ_HIT_REQ = !DCACHE_HIT_PENDING && !BUS_BSY && DATA_RD && DCACHE_HIT_NOW &&
+                             !DATA_RDY_BUSIF_CORE;
+assign DCACHE_MERGE_REQ = !DCACHE_READ_HIT_REQ && DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE &&
+                          CACR[8] && DCACHE_WRITE_SIZE != LONG &&
+                          dcache_access_supported(DCACHE_WRITE_SIZE, DCACHE_WRITE_ADDR[1:0]);
+assign DCACHE_RAM_RD_EN = DCACHE_READ_HIT_REQ || DCACHE_MERGE_REQ;
+assign DCACHE_RAM_RD_ADDR = DCACHE_READ_HIT_REQ ? {ADR_P_PHYS[7:4], ADR_P_PHYS[3:2]} :
+                                                  {DCACHE_WRITE_ADDR[7:4], DCACHE_WRITE_ADDR[3:2]};
 
 always_ff @(posedge CLK) begin : cache_registers
     integer i;
@@ -209,6 +217,7 @@ always_ff @(posedge CLK) begin : cache_registers
         DATA_TO_CORE_CACHE <= 32'h0;
         DATA_LAST_FROM_CACHE <= 1'b0;
         DCACHE_HIT_PENDING <= 1'b0;
+        DCACHE_MERGE_RDY <= 1'b0;
         DCACHE_HIT_SIZE_PENDING <= LONG;
         DCACHE_HIT_ADDR10_PENDING <= 2'b00;
         DCACHE_RAM_WR_EN <= 1'b0;
@@ -247,6 +256,7 @@ always_ff @(posedge CLK) begin : cache_registers
         DCACHE_RAM_WR_EN <= 1'b0;
         DATA_RDY_CACHE <= 1'b0;
         DATA_VALID_CACHE <= 1'b0;
+        DCACHE_MERGE_RDY <= DCACHE_MERGE_REQ;
 
         if (DATA_RDY_CACHE)
             DATA_LAST_FROM_CACHE <= 1'b1;
@@ -422,6 +432,16 @@ always_ff @(posedge CLK) begin : cache_registers
                     DCACHE_RAM_WR_EN <= 1'b1;
                     DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
                     DCACHE_RAM_WR_DATA <= DCACHE_WRITE_DATA;
+                    DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
+                end else if (DCACHE_MERGE_RDY) begin
+                    DCACHE_RAM_WR_EN <= 1'b1;
+                    DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
+                    DCACHE_RAM_WR_DATA <= dcache_write_merge(
+                        DCACHE_RAM_RD_DATA,
+                        DCACHE_WRITE_DATA,
+                        DCACHE_WRITE_SIZE,
+                        DCACHE_WRITE_ADDR[1:0]
+                    );
                     DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
                 end else begin
                     DCACHE_VALID[dcache_line][dcache_entry] <= 1'b0;
