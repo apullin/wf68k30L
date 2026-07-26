@@ -24,6 +24,14 @@ Usage in a cocotb test:
         assert found
         assert h.read_result_long(0) == 42
 
+Unexpected exceptions fail the run. Every exception vector the test does not
+populate itself is pointed at a stub that records the vector and halts, and
+run_until_sentinel turns that into an assertion naming the vector. Tests that
+install their own handler (before or after setup()) keep it. A test that
+deliberately leaves an exception unhandled declares it with
+h.expect_exception(vector); CPUTestHarness(dut, trap_detect=False) turns the
+whole mechanism off.
+
 Signal names match WF68K30L_TOP as defined in wf68k30L_top.sv:
   - CLK, RESET_INn, HALT_INn
   - DATA_IN, DATA_OUT, ADR_OUT
