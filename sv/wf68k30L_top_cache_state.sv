@@ -149,7 +149,7 @@ always_comb begin : dcache_lookup
         req_entry = ADR_P_PHYS[3:2];
         req_tag = ADR_P_PHYS[31:8];
         if (req_cacheable &&
-            dcache_access_supported(OP_SIZE_BUS, ADR_P_PHYS[1:0]) &&
+            dcache_access_supported(OP_SIZETYPE'(OP_SIZE_BUS), ADR_P_PHYS[1:0]) &&
             DCACHE_TAG[req_line] == req_tag &&
             DCACHE_VALID[req_line][req_entry]) begin
             DCACHE_HIT_NOW = 1'b1;
@@ -263,7 +263,7 @@ always_ff @(posedge CLK) begin : cache_registers
         if (DCACHE_HIT_PENDING) begin
             DATA_TO_CORE_CACHE <= dcache_read_extract(
                 DCACHE_RAM_RD_DATA,
-                DCACHE_HIT_SIZE_PENDING,
+                OP_SIZETYPE'(DCACHE_HIT_SIZE_PENDING),
                 DCACHE_HIT_ADDR10_PENDING
             );
             DATA_RDY_CACHE <= 1'b1;
@@ -415,7 +415,7 @@ always_ff @(posedge CLK) begin : cache_registers
 
         if (DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn &&
             DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE &&
-            CACR[8] && dcache_access_supported(DCACHE_WRITE_SIZE, DCACHE_WRITE_ADDR[1:0])) begin
+            CACR[8] && dcache_access_supported(OP_SIZETYPE'(DCACHE_WRITE_SIZE), DCACHE_WRITE_ADDR[1:0])) begin
             dcache_line = DCACHE_WRITE_ADDR[7:4];
             dcache_entry = DCACHE_WRITE_ADDR[3:2];
             dcache_tag = DCACHE_WRITE_ADDR[31:8];

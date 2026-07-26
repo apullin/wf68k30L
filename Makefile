@@ -79,6 +79,15 @@ test-full: test-fast
 	$(MAKE) -C tb TEST_MODULE=test_instr_move TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_instr_muldiv TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_instr_shift TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_cache_instr TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_coprocessor_instr TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_interrupt_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_trace_addrerr_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_berr_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_um_lane_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_mbit_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_datapath_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_decode_probe TOPLEVEL=WF68K30L_TOP
 
 # Focused repro suite for switch/jump-table control-flow issues.
 test-jump-tables:

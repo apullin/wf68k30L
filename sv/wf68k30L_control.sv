@@ -664,7 +664,7 @@ end
             end
 
             MOVEM_ADn_WB <= MOVEM_ADn_I;
-            OP_WB_I <= OP;
+            OP_WB_I <= OP_68K'(OP);
             BIW_0_WB <= BIW_0[11:0];
             BIW_1_WB <= BIW_1;
         end

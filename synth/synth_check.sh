@@ -20,23 +20,13 @@ TOLERANCE_PCT=10  # Allow +/- 10% deviation
 # Source files
 SV_DIR="$REPO_DIR/sv"
 SV_PKG="$SV_DIR/wf68k30L_pkg.sv"
-SV_FILES=(
-    "$SV_DIR/wf68k30L_address_registers.sv"
-    "$SV_DIR/wf68k30L_data_registers.sv"
-    "$SV_DIR/wf68k30L_alu.sv"
-    "$SV_DIR/wf68k30L_bus_interface.sv"
-    "$SV_DIR/wf68k30L_opcode_decoder.sv"
-    "$SV_DIR/wf68k30L_exception_handler.sv"
-    "$SV_DIR/wf68k30L_control.sv"
-    "$SV_DIR/wf68k30L_cpu_wrapper.sv"
-    "$SV_DIR/wf68k30L_top_desc_shadow_lookup.sv"
-    "$SV_DIR/wf68k30L_top_desc_shadow_port.sv"
-    "$SV_DIR/wf68k30L_top_cache_state.sv"
-    "$SV_DIR/wf68k30L_top_mmu_ptest.sv"
-    "$SV_DIR/wf68k30L_top_mmu_ptest_stage.sv"
-    "$SV_DIR/wf68k30L_top_mmu_state.sv"
-    "$SV_DIR/wf68k30L_top.sv"
-)
+# Read every module in sv/ so the list cannot go stale as modules are added.
+# (Matches the direct Yosys command documented in README.md.)
+SV_FILES=()
+while IFS= read -r f; do
+    [ "$f" = "$SV_PKG" ] && continue
+    SV_FILES+=("$f")
+done < <(ls "$SV_DIR"/wf68k30L_*.sv | sort)
 
 TOP=WF68K30L_TOP
 TMPLOG=$(mktemp /tmp/synth_check_XXXXXX.log)

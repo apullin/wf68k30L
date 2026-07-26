@@ -119,8 +119,8 @@ always_ff @(posedge CLK) begin : parameter_buffer
     if (ALU_INIT) begin
         ADR_MODE <= ADR_MODE_IN;
         CHK2CMP2_DR <= USE_DREG;
-        OP_SIZE <= OP_SIZE_IN;
-        OP <= OP_IN;
+        OP_SIZE <= OP_SIZETYPE'(OP_SIZE_IN);
+        OP <= OP_68K'(OP_IN);
         BIW_0 <= BIW_0_IN;
         BIW_1 <= BIW_1_IN;
         BF_OFFSET <= BF_OFFSET_IN;

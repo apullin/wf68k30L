@@ -17,34 +17,12 @@ SV_DIR = $(SRC_DIR)/sv
 # NOTE: wf68k30L_pkg.sv is NOT included because the .sv modules use
 # `include "wf68k30L_pkg.svh" (raw typedefs) rather than importing the
 # SystemVerilog package. The .svh file is found via -I$(SRC_DIR) and -I$(SV_DIR).
+# Every module in sv/ except the package wrapper. Globbed so the list cannot
+# go stale as modules are added or removed. wf68k30L_top.sv is placed last so
+# the top level is elaborated after its submodules.
 VERILOG_SOURCES = \
-    $(SV_DIR)/wf68k30L_address_registers.sv \
-    $(SV_DIR)/wf68k30L_data_registers.sv \
-    $(SV_DIR)/wf68k30L_alu.sv \
-    $(SV_DIR)/wf68k30L_bus_interface.sv \
-    $(SV_DIR)/wf68k30L_opcode_decoder.sv \
-    $(SV_DIR)/wf68k30L_exception_handler.sv \
-    $(SV_DIR)/wf68k30L_operand_mux.sv \
-    $(SV_DIR)/wf68k30L_shifter.sv \
-    $(SV_DIR)/wf68k30L_sync_ram_1r1w.sv \
-    $(SV_DIR)/wf68k30L_divider.sv \
-    $(SV_DIR)/wf68k30L_control.sv \
-    $(SV_DIR)/wf68k30L_cpu_wrapper.sv \
-    $(SV_DIR)/wf68k30L_ctrl_comb.sv \
-    $(SV_DIR)/wf68k30L_ctrl_exec_dec.sv \
-    $(SV_DIR)/wf68k30L_ctrl_fetch_dec.sv \
-    $(SV_DIR)/wf68k30L_ctrl_fetch_other.sv \
-    $(SV_DIR)/wf68k30L_ctrl_fetch_start.sv \
-    $(SV_DIR)/wf68k30L_ctrl_movem.sv \
-    $(SV_DIR)/wf68k30L_ctrl_regsel.sv \
-    $(SV_DIR)/wf68k30L_top_desc_shadow_lookup.sv \
-    $(SV_DIR)/wf68k30L_top_desc_shadow_port.sv \
-    $(SV_DIR)/wf68k30L_top_cache_state.sv \
-    $(SV_DIR)/wf68k30L_top_mmu_ptest.sv \
-    $(SV_DIR)/wf68k30L_top_mmu_ptest_stage.sv \
-    $(SV_DIR)/wf68k30L_top_mmu_state.sv \
-    $(SV_DIR)/wf68k30L_top_routing_bus_cache.sv \
-    $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv \
+    $(filter-out $(SV_DIR)/wf68k30L_pkg.sv $(SV_DIR)/wf68k30L_top.sv, \
+                 $(wildcard $(SV_DIR)/wf68k30L_*.sv)) \
     $(SV_DIR)/wf68k30L_top.sv
 
 # Default: full top-level smoke test
