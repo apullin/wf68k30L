@@ -831,9 +831,18 @@ always_comb begin : cond_codes_comb
             Z = compute_z_sized(RESULT_LOGOP, OP_SIZE);
         ASL, ASR, LSL, LSR, ROTL, ROTR, ROXL, ROXR:
             Z = compute_z_sized(RESULT_SHIFTOP, OP_SIZE);
-        BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFINS, BFSET, BFTST: begin
+        BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFSET, BFTST: begin
             bf_mask = ((40'd1 << (BF_UPPER_BND - BF_LOWER_BND + 6'd1)) - 40'd1) << BF_LOWER_BND;
             Z = ~|(BF_DATA_IN & bf_mask);
+        end
+        BFINS: begin
+            // PRM BFINS: "The instruction sets the condition codes according
+            // to the inserted value." Every other bit field instruction takes
+            // N and Z from the destination field as it was before the
+            // operation (Table 3-7 note), but BFINS does not. Masking the
+            // result leaves exactly the inserted field in place.
+            bf_mask = ((40'd1 << (BF_UPPER_BND - BF_LOWER_BND + 6'd1)) - 40'd1) << BF_LOWER_BND;
+            Z = ~|(RESULT_BITFIELD & bf_mask);
         end
         CHK2, CMP2: // Set if the operand equals either bound.
             Z = (CHK2_R == CHK2_LB) || (CHK2_R == CHK2_UB);
@@ -873,8 +882,10 @@ always_comb begin : cond_codes_comb
             XNZVC = compute_shift_flags(RESULT_SHIFTOP, MSB, Z, XFLAG_SHFT, VFLAG_SHFT, CFLAG_SHFT);
         BCHG, BCLR, BSET, BTST:
             XNZVC = {STATUS_REG[SR_X:SR_N], Z, STATUS_REG[SR_V:SR_C]};
-        BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFINS, BFSET, BFTST:
+        BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFSET, BFTST:
             XNZVC = {STATUS_REG[SR_X], BF_DATA_IN[BF_UPPER_BND], Z, 2'b00};
+        BFINS: // N comes from the MSB of the inserted value, not the old field.
+            XNZVC = {STATUS_REG[SR_X], RESULT_BITFIELD[BF_UPPER_BND], Z, 2'b00};
         CLR:
             XNZVC = {STATUS_REG[SR_X], 4'b0100};
         SUB, SUBI, SUBQ, SUBX:
