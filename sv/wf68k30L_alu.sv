@@ -164,6 +164,30 @@ always_ff @(posedge CLK) begin : operands
 end
 
 // ========================================================================
+// Extend-flag operand hold
+// ========================================================================
+// CC_UPDT (= ALU_REQ) stays asserted for as long as the control state machine
+// needs to consume the result, and the status register applies XNZVC on every
+// one of those cycles. Sourcing X live from STATUS_REG therefore feeds an
+// extend-consuming operation its own X output from the second cycle onward:
+// ABCD 0x99+0x01 with X=0 first computes 0x00 with C=1, then re-computes
+// 0x99+0x01+1 = 0x01 and so clears the Z the PRM requires it to leave alone
+// ("Z - Cleared if the result is nonzero; unchanged otherwise"). For a memory
+// destination the re-computed value is what gets written: NBCD -(An) on 0x42
+// wrote the nines complement 0x57 instead of the tens complement 0x58.
+//
+// The X an extend-consuming operation must see is the X in effect when its
+// operands were latched, so hold it at ALU_INIT alongside them. The CC_UPDT
+// bypass mirrors the LOAD_OPn bypass in the operand buffers: if the preceding
+// instruction's condition-code write lands on the same edge as ALU_INIT, take
+// the value it is writing rather than the pre-update register.
+logic X_OPERAND;
+always_ff @(posedge CLK) begin : x_operand_hold
+    if (ALU_INIT)
+        X_OPERAND <= CC_UPDT ? XNZVC[SR_X] : STATUS_REG[SR_X];
+end
+
+// ========================================================================
 // ALU busy/request handshake
 // ========================================================================
 always_ff @(posedge CLK) begin : alu_busy
@@ -244,7 +268,7 @@ always_comb begin : bcd_op
     logic [3:0] S_1;
     logic       X_IN_I;
 
-    X_IN_I = STATUS_REG[SR_X]; // Extended Flag.
+    X_IN_I = X_OPERAND; // Extended Flag, held stable for this operation.
 
     // Low nibble computation
     case (OP)
@@ -403,7 +427,7 @@ always_comb begin : integer_op
     logic [0:0] X_IN_I;
     logic [31:0] RESULT_tmp;
 
-    X_IN_I[0] = STATUS_REG[SR_X]; // Extended Flag.
+    X_IN_I[0] = X_OPERAND; // Extended Flag, held stable for this operation.
     case (OP)
         ADDA: // No sign extension for the destination.
             RESULT_tmp = OP2 + OP1_SIGNEXT;
@@ -476,8 +500,13 @@ always_comb begin : other_ops
     case (OP)
         CAS:
             RESULT_tmp = OP2; // Destination operand.
-        CAS2: // Destination operands.
-            RESULT_tmp = HILOn ? OP3 : OP2;
+        CAS2: // Destination operands (written to Dc1/Dc2 when a compare fails).
+            // OP2 always holds the memory operand of the phase being compared,
+            // so after the second phase it is memory operand 2 and OP3 still
+            // holds the retained memory operand 1. The compare-register
+            // writeback visits Dc1 first (HILOn = 0) and Dc2 second
+            // (HILOn = 1), so Dc1 must take OP3 and Dc2 must take OP2.
+            RESULT_tmp = HILOn ? OP2 : OP3;
         EXT:
             case (BIW_0[8:6])
                 3'b011:  RESULT_tmp = {{16{OP2[15]}}, OP2[15:0]};
@@ -755,7 +784,12 @@ always_comb begin : cond_codes_comb
             SM_sig = OP1_SIGNEXT[31];
             DM_sig = OP2[31];
         end
-        ADD, ADDI, ADDQ, ADDX, CMP, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX: begin
+        // CAS and CAS2 belong here too: PRM Table 3-11 gives them the CMP
+        // condition-code equations, and the XNZVC arm below already routes them
+        // through compute_cmp_flags. Without them the MSBs fell to the default
+        // all-zero arm, so N, V and C came out cleared for every CAS -- correct
+        // only by accident on the equal-operands path.
+        ADD, ADDI, ADDQ, ADDX, CAS, CAS2, CMP, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX: begin
             case (OP_SIZE)
                 BYTE: begin
                     RM_sig = RESULT_INTOP[7];
@@ -780,12 +814,15 @@ always_comb begin : cond_codes_comb
     endcase
 
     // Multiplication flags
-    if (OP_SIZE == LONG && BIW_1[10] && RESULT_MUL[63])
-        NFLAG_MUL_sig = 1'b1;
-    else if (RESULT_MUL[31])
-        NFLAG_MUL_sig = 1'b1;
+    // The 64-bit long form reports N and Z over the whole quad-word product;
+    // every other form reports them over the returned 32 bits. Falling through
+    // to the 32-bit test when the 64-bit test happens to be false made the
+    // low half decide the flags of a 64-bit product: 0x80000000 * 1 in the
+    // Dh:Dl form set N even though bit 63 of the product is clear.
+    if (OP_SIZE == LONG && BIW_1[10])
+        NFLAG_MUL_sig = RESULT_MUL[63];
     else
-        NFLAG_MUL_sig = 1'b0;
+        NFLAG_MUL_sig = RESULT_MUL[31];
 
     if (OP_SIZE == LONG && !BIW_1[10] && OP == MULS && !RESULT_MUL[31] && RESULT_MUL[63:32] != 32'h0)
         VFLAG_MUL_sig = 1'b1;
@@ -807,9 +844,18 @@ always_comb begin : cond_codes_comb
             Z = compute_z_sized(RESULT_LOGOP, OP_SIZE);
         ASL, ASR, LSL, LSR, ROTL, ROTR, ROXL, ROXR:
             Z = compute_z_sized(RESULT_SHIFTOP, OP_SIZE);
-        BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFINS, BFSET, BFTST: begin
+        BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFSET, BFTST: begin
             bf_mask = ((40'd1 << (BF_UPPER_BND - BF_LOWER_BND + 6'd1)) - 40'd1) << BF_LOWER_BND;
             Z = ~|(BF_DATA_IN & bf_mask);
+        end
+        BFINS: begin
+            // PRM BFINS: "The instruction sets the condition codes according
+            // to the inserted value." Every other bit field instruction takes
+            // N and Z from the destination field as it was before the
+            // operation (Table 3-7 note), but BFINS does not. Masking the
+            // result leaves exactly the inserted field in place.
+            bf_mask = ((40'd1 << (BF_UPPER_BND - BF_LOWER_BND + 6'd1)) - 40'd1) << BF_LOWER_BND;
+            Z = ~|(RESULT_BITFIELD & bf_mask);
         end
         CHK2, CMP2: // Set if the operand equals either bound.
             Z = (CHK2_R == CHK2_LB) || (CHK2_R == CHK2_UB);
@@ -820,12 +866,13 @@ always_comb begin : cond_codes_comb
         EXT, EXTB, MOVE, SWAP, TST:
             Z = compute_z_sized(RESULT_OTHERS, OP_SIZE);
         MULS, MULU: begin
-            if (OP_SIZE == LONG && BIW_1[10] && RESULT_MUL == 64'h0)
-                Z = 1'b1;
-            else if (RESULT_MUL[31:0] == 32'h0)
-                Z = 1'b1;
+            // Same rule as the N flag above: the Dh:Dl form tests all 64 bits,
+            // and must not fall through to the 32-bit test, which would set Z
+            // for 0x00000001_00000000.
+            if (OP_SIZE == LONG && BIW_1[10])
+                Z = (RESULT_MUL == 64'h0);
             else
-                Z = 1'b0;
+                Z = (RESULT_MUL[31:0] == 32'h0);
         end
         TAS:
             Z = compute_z_sized(OP2_SIGNEXT, OP_SIZE);
@@ -849,8 +896,10 @@ always_comb begin : cond_codes_comb
             XNZVC = compute_shift_flags(RESULT_SHIFTOP, MSB, Z, XFLAG_SHFT, VFLAG_SHFT, CFLAG_SHFT);
         BCHG, BCLR, BSET, BTST:
             XNZVC = {STATUS_REG[SR_X:SR_N], Z, STATUS_REG[SR_V:SR_C]};
-        BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFINS, BFSET, BFTST:
+        BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFSET, BFTST:
             XNZVC = {STATUS_REG[SR_X], BF_DATA_IN[BF_UPPER_BND], Z, 2'b00};
+        BFINS: // N comes from the MSB of the inserted value, not the old field.
+            XNZVC = {STATUS_REG[SR_X], RESULT_BITFIELD[BF_UPPER_BND], Z, 2'b00};
         CLR:
             XNZVC = {STATUS_REG[SR_X], 4'b0100};
         SUB, SUBI, SUBQ, SUBX:
