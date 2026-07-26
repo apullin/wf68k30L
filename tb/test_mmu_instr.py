@@ -2811,8 +2811,12 @@ async def test_mmu_page_without_ci_is_cached_and_leaves_ciout_negated(dut):
 PTEST_AN_MARKER = 0x1111_2222
 
 
-def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst):
-    """Three-level short walk followed by `ptest_words`; stores A3 and the MMUSR."""
+def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst, prime_leaf=True):
+    """Three-level short walk followed by `ptest_words`; stores A3 and the MMUSR.
+
+    With prime_leaf clear the leaf descriptor is kept out of the descriptor
+    shadow, which this model reports as a bus fault on that fetch.
+    """
     logical_addr = 0x12345008
     root_tbl = 0x00000400
     lvlb_tbl = 0x00000800
@@ -2831,6 +2835,12 @@ def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst):
     crp_src = h.DATA_BASE + 0xC40
     tc_src = h.DATA_BASE + 0xC60
 
+    prime_c = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 5, DN, 5),
+    ] if prime_leaf else []
+
     program = [
         # Prime descriptor shadow while MMU is disabled.
         *movea(LONG, SPECIAL, IMMEDIATE, 2),
@@ -2839,9 +2849,7 @@ def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst):
         *movea(LONG, SPECIAL, IMMEDIATE, 4),
         *imm_long(desc_b_addr),
         *move(LONG, AN_IND, 4, DN, 4),
-        *movea(LONG, SPECIAL, IMMEDIATE, 5),
-        *imm_long(desc_c_addr),
-        *move(LONG, AN_IND, 5, DN, 5),
+        *prime_c,
 
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
@@ -2882,7 +2890,7 @@ def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst):
         crp_src + 4: root_tbl,
         tc_src: 0x80C08840,
     }
-    return program, loads, desc_c_addr, logical_addr
+    return program, loads, (desc_a_addr, desc_b_addr, desc_c_addr), logical_addr
 
 
 @cocotb.test()
@@ -2893,9 +2901,10 @@ async def test_mmu_ptest_returns_last_descriptor_address_in_an(dut):
     mmusr_dst = h.DATA_BASE + 0xCA0
 
     # PTESTR #5,(A0),#7,A3 : level=7, R/W=1, A=1, register=011, FC=10101.
-    program, loads, desc_c_addr, logical_addr = _ptest_an_program(
+    program, loads, descs, logical_addr = _ptest_an_program(
         h, [0xF010, 0x9F75], an_dst, mmusr_dst
     )
+    desc_c_addr = descs[2]
 
     await h.setup(program)
     for addr, value in loads.items():
@@ -2931,7 +2940,7 @@ async def test_mmu_ptest_without_a_field_leaves_an_unchanged(dut):
     mmusr_dst = h.DATA_BASE + 0xCA0
 
     # PTESTR #5,(A0),#7 : identical apart from A=0 and a zero register field.
-    program, loads, _desc_c_addr, logical_addr = _ptest_an_program(
+    program, loads, _descs, logical_addr = _ptest_an_program(
         h, [0xF010, 0x9E15], an_dst, mmusr_dst
     )
 
@@ -2954,4 +2963,40 @@ async def test_mmu_ptest_without_a_field_leaves_an_unchanged(dut):
     mmusr = h.mem.read(mmusr_dst, 2)
     assert (mmusr & MMUSR_I) == 0, f"Expected valid translation (I=0), got 0x{mmusr:04X}"
     assert (mmusr & MMUSR_N) == 0x3, f"Expected N=3 levels, got 0x{mmusr:04X}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_ptest_an_holds_last_successful_descriptor_on_fault(dut):
+    """A faulting fetch leaves An at the last descriptor successfully fetched (PRM)."""
+    h = CPUTestHarness(dut)
+    an_dst = h.DATA_BASE + 0xC80
+    mmusr_dst = h.DATA_BASE + 0xCA0
+
+    # PTESTR #5,(A0),#7,A3 with the leaf descriptor missing from the shadow.
+    program, loads, descs, logical_addr = _ptest_an_program(
+        h, [0xF010, 0x9F75], an_dst, mmusr_dst, prime_leaf=False
+    )
+    desc_b_addr = descs[1]
+
+    await h.setup(program)
+    for addr, value in loads.items():
+        h.mem.load_long(addr, value)
+
+    found = await h.run_until_sentinel(max_cycles=100000)
+    assert found, "PTEST faulting-walk address-register test did not complete"
+
+    got_a3 = h.mem.read(an_dst, 4)
+    assert got_a3 == desc_b_addr, (
+        f"Expected A3 = last descriptor successfully fetched 0x{desc_b_addr:08X}, "
+        f"got 0x{got_a3:08X}"
+    )
+    got_a0 = h.mem.read(an_dst + 4, 4)
+    assert got_a0 == logical_addr, (
+        f"PTEST clobbered A0: expected 0x{logical_addr:08X}, got 0x{got_a0:08X}"
+    )
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_B) != 0, f"Expected a bus fault (B=1), got 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_I) != 0, f"Expected an invalid translation (I=1), got 0x{mmusr:04X}"
     h.cleanup()
