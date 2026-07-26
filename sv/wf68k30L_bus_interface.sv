@@ -474,7 +474,7 @@ always_ff @(negedge CLK) begin : data_in_alignment
                         case (ADR_10)
                             2'b00: DATA_INMUX[31:16] <= DATA_PORT_IN[31:16];
                             2'b01: DATA_INMUX[31:24] <= DATA_PORT_IN[23:16];
-                            2'b10: DATA_INMUX[31:16] <= DATA_PORT_IN[15:0];
+                            2'b10: DATA_INMUX[31:16] <= DATA_PORT_IN[31:16];
                             default: DATA_INMUX[31:24] <= DATA_PORT_IN[23:16];
                         endcase
                     end

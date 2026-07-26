@@ -6,7 +6,7 @@ read and write cycles using the memory model.
 
 The MC68030 bus protocol:
   - Read cycle:  ASn goes low, RWn stays high.  Slave drives DATA_IN and
-                 asserts DSACKn (00 = 32-bit port acknowledge).
+                 asserts DSACKn (00 = 32-bit port, 01 = 16-bit, 10 = 8-bit).
   - Write cycle: ASn goes low, RWn goes low.  Slave captures DATA_OUT when
                  DSn goes low, then asserts DSACKn.
 
@@ -26,16 +26,26 @@ from cocotb.triggers import RisingEdge, FallingEdge, Timer
 class BusModel:
     """Async bus responder that connects to WF68K30L_TOP signals."""
 
-    def __init__(self, dut, memory, wait_states=0):
+    # DSACKn code acknowledging a port of the given width in bytes.
+    DSACK_FOR_WIDTH = {4: 0b00, 2: 0b01, 1: 0b10}
+
+    # Driven on data bus lanes that a narrow port does not physically
+    # connect, so that latching them shows up as corruption.
+    POISON_BYTE = 0xA5
+
+    def __init__(self, dut, memory, wait_states=0, port_width=4):
         """
         Args:
             dut: cocotb handle to the DUT (WF68K30L_TOP).
             memory: Memory instance for read/write data.
             wait_states: Number of extra clock cycles before asserting DSACKn.
+            port_width: Responding port width in bytes (4, 2 or 1).
         """
+        assert port_width in self.DSACK_FOR_WIDTH, f"bad port_width {port_width}"
         self.dut = dut
         self.memory = memory
         self.wait_states = wait_states
+        self.port_width = port_width
         self._running = False
         self._trace = os.environ.get("BUS_TRACE", "0") not in ("", "0", "false", "False")
         self._trace_min = int(os.environ.get("BUS_TRACE_MIN", "0"), 0)
@@ -67,6 +77,13 @@ class BusModel:
         except ValueError:
             return 0
 
+    def _port_width_for(self, addr):
+        """Width in bytes of the port responding at addr.
+
+        Override to model a system that mixes port widths.
+        """
+        return self.port_width
+
     def _cycle_layout(self, addr, size_code, *, is_write=False):
         """Return (start_lane, byte_count) for this bus cycle.
 
@@ -75,20 +92,15 @@ class BusModel:
 
         Lanes are address-matched in both directions, as MC68030UM
         Tables 7-4 and 7-5 require: the first byte of the transfer appears
-        on the lane selected by A1:A0.
+        on the lane selected by A1:A0, and a port only transfers as many
+        bytes as fit between that lane and the end of the port.
         """
-        a = addr & 0x3
-        if size_code == 0:  # long
-            return a, 4 - a
-        if size_code == 1:  # byte
-            return a, 1
-        if size_code == 2:  # word
-            return a, 1 if a == 3 else 2
-        # three-byte transfer
-        count = 3 - a
-        if count <= 0:
-            count = 1
-        return a, count
+        want = {0: 4, 1: 1, 2: 2, 3: 3}[size_code]
+        width = self._port_width_for(addr)
+        # A narrow port is aliased across the long word, so only the low
+        # log2(width) address bits select a lane within it.
+        lane = addr & (width - 1)
+        return lane, min(want, width - lane)
 
     async def _responder(self):
         """Main bus responder loop -- runs as a cocotb coroutine.
@@ -128,6 +140,8 @@ class BusModel:
                 start_lane, byte_count = self._cycle_layout(
                     addr, size_code, is_write=(rw_n == 0)
                 )
+                width = self._port_width_for(addr)
+                dsack = self.DSACK_FOR_WIDTH[width]
 
                 # Insert wait states
                 for _ in range(self.wait_states):
@@ -138,6 +152,8 @@ class BusModel:
                     # Pack bytes into the exact bus lanes expected by the
                     # core's SIZE/ADR transfer semantics.
                     data = 0
+                    for lane in range(width, 4):
+                        data |= self.POISON_BYTE << ((3 - lane) * 8)
                     for i in range(byte_count):
                         b = self.memory.read(addr + i, 1) & 0xFF
                         lane = start_lane + i
@@ -155,7 +171,7 @@ class BusModel:
                             byte_count,
                             data,
                         )
-                    self.dut.DSACKn.value = 0b00  # 32-bit port ack
+                    self.dut.DSACKn.value = dsack
 
                 else:
                     # WRITE cycle: capture DATA_OUT
@@ -181,7 +197,7 @@ class BusModel:
                             data,
                         )
 
-                    self.dut.DSACKn.value = 0b00  # 32-bit port ack
+                    self.dut.DSACKn.value = dsack
 
                 # Wait for bus cycle to complete: ASn goes high
                 # This prevents responding to the same cycle twice when
