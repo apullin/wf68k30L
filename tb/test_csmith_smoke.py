@@ -35,7 +35,12 @@ from qemu_m68k_ref import qemu_m68030_image_memory
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILD_SCRIPT = REPO_ROOT / "tooling" / "csmith" / "build_case.sh"
 DEFAULT_SEED_EXPR = "1,4,5,6,7,8,10,12,13,19"
-DEFAULT_MAX_CYCLES = 400000
+# With the checksum enabled the generated program can no longer be dead-
+# stripped: every global is hashed after func_1(), so the programs execute
+# orders of magnitude more work than the ~2200 cycles they used to. Measured
+# worst case across the default seed set is ~7.4M cycles, so this leaves
+# headroom without letting a genuine hang run forever.
+DEFAULT_MAX_CYCLES = 20000000
 
 # Memory contract with tooling/csmith/runtime/csmith.h.
 CRC_ADDR = CPUTestHarness.RESULT_BASE          # computed checksum
