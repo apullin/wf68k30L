@@ -223,9 +223,13 @@ def cc_shift(op, size, count, src, result, x_in):
     if op == 'asl':
         if count == 0:
             return {'x': None, 'n': n, 'z': z, 'v': 0, 'c': 0}
-        # C = last bit shifted out = bit (m - count + 1) of source
-        # But for count >= bits, C = 0 (all bits shifted out)
-        if count >= bits:
+        # C = last bit shifted out = bit (bits - count) of source. At
+        # count == bits that is source bit 0, which is still a real bit of the
+        # operand; only count > bits shifts a zero out and clears C. PRM 3.4
+        # (ASL): "Set according to the last bit shifted out of the operand;
+        # cleared for a shift count of zero." This matches the LSL arm below,
+        # which always had it right.
+        if count > bits:
             c = 0
         else:
             c = (src >> (bits - count)) & 1
@@ -511,6 +515,35 @@ def _self_test():
     cc = cc_neg(BYTE, 0x00, 0x00)
     check("NEG.B 0x00 Z", cc['z'], 1)
     check("NEG.B 0x00 C", cc['c'], 0)
+
+    # Shift carry at the count == size boundary.
+    #
+    # This is the case that hid a model bug: cc_shift('asl') returned C=0 for
+    # any count >= bits, but at count == bits the last bit shifted out is
+    # source bit 0, exactly as the LSL arm already computed. A model that
+    # under-reports C here silently relaxes every ASL flag expectation derived
+    # from it.
+    cc = cc_shift('asl', BYTE, 8, 0x01, 0x00, 0)
+    check("ASL.B #8 of 0x01 C", cc['c'], 1)
+    check("ASL.B #8 of 0x01 X", cc['x'], 1)
+    cc = cc_shift('asl', BYTE, 8, 0xFE, 0x00, 0)
+    check("ASL.B #8 of 0xFE C", cc['c'], 0)
+    cc = cc_shift('asl', BYTE, 9, 0x01, 0x00, 0)
+    check("ASL.B #9 of 0x01 C (count > bits)", cc['c'], 0)
+    cc = cc_shift('asl', WORD, 16, 0x0001, 0x0000, 0)
+    check("ASL.W #16 of 0x0001 C", cc['c'], 1)
+    cc = cc_shift('asl', LONG, 32, 0x00000001, 0x00000000, 0)
+    check("ASL.L #32 of 1 C", cc['c'], 1)
+    # LSL is the correct-by-construction contrast case.
+    cc = cc_shift('lsl', BYTE, 8, 0x01, 0x00, 0)
+    check("LSL.B #8 of 0x01 C", cc['c'], 1)
+    cc = cc_shift('lsl', BYTE, 9, 0x01, 0x00, 0)
+    check("LSL.B #9 of 0x01 C", cc['c'], 0)
+    # ASR/LSR at the boundary shift out the sign bit.
+    cc = cc_shift('asr', BYTE, 8, 0x80, 0xFF, 0)
+    check("ASR.B #8 of 0x80 C", cc['c'], 1)
+    cc = cc_shift('lsr', BYTE, 8, 0x80, 0x00, 0)
+    check("LSR.B #8 of 0x80 C", cc['c'], 1)
 
     # Conditional tests
     check("CC_T", eval_condition(CC_T, 0, 0, 0, 0), True)
