@@ -357,6 +357,80 @@ async def test_dcache_word_read_hits_after_long_fill(dut):
 
 
 @cocotb.test()
+async def test_dcache_subword_reads_hit_at_every_offset(dut):
+    """ED=1: every byte and word offset in a filled longword should hit with the right lane."""
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x360
+    res = h.RESULT_BASE + 0xB0
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0100),                    # ED=1
+        *movec_dn_to_cr(0, CR_CACR),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # miss/fill the whole longword
+        *move(BYTE, AN_IND, 0, DN, 2),             # byte at +0
+        *addq(LONG, 1, AN, 0),
+        *move(BYTE, AN_IND, 0, DN, 3),             # byte at +1
+        *addq(LONG, 1, AN, 0),
+        *move(BYTE, AN_IND, 0, DN, 4),             # byte at +2
+        *addq(LONG, 1, AN, 0),
+        *move(BYTE, AN_IND, 0, DN, 5),             # byte at +3
+        *subq(LONG, 3, AN, 0),
+        *move(WORD, AN_IND, 0, DN, 6),             # word at +0
+        *addq(LONG, 2, AN, 0),
+        *move(WORD, AN_IND, 0, DN, 0),             # word at +2 (D0 held 0x00000100)
+        *move_to_abs_long(LONG, DN, 2, res + 0x00),
+        *move_to_abs_long(LONG, DN, 3, res + 0x04),
+        *move_to_abs_long(LONG, DN, 4, res + 0x08),
+        *move_to_abs_long(LONG, DN, 5, res + 0x0C),
+        *move_to_abs_long(LONG, DN, 6, res + 0x10),
+        *move_to_abs_long(LONG, DN, 0, res + 0x14),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x12_34_56_78)
+    await h.setup(program)
+
+    found = False
+    prev_as_n = 1
+    line_addrs = {data_addr + i for i in range(4)}
+    data_reads = 0
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+        except ValueError:
+            continue
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr in line_addrs:
+            data_reads += 1
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, "D-cache subword offset test did not complete"
+    # MOVE.B/MOVE.W only replace the low byte/word of the destination; D2-D6
+    # start at zero and D0 held 0x00000100 from the CACR setup.
+    expected = [
+        (0x00, 0x0000_0012, "byte +0"),
+        (0x04, 0x0000_0034, "byte +1"),
+        (0x08, 0x0000_0056, "byte +2"),
+        (0x0C, 0x0000_0078, "byte +3"),
+        (0x10, 0x0000_1234, "word +0"),
+        (0x14, 0x0000_5678, "word +2"),
+    ]
+    for offset, want, what in expected:
+        got = h.mem.read(res + offset, 4)
+        assert got == want, f"{what} read wrong lane: got 0x{got:08X}, expected 0x{want:08X}"
+    assert data_reads == 1, f"Expected one external read (warm fill only), saw {data_reads}"
+    h.cleanup()
+
+
+@cocotb.test()
 async def test_dcache_byte_write_hit_merges_cached_longword(dut):
     """ED=1: byte write hit should merge into cached longword and subsequent long read should hit updated data."""
     h = CPUTestHarness(dut)
