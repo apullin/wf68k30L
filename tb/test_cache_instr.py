@@ -49,6 +49,11 @@ CR_CAAR = 0x802
 CACR_RW_MASK = 0x0000_3313
 
 
+def cache_state(dut):
+    """Tag/valid arrays live inside the extracted cache-state submodule."""
+    return dut.I_TOP_CACHE_STATE
+
+
 def movec_dn_to_cr(dn: int, cr_sel: int):
     """Encode MOVEC Dn,Cr."""
     ext = ((dn & 0x7) << 12) | (cr_sel & 0x0FFF)
@@ -1184,8 +1189,8 @@ async def test_icache_phase8_autonomous_line_completion(dut):
     for _ in range(120000):
         await RisingEdge(dut.CLK)
         try:
-            icache_mask = int(dut.ICACHE_VALID[line_idx].value)
-            icache_tag = int(dut.ICACHE_TAG[line_idx].value)
+            icache_mask = int(cache_state(dut).ICACHE_VALID[line_idx].value)
+            icache_tag = int(cache_state(dut).ICACHE_TAG[line_idx].value)
             adr_p_phys = int(dut.ADR_P_PHYS.value)
             cbreq_inst_req_now = int(dut.CBREQ_INST_REQ_NOW.value)
             icache_burst_fill_valid = int(dut.ICACHE_BURST_FILL_VALID.value)
@@ -1239,7 +1244,7 @@ async def test_dcache_phase8_autonomous_line_completion(dut):
     for _ in range(90000):
         await RisingEdge(dut.CLK)
         try:
-            dcache_mask = int(dut.DCACHE_VALID[line_idx].value)
+            dcache_mask = int(cache_state(dut).DCACHE_VALID[line_idx].value)
         except (ValueError, TypeError, IndexError):
             dcache_mask = 0
         if dcache_mask == 0xF:
@@ -1312,7 +1317,7 @@ async def test_dcache_miss_bus_error_does_not_allocate_line(dut):
     assert found, "D-cache bus-error miss test did not reach sentinel"
     assert h.mem.read(res, 4) == 0x0000_0002, "Expected bus-error handler marker"
 
-    dcache_mask = int(dut.DCACHE_VALID[line_idx].value)
+    dcache_mask = int(cache_state(dut).DCACHE_VALID[line_idx].value)
     assert ((dcache_mask >> entry_idx) & 0x1) == 0, (
         "Bus-error read miss must not allocate/update D-cache entry"
     )
@@ -1386,8 +1391,8 @@ async def test_icache_miss_bus_error_does_not_allocate_word(dut):
     assert found, "I-cache bus-error miss test did not reach sentinel"
     assert h.mem.read(res, 4) == 0x0000_0002, "Expected bus-error handler marker"
 
-    icache_mask = int(dut.ICACHE_VALID[line_idx].value)
-    icache_tag = int(dut.ICACHE_TAG[line_idx].value)
+    icache_mask = int(cache_state(dut).ICACHE_VALID[line_idx].value)
+    icache_tag = int(cache_state(dut).ICACHE_TAG[line_idx].value)
     word_valid = (icache_mask >> word_idx) & 0x1
     assert not (icache_tag == line_tag and word_valid == 1), (
         "Opcode bus-error miss must not mark target I-cache word valid"
