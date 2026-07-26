@@ -612,7 +612,9 @@ assign WAITSTATES = (T_SLICE != S3) ? 1'b0 :
                     RESET_OUT_I ? 1'b1 : // No bus fault during RESET instruction.
                     (DSACK_In != 2'b11) ? 1'b0 : // Asynchronous termination.
                     !STERM_In ? 1'b0 :            // Synchronous termination.
-                    (ADR_IN_P[19:16] == 4'hF && !AVEC_In) ? 1'b0 : // Autovector acknowledge.
+                    // Autovector acknowledge. AVEC is only meaningful during an
+                    // interrupt acknowledge cycle: CPU space with type field $F.
+                    (FC_IN == FC_CPU_SPACE && ADR_IN_P[19:16] == 4'hF && !AVEC_In) ? 1'b0 :
                     BUS_FLT ? 1'b0 :              // Bus error terminates cycle.
                     RESET_CPU_I ? 1'b0 : 1'b1;   // CPU reset terminates cycle.
 

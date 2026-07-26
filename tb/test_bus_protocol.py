@@ -32,6 +32,7 @@ from m68k_encode import (
     BYTE, WORD, LONG,
     DN, AN, AN_IND, AN_DISP, SPECIAL, ABS_L, IMMEDIATE,
     moveq, move, movea, move_to_abs_long, nop, addq, add, imm_long, abs_long,
+    trap, rte,
 )
 
 
@@ -1038,6 +1039,52 @@ async def test_late_berr_after_dsack_faults(dut):
     assert h.mem.read(res, 4) != 0x0000005A, (
         "Faulted read continued into the following store"
     )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_avec_ignored_outside_iack_cycle(dut):
+    """UM 7.4.1.2: AVEC only terminates interrupt acknowledge cycles.
+
+    Many systems ground AVEC permanently. AVECn reaches the bus interface
+    only while the exception handler is busy, so the exposed cycles are the
+    frame writes: with the stack placed so they carry the interrupt
+    acknowledge type field in A19:A16, they must still wait for DSACK.
+    """
+    h = CPUTestHarness(dut, wait_states=3)
+    stack_top = 0x000F8000  # frame writes land at 0x000F7FFx -> A19:A16 = $F
+    marker = 0x0000005A
+    handler = 0x000700
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),   # A7 = supervisor stack in $000Fxxxx
+        *imm_long(stack_top),
+        *trap(0),
+        *moveq(0x33, 3),
+        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE + 4),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+
+    h.mem.load_long(32 * 4, handler)           # TRAP #0 -> vector 32
+    h.mem.load_words(handler, [
+        *moveq(marker, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *rte(),
+    ])
+
+    dut.AVECn.value = 0  # Grounded, as on many boards.
+
+    found = await h.run_until_sentinel(max_cycles=20000)
+    assert found, (
+        "Sentinel not reached: a grounded AVEC mis-terminated an exception "
+        "frame write"
+    )
+    assert h.read_result_long(0) == marker, (
+        f"TRAP handler marker wrong: got 0x{h.read_result_long(0):08X}")
+    assert h.read_result_long(4) == 0x00000033, (
+        "RTE did not return correctly: exception frame was corrupted "
+        f"(got 0x{h.read_result_long(4):08X})")
     h.cleanup()
 
 
