@@ -1088,6 +1088,73 @@ async def test_avec_ignored_outside_iack_cycle(dut):
     h.cleanup()
 
 
+@cocotb.test()
+async def test_bus_fault_info_held_until_exception_entry(dut):
+    """The fault SSW must survive until the exception handler captures it.
+
+    A queued prefetch runs in the clocks between the fault and the handler
+    leaving its idle state. It must not recapture SSW_80, or the stacked
+    frame reports the prefetch (FC = 6, DF clear) instead of the faulted
+    data access (FC = 5, DF set).
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x240
+    berr_handler = 0x0007A0
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 0),          # faulted supervisor data read
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+
+    h.mem.load_long(2 * 4, berr_handler)
+    h.mem.load_words(berr_handler, h.sentinel_program())
+
+    bi = dut.I_BUS_IF
+    injected = False
+    samples = []
+    found = False
+
+    for _ in range(20000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            ssw = int(bi.SSW_80.value)
+            busy_exh = int(bi.BUSY_EXH.value)
+        except ValueError:
+            continue
+
+        if not injected and as_n == 0 and rw_n == 1 and addr == data_addr:
+            dut.BERRn.value = 0
+            injected = True
+        elif injected and as_n == 1:
+            dut.BERRn.value = 1
+
+        # From the cycle DF is first set, record until the handler engages.
+        if (samples or (ssw >> 8) & 1) and not busy_exh:
+            samples.append(ssw)
+        elif samples and busy_exh:
+            break
+
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert injected, "Never injected BERR on the target read"
+    assert samples, "SSW never reported a data fault"
+    bad = [s for s in samples if ((s >> 8) & 1) == 0 or (s & 0x7) != 0b101]
+    assert not bad, (
+        "Fault info was overwritten before exception entry: "
+        f"saw SSW {[hex(s) for s in samples]}, expected DF set and FC = 5 "
+        f"throughout ({len(bad)} bad of {len(samples)} clocks)"
+    )
+    h.cleanup()
+
+
 # ===================================================================
 # 6. Reset Operation (UM 7.8)
 # ===================================================================

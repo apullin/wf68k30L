@@ -123,6 +123,7 @@ logic [1:0]         SIZE_I;
 logic [2:0]         SIZE_N;
 logic [2:0]         SLICE_CNT_N;
 logic [2:0]         SLICE_CNT_P;
+logic               SSW_FROZEN;
 logic               STERM_In;
 TIME_SLICES         T_SLICE;
 logic               WAITSTATES;
@@ -202,7 +203,7 @@ end
 // Captures bus cycle attributes for format A/B stack frames on bus faults.
 always_ff @(posedge CLK) begin : data_fault_info
     logic [1:0] SIZEVAR;
-    if (!BUSY_EXH) begin // Do not alter during exception processing.
+    if (!BUSY_EXH && !SSW_FROZEN) begin // Do not alter during exception processing.
         case (OP_SIZE)
             LONG:    SIZEVAR = 2'b10;
             WORD:    SIZEVAR = 2'b01;
@@ -224,6 +225,22 @@ always_ff @(posedge CLK) begin : data_fault_info
         OUTBUFFER <= WP_BUFFER; // Used for exception stack frame type A and B.
         INBUFFER <= DATA_INMUX; // Used for exception stack frame type B.
     end
+end
+
+// The exception handler can take several clocks to leave its idle state, and
+// a queued prefetch runs in the meantime. Hold the fault info from the cycle
+// the fault is latched so the prefetch cannot recapture it. RETRY is excluded
+// because it is not a fault. Cleared once the handler is running, which is
+// also when data_fault_info stops updating on its own.
+always_ff @(posedge CLK) begin : ssw_freeze
+    if (RESET_CPU_I)
+        SSW_FROZEN <= 1'b0;
+    else if (BUS_CTRL_STATE == DATA_C1C4 && (READ_ACCESS || WRITE_ACCESS) && BUS_FLT_ANY && HALT_In)
+        SSW_FROZEN <= 1'b1;
+    else if (BUS_CTRL_STATE == START_CYCLE && AERR_I)
+        SSW_FROZEN <= 1'b1;
+    else if (BUSY_EXH)
+        SSW_FROZEN <= 1'b0;
 end
 
 // ---- Write buffer latch ----
