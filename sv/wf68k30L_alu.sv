@@ -164,6 +164,30 @@ always_ff @(posedge CLK) begin : operands
 end
 
 // ========================================================================
+// Extend-flag operand hold
+// ========================================================================
+// CC_UPDT (= ALU_REQ) stays asserted for as long as the control state machine
+// needs to consume the result, and the status register applies XNZVC on every
+// one of those cycles. Sourcing X live from STATUS_REG therefore feeds an
+// extend-consuming operation its own X output from the second cycle onward:
+// ABCD 0x99+0x01 with X=0 first computes 0x00 with C=1, then re-computes
+// 0x99+0x01+1 = 0x01 and so clears the Z the PRM requires it to leave alone
+// ("Z - Cleared if the result is nonzero; unchanged otherwise"). For a memory
+// destination the re-computed value is what gets written: NBCD -(An) on 0x42
+// wrote the nines complement 0x57 instead of the tens complement 0x58.
+//
+// The X an extend-consuming operation must see is the X in effect when its
+// operands were latched, so hold it at ALU_INIT alongside them. The CC_UPDT
+// bypass mirrors the LOAD_OPn bypass in the operand buffers: if the preceding
+// instruction's condition-code write lands on the same edge as ALU_INIT, take
+// the value it is writing rather than the pre-update register.
+logic X_OPERAND;
+always_ff @(posedge CLK) begin : x_operand_hold
+    if (ALU_INIT)
+        X_OPERAND <= CC_UPDT ? XNZVC[SR_X] : STATUS_REG[SR_X];
+end
+
+// ========================================================================
 // ALU busy/request handshake
 // ========================================================================
 always_ff @(posedge CLK) begin : alu_busy
@@ -244,7 +268,7 @@ always_comb begin : bcd_op
     logic [3:0] S_1;
     logic       X_IN_I;
 
-    X_IN_I = STATUS_REG[SR_X]; // Extended Flag.
+    X_IN_I = X_OPERAND; // Extended Flag, held stable for this operation.
 
     // Low nibble computation
     case (OP)
@@ -403,7 +427,7 @@ always_comb begin : integer_op
     logic [0:0] X_IN_I;
     logic [31:0] RESULT_tmp;
 
-    X_IN_I[0] = STATUS_REG[SR_X]; // Extended Flag.
+    X_IN_I[0] = X_OPERAND; // Extended Flag, held stable for this operation.
     case (OP)
         ADDA: // No sign extension for the destination.
             RESULT_tmp = OP2 + OP1_SIGNEXT;
