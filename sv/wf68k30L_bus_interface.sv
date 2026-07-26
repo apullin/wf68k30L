@@ -148,9 +148,10 @@ always_ff @(negedge CLK) begin : sync_bus_termination
     AVEC_In <= AVECn;
 
     // Retry detection: BERR + HALT during active bus cycle with remaining transfers.
+    // The rerun is held off until HALT is negated by external logic.
     if (!BERRn && !HALTn && BUS_CTRL_STATE == DATA_C1C4 && SIZE_N != 3'b000)
         RETRY <= 1'b1;
-    else if (T_SLICE == SLICE_IDLE && (BERRn || HALTn))
+    else if (T_SLICE == SLICE_IDLE && HALTn)
         RETRY <= 1'b0;
 end
 

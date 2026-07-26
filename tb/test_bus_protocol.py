@@ -868,12 +868,14 @@ async def test_misaligned_long_read_retry_recovers(dut):
             data_rdy_events.append((data_valid, data_to_core))
 
         if retry_phase == 1 and as_n == 1:
-            # Release bus error at end of the retried cycle, keep HALT low
-            # until BUS_BSY drops so the cycle is treated strictly as retry.
+            # Release bus error at the end of the terminated cycle, holding
+            # HALT, so the cycle is treated strictly as retry.
             dut.BERRn.value = 1
             retry_phase = 2
-        elif retry_phase == 2 and bus_bsy == 0:
-            # Retry acknowledged; allow restart.
+        elif retry_phase == 2:
+            # UM 7.5.2 negates HALT at the same time as or after BERR. The
+            # core holds the cycle until then, so BUS_BSY stays asserted and
+            # cannot be used to pace this step.
             dut.HALT_INn.value = 1
             retry_phase = 3
 
@@ -892,6 +894,79 @@ async def test_misaligned_long_read_retry_recovers(dut):
     )
     assert h.mem.read(res + 4, 4) == 0x0000005A, "Program did not continue after retry recovery"
     assert h.mem.read(res + 8, 4) != 0x0000006E, "Bus-error handler fired; retry was not recovered"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_retry_rerun_waits_for_halt_negation(dut):
+    """UM 7.5.2: after a retry the core starts no bus cycle until HALT negates.
+
+    BERR is negated first while HALT is held, which is the sequence the UM
+    documents; no bus cycle may begin during that window.
+    """
+    h = CPUTestHarness(dut, wait_states=1)
+    data_addr = h.DATA_BASE + 0x181
+    expected = 0x89ABCDEF
+    res = h.RESULT_BASE + 0xE0
+    hold_clocks = 40
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, expected)
+    await h.setup(program)
+
+    prev_as_n = 1
+    phase = 0  # 0=waiting for target, 1=berr+halt, 2=holding halt only, 3=released
+    held = 0
+    as_low_while_halted = 0
+    found = False
+
+    for _ in range(40000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+        except ValueError:
+            continue
+
+        if phase == 0 and prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr == data_addr:
+            dut.BERRn.value = 0
+            dut.HALT_INn.value = 0
+            phase = 1
+        elif phase == 1 and as_n == 1:
+            # Terminated. Negate BERR but keep holding HALT.
+            dut.BERRn.value = 1
+            phase = 2
+        elif phase == 2:
+            if as_n == 0:
+                as_low_while_halted += 1
+            held += 1
+            if held >= hold_clocks:
+                dut.HALT_INn.value = 1
+                phase = 3
+
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert phase == 3, f"Retry sequence did not complete, stuck in phase {phase}"
+    assert as_low_while_halted == 0, (
+        f"Bus cycle began before HALT was negated: ASn low for "
+        f"{as_low_while_halted} of {hold_clocks} held clocks"
+    )
+    assert found, "Retry test did not complete after HALT negation"
+    assert h.mem.read(res, 4) == expected, (
+        f"Retried read data mismatch: expected 0x{expected:08X}, "
+        f"got 0x{h.mem.read(res, 4):08X}"
+    )
     h.cleanup()
 
 
