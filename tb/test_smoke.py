@@ -47,7 +47,8 @@ def init_idle_inputs(dut):
     dut.AVECn.value = 1      # No auto-vector
     dut.DATA_IN.value = 0
     dut.STERMn.value = 1     # No synchronous termination
-    dut.CBACKn.value = 1     # No burst acknowledge
+    dut.CBACKn.value = 1
+    dut.CIINn.value = 1       # No external cache inhibit     # No burst acknowledge
     dut.BRn.value = 1        # No bus request
     dut.BGACKn.value = 1     # No bus grant acknowledge
 

@@ -128,6 +128,7 @@ class CPUTestHarness:
         self.dut.DATA_IN.value = 0
         self.dut.STERMn.value = 1      # No synchronous termination
         self.dut.CBACKn.value = 1      # No burst acknowledge
+        self.dut.CIINn.value = 1       # No external cache inhibit
         self.dut.BRn.value = 1         # No bus request
         self.dut.BGACKn.value = 1      # No bus grant acknowledge
 

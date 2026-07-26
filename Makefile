@@ -185,6 +185,13 @@ test-shakeout:
 # default for that reason; override with SMT_SOLVER=yices if it is unavailable,
 # in which case use `make formal-smoke FORMAL_REGFILE=0` to skip the
 # register-file property.
+# The MMU harnesses instantiate the request-gating and translate modules, so the
+# whole cone they depend on has to be read in.
+FORMAL_MMU_RTL := $(SV_DIR)/wf68k30L_top_routing_bus_cache.sv \
+                  $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv \
+                  $(SV_DIR)/wf68k30L_top_desc_shadow_port.sv \
+                  $(SV_DIR)/wf68k30L_top_mmu_ptest.sv \
+                  $(SV_DIR)/wf68k30L_sync_ram_1r1w.sv
 FORMAL_LOWER := memory_map; clk2fflogic; chformal -lower
 SMT_SOLVER ?= bitwuzla
 FORMAL_CYCLES ?= 12
@@ -234,12 +241,12 @@ ifeq ($(FORMAL_REGFILE),1)
 	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/data_regs_regfile.smt2
 endif
 	yosys -q -p \
-	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv formal/mmu_runtime_gate_formal.sv; \
+	  "read_verilog -formal -sv -I $(SV_DIR) $(FORMAL_MMU_RTL) formal/mmu_runtime_gate_formal.sv; \
 	   prep -top mmu_runtime_gate_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/mmu_runtime_gate.smt2"
 	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/mmu_runtime_gate.smt2
 	yosys -q -p \
-	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_top_mmu_state.sv formal/mmu_walk_delay_state_formal.sv; \
+	  "read_verilog -formal -sv -I $(SV_DIR) $(FORMAL_MMU_RTL) formal/mmu_walk_delay_state_formal.sv; \
 	   prep -top mmu_walk_delay_state_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/mmu_walk_delay_state.smt2"
 	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/mmu_walk_delay_state.smt2
