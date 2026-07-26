@@ -170,29 +170,56 @@ test-shakeout:
 #
 # The harnesses toggle CLK from $global_clock, so a depth of N global steps is
 # about N/2 clock edges.
-FORMAL_LOWER := clk2fflogic; chformal -lower
+#
+# `memory_map` matters as much as the solver here: without it write_smt2 emits
+# the register file as an SMT-LIB array (store/select over
+# (Array (_ BitVec 3) (_ BitVec 32))), and every solver tried -- yices,
+# boolector, bitwuzla -- times out on the exhaustive register-file property.
+# Bit-blasting it first makes that property tractable.
+#
+# Solver choice is a large effect, not a detail. On the register-file property
+# at depth 10, measured on this design: bitwuzla 2s, yices 68s; at depth 24
+# bitwuzla 26s, yices >180s. bitwuzla (or boolector, its predecessor) is the
+# default for that reason; override with SMT_SOLVER=yices if it is unavailable,
+# in which case use `make formal-smoke FORMAL_REGFILE=0` to skip the
+# register-file property.
+FORMAL_LOWER := memory_map; clk2fflogic; chformal -lower
+SMT_SOLVER ?= bitwuzla
 FORMAL_DEPTH ?= 24
+FORMAL_REGFILE ?= 1
 
-.PHONY: formal-selftest formal-deep
+.PHONY: formal-selftest
 
 formal-smoke: formal-selftest
 	mkdir -p build/formal
+	# Hazard tracker: bounded, then proven unbounded by temporal induction.
 	yosys -q -p \
 	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_data_registers.sv formal/data_regs_hazard_formal.sv; \
 	   prep -top data_regs_hazard_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/data_regs_hazard.smt2"
-	yosys-smtbmc -s yices -t $(FORMAL_DEPTH) build/formal/data_regs_hazard.smt2
-	yosys-smtbmc -i -s yices -t $(FORMAL_DEPTH) build/formal/data_regs_hazard.smt2
+	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/data_regs_hazard.smt2
+	yosys-smtbmc -i -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/data_regs_hazard.smt2
+	# Register-file data integrity: BMC only. The shadow is not inductive on its
+	# own (from an arbitrary state it may already disagree with the RTL), so
+	# induction fails here without extra invariants; that is a limitation of the
+	# property, not a counterexample.
+ifeq ($(FORMAL_REGFILE),1)
+	yosys -q -p \
+	  "read_verilog -formal -sv -DREGFILE_PROPERTY -I $(SV_DIR) $(SV_DIR)/wf68k30L_data_registers.sv formal/data_regs_hazard_formal.sv; \
+	   prep -top data_regs_hazard_formal -flatten; $(FORMAL_LOWER); \
+	   write_smt2 -wires build/formal/data_regs_regfile.smt2"
+	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/data_regs_regfile.smt2
+endif
 	yosys -q -p \
 	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv formal/mmu_runtime_gate_formal.sv; \
 	   prep -top mmu_runtime_gate_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/mmu_runtime_gate.smt2"
-	yosys-smtbmc -s yices -t $(FORMAL_DEPTH) build/formal/mmu_runtime_gate.smt2
+	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/mmu_runtime_gate.smt2
 	yosys -q -p \
 	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_top_mmu_state.sv formal/mmu_walk_delay_state_formal.sv; \
 	   prep -top mmu_walk_delay_state_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/mmu_walk_delay_state.smt2"
-	yosys-smtbmc -s yices -t $(FORMAL_DEPTH) build/formal/mmu_walk_delay_state.smt2
+	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/mmu_walk_delay_state.smt2
 
 # Proves the formal flow can actually fail. A trivially false assertion must be
 # reported FAILED; if it passes, assertions are being dropped and every other
@@ -205,7 +232,7 @@ formal-selftest:
 	  "read_verilog -formal -sv build/formal/formal_selftest.sv; \
 	   prep -top formal_selftest -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/formal_selftest.smt2"
-	@if yosys-smtbmc -s yices -t 8 build/formal/formal_selftest.smt2 2>&1 | grep -q 'Status: FAILED'; then \
+	@if yosys-smtbmc -s $(SMT_SOLVER) -t 8 build/formal/formal_selftest.smt2 2>&1 | grep -q 'Status: FAILED'; then \
 	   echo "formal-selftest: OK (assertions are live)"; \
 	 else \
 	   echo "formal-selftest: FAILED -- assertions are not reaching the solver;"; \
@@ -213,16 +240,4 @@ formal-selftest:
 	   exit 1; \
 	 fi
 
-# Opt-in exhaustive register-file property (REGFILE_PROPERTY). Known hard: the
-# UNSAT direction did not complete at depth 10 on yices/boolector/bitwuzla, so
-# this is deliberately not part of formal-smoke. Counterexamples are still found
-# quickly, which makes it useful as a mutation check.
-formal-deep: formal-selftest
-	mkdir -p build/formal
-	yosys -q -p \
-	  "read_verilog -formal -sv -DREGFILE_PROPERTY -I $(SV_DIR) $(SV_DIR)/wf68k30L_data_registers.sv formal/data_regs_hazard_formal.sv; \
-	   prep -top data_regs_hazard_formal -flatten; $(FORMAL_LOWER); \
-	   write_smt2 -wires build/formal/data_regs_regfile.smt2"
-	yosys-smtbmc -s yices -t $(FORMAL_DEEP_DEPTH) build/formal/data_regs_regfile.smt2
 
-FORMAL_DEEP_DEPTH ?= 10
