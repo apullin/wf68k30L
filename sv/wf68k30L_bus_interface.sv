@@ -90,16 +90,16 @@ typedef enum logic [2:0] {SLICE_IDLE, S0, S1, S2, S3, S4, S5} TIME_SLICES;
 
 logic [1:0]         ADR_10;
 logic [5:0]         ADR_OFFSET;
-logic [2:0]         ADR_STEP;
 logic [31:0]        ADR_OUT_I;
 logic               AERR_I;
-ARB_STATES          ARB_STATE;
+ARB_STATES          ARB_STATE = ARB_IDLE;
 logic               AVEC_In;
 logic               BGACK_In;
 logic               BR_In;
 BUS_CTRL_STATES     BUS_CTRL_STATE;
 logic               BUS_CYC_RDY;
 logic               BUS_FLT;
+logic               BUS_FLT_ANY;
 BUS_WIDTH_TYPE      BUS_WIDTH;
 logic [31:0]        DATA_INMUX;
 logic               DATA_RDY_I;
@@ -116,13 +116,17 @@ logic               OPCODE_ACCESS;
 logic               OPCODE_RDY_I;
 logic               READ_ACCESS;
 logic               RESET_CPU_I;
+logic [3:0]         RESET_FLT_CNT = 4'h0;
+logic [8:0]         RESET_OUT_CNT = 9'd0;
 logic               RESET_OUT_I;
 logic               RETRY;
 logic [1:0]         SIZE_D;
 logic [1:0]         SIZE_I;
-logic [2:0]         SIZE_N;
+logic [2:0]         SIZE_N = 3'b000;
 logic [2:0]         SLICE_CNT_N;
 logic [2:0]         SLICE_CNT_P;
+logic               SSW_FROZEN;
+logic               STARTUP = 1'b0;
 logic               STERM_In;
 TIME_SLICES         T_SLICE;
 logic               WAITSTATES;
@@ -147,10 +151,13 @@ always_ff @(negedge CLK) begin : sync_bus_termination
     BGACK_In <= BGACKn;
     AVEC_In <= AVECn;
 
-    // Retry detection: BERR + HALT during active bus cycle with remaining transfers.
-    if (!BERRn && !HALTn && BUS_CTRL_STATE == DATA_C1C4 && SIZE_N != 3'b000)
+    // Retry detection: BERR + HALT during an active bus cycle. A late retry is
+    // sampled after SIZE_N has already counted down, so the terminating
+    // sub-cycle has to qualify as well.
+    // The rerun is held off until HALT is negated by external logic.
+    if (!BERRn && !HALTn && BUS_CTRL_STATE == DATA_C1C4)
         RETRY <= 1'b1;
-    else if (T_SLICE == SLICE_IDLE && (BERRn || HALTn))
+    else if (T_SLICE == SLICE_IDLE && HALTn)
         RETRY <= 1'b0;
 end
 
@@ -165,6 +172,12 @@ always_ff @(posedge CLK) begin : fault_latch
         AERR <= 1'b0;
     end
 end
+
+// BUS_FLT only becomes visible on the posedge after the negedge that sampled
+// BERRn, which is the same edge the terminating sub-cycle leaves DATA_C1C4 on.
+// That cycle therefore has to qualify the negedge sample directly. When the
+// fault is a retry, BUS_CYC_RDY is already suppressed, so this stays clear.
+assign BUS_FLT_ANY = BUS_FLT || (BUS_CYC_RDY && SIZE_N == 3'b000 && BUS_FLT_VAR);
 
 // ---- Access type tracking ----
 // Latches which type of access (read/write/opcode) is active during a bus cycle.
@@ -193,7 +206,7 @@ end
 // Captures bus cycle attributes for format A/B stack frames on bus faults.
 always_ff @(posedge CLK) begin : data_fault_info
     logic [1:0] SIZEVAR;
-    if (!BUSY_EXH) begin // Do not alter during exception processing.
+    if (!BUSY_EXH && !SSW_FROZEN) begin // Do not alter during exception processing.
         case (OP_SIZE)
             LONG:    SIZEVAR = 2'b10;
             WORD:    SIZEVAR = 2'b01;
@@ -208,13 +221,29 @@ always_ff @(posedge CLK) begin : data_fault_info
             SSW_80[5:4] <= SIZEVAR;
             SSW_80[3] <= 1'b0;
             SSW_80[2:0] <= FC_IN;
-        end else if (BUS_CTRL_STATE == DATA_C1C4 && (READ_ACCESS || WRITE_ACCESS) && BUS_FLT) begin
+        end else if (BUS_CTRL_STATE == DATA_C1C4 && (READ_ACCESS || WRITE_ACCESS) && BUS_FLT_ANY) begin
             SSW_80[8] <= 1'b1;
         end
 
         OUTBUFFER <= WP_BUFFER; // Used for exception stack frame type A and B.
         INBUFFER <= DATA_INMUX; // Used for exception stack frame type B.
     end
+end
+
+// The exception handler can take several clocks to leave its idle state, and
+// a queued prefetch runs in the meantime. Hold the fault info from the cycle
+// the fault is latched so the prefetch cannot recapture it. RETRY is excluded
+// because it is not a fault. Cleared once the handler is running, which is
+// also when data_fault_info stops updating on its own.
+always_ff @(posedge CLK) begin : ssw_freeze
+    if (RESET_CPU_I)
+        SSW_FROZEN <= 1'b0;
+    else if (BUS_CTRL_STATE == DATA_C1C4 && (READ_ACCESS || WRITE_ACCESS) && BUS_FLT_ANY && HALT_In)
+        SSW_FROZEN <= 1'b1;
+    else if (BUS_CTRL_STATE == START_CYCLE && AERR_I)
+        SSW_FROZEN <= 1'b1;
+    else if (BUSY_EXH)
+        SSW_FROZEN <= 1'b0;
 end
 
 // ---- Write buffer latch ----
@@ -355,29 +384,34 @@ end
 
 // ---- Address offset accumulator ----
 // Tracks the byte offset within a multi-cycle transfer for dynamic bus sizing.
+// ADR_STEP must be a blocking variable, not a register: a synchronous cycle
+// terminates on the same edge that computes it, and would otherwise advance
+// the offset by the previous cycle's step.
 always_ff @(posedge CLK) begin : adr_offset_calc
+    logic [2:0] ADR_STEP;
+
     if (RESET_CPU_I) begin
-        ADR_STEP <= 3'b000;
+        ADR_STEP = 3'b000;
     end else if ((T_SLICE == S2 && !STERMn) || T_SLICE == S3) begin
         case (BUS_WIDTH)
             LONG_32: begin
                 case (ADR_OUT_I[1:0])
-                    2'b11:   ADR_STEP <= 3'b001;
-                    2'b10:   ADR_STEP <= 3'b010;
-                    2'b01:   ADR_STEP <= 3'b011;
-                    default: ADR_STEP <= 3'b100;
+                    2'b11:   ADR_STEP = 3'b001;
+                    2'b10:   ADR_STEP = 3'b010;
+                    2'b01:   ADR_STEP = 3'b011;
+                    default: ADR_STEP = 3'b100;
                 endcase
             end
             BW_WORD: begin
                 case (ADR_OUT_I[1:0])
-                    2'b01, 2'b11: ADR_STEP <= 3'b001;
-                    default:      ADR_STEP <= 3'b010;
+                    2'b01, 2'b11: ADR_STEP = 3'b001;
+                    default:      ADR_STEP = 3'b010;
                 endcase
             end
             BW_BYTE:
-                ADR_STEP <= 3'b001;
+                ADR_STEP = 3'b001;
             default:
-                ADR_STEP <= 3'b001;
+                ADR_STEP = 3'b001;
         endcase
     end
 
@@ -474,7 +508,7 @@ always_ff @(negedge CLK) begin : data_in_alignment
                         case (ADR_10)
                             2'b00: DATA_INMUX[31:16] <= DATA_PORT_IN[31:16];
                             2'b01: DATA_INMUX[31:24] <= DATA_PORT_IN[23:16];
-                            2'b10: DATA_INMUX[31:16] <= DATA_PORT_IN[15:0];
+                            2'b10: DATA_INMUX[31:16] <= DATA_PORT_IN[31:16];
                             default: DATA_INMUX[31:24] <= DATA_PORT_IN[23:16];
                         endcase
                     end
@@ -509,9 +543,9 @@ always_ff @(negedge CLK) begin : data_in_alignment
                     default: begin // LONG.
                         case (ADR_10)
                             2'b00:   DATA_INMUX[31:0]  <= DATA_PORT_IN[31:0];
-                            2'b01:   DATA_INMUX[31:8]  <= DATA_PORT_IN[31:8];
-                            2'b10:   DATA_INMUX[31:16] <= DATA_PORT_IN[31:16];
-                            default: DATA_INMUX[31:24] <= DATA_PORT_IN[31:24];
+                            2'b01:   DATA_INMUX[31:8]  <= DATA_PORT_IN[23:0];
+                            2'b10:   DATA_INMUX[31:16] <= DATA_PORT_IN[15:0];
+                            default: DATA_INMUX[31:24] <= DATA_PORT_IN[7:0];
                         endcase
                     end
                 endcase
@@ -525,18 +559,18 @@ end
 always_ff @(posedge CLK) begin : validation
     if (RESET_CPU_I)
         OPCODE_VALID <= 1'b1;
-    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT && !HALT_In)
+    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY && !HALT_In)
         ; // RETRY condition: no opcode bus error.
-    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT)
+    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY)
         OPCODE_VALID <= 1'b0;
     else if (OPCODE_RDY_I)
         OPCODE_VALID <= 1'b1;
 
     if (RESET_CPU_I)
         DATA_VALID <= 1'b1;
-    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT && !HALT_In)
+    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY && !HALT_In)
         ; // RETRY condition: no bus error.
-    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT)
+    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY)
         DATA_VALID <= 1'b0;
     else if (DATA_RDY_I)
         DATA_VALID <= 1'b1;
@@ -598,7 +632,9 @@ assign WAITSTATES = (T_SLICE != S3) ? 1'b0 :
                     RESET_OUT_I ? 1'b1 : // No bus fault during RESET instruction.
                     (DSACK_In != 2'b11) ? 1'b0 : // Asynchronous termination.
                     !STERM_In ? 1'b0 :            // Synchronous termination.
-                    (ADR_IN_P[19:16] == 4'hF && !AVEC_In) ? 1'b0 : // Autovector acknowledge.
+                    // Autovector acknowledge. AVEC is only meaningful during an
+                    // interrupt acknowledge cycle: CPU space with type field $F.
+                    (FC_IN == FC_CPU_SPACE && ADR_IN_P[19:16] == 4'hF && !AVEC_In) ? 1'b0 :
                     BUS_FLT ? 1'b0 :              // Bus error terminates cycle.
                     RESET_CPU_I ? 1'b0 : 1'b1;   // CPU reset terminates cycle.
 
@@ -714,17 +750,18 @@ end
 assign BGn = (ARB_STATE == GRANT) ? 1'b0 : 1'b1;
 
 // ---- Reset input filter ----
-// Requires RESET_IN held low with HALTn low for ~10 clock cycles to trigger.
+// Requires RESET_IN asserted for ~10 clock cycles to trigger. The core must
+// not reset on its own RESET instruction output, hence the RESET_OUT_I mask.
+// STARTUP and the counters are held at module scope so their power-on values
+// are honored once. Verilator re-applies a declaration initializer on every
+// entry to a procedural block, which would stall them instead.
 always_ff @(posedge CLK) begin : reset_filter
-    logic STARTUP;
-    logic [3:0] TMP;
+    if (RESET_IN && !RESET_OUT_I && RESET_FLT_CNT < 4'hF)
+        RESET_FLT_CNT = RESET_FLT_CNT + 1'b1;
+    else if (!RESET_IN || RESET_OUT_I)
+        RESET_FLT_CNT = 4'h0;
 
-    if (RESET_IN && !HALT_In && !RESET_OUT_I && TMP < 4'hF)
-        TMP = TMP + 1'b1;
-    else if (!RESET_IN || HALT_In || RESET_OUT_I)
-        TMP = 4'h0;
-
-    if (TMP > 4'hA) begin
+    if (RESET_FLT_CNT > 4'hA) begin
         RESET_CPU_I <= 1'b1;
         STARTUP = 1'b1;
     end else if (!STARTUP) begin
@@ -737,17 +774,15 @@ end
 // ---- Reset output timer ----
 // Drives RESET_OUT for 512 clock cycles when RESET_STRB is asserted.
 always_ff @(posedge CLK) begin : reset_timer
-    logic [8:0] TMP;
-
-    if (RESET_STRB || TMP > 9'd0)
+    if (RESET_STRB || RESET_OUT_CNT > 9'd0)
         RESET_OUT_I <= 1'b1;
     else
         RESET_OUT_I <= 1'b0;
 
     if (RESET_STRB)
-        TMP = 9'd511;
-    else if (TMP > 9'd0)
-        TMP = TMP - 1'b1;
+        RESET_OUT_CNT = 9'd511;
+    else if (RESET_OUT_CNT > 9'd0)
+        RESET_OUT_CNT = RESET_OUT_CNT - 1'b1;
 end
 
 assign RESET_CPU = RESET_CPU_I;

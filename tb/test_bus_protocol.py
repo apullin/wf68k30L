@@ -27,10 +27,12 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
 
 from cpu_harness import CPUTestHarness
+from bus_model import BusModel
 from m68k_encode import (
     BYTE, WORD, LONG,
     DN, AN, AN_IND, AN_DISP, SPECIAL, ABS_L, IMMEDIATE,
     moveq, move, movea, move_to_abs_long, nop, addq, add, imm_long, abs_long,
+    trap, rte,
 )
 
 
@@ -867,12 +869,14 @@ async def test_misaligned_long_read_retry_recovers(dut):
             data_rdy_events.append((data_valid, data_to_core))
 
         if retry_phase == 1 and as_n == 1:
-            # Release bus error at end of the retried cycle, keep HALT low
-            # until BUS_BSY drops so the cycle is treated strictly as retry.
+            # Release bus error at the end of the terminated cycle, holding
+            # HALT, so the cycle is treated strictly as retry.
             dut.BERRn.value = 1
             retry_phase = 2
-        elif retry_phase == 2 and bus_bsy == 0:
-            # Retry acknowledged; allow restart.
+        elif retry_phase == 2:
+            # UM 7.5.2 negates HALT at the same time as or after BERR. The
+            # core holds the cycle until then, so BUS_BSY stays asserted and
+            # cannot be used to pace this step.
             dut.HALT_INn.value = 1
             retry_phase = 3
 
@@ -891,4 +895,366 @@ async def test_misaligned_long_read_retry_recovers(dut):
     )
     assert h.mem.read(res + 4, 4) == 0x0000005A, "Program did not continue after retry recovery"
     assert h.mem.read(res + 8, 4) != 0x0000006E, "Bus-error handler fired; retry was not recovered"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_retry_rerun_waits_for_halt_negation(dut):
+    """UM 7.5.2: after a retry the core starts no bus cycle until HALT negates.
+
+    BERR is negated first while HALT is held, which is the sequence the UM
+    documents; no bus cycle may begin during that window.
+    """
+    h = CPUTestHarness(dut, wait_states=1)
+    data_addr = h.DATA_BASE + 0x181
+    expected = 0x89ABCDEF
+    res = h.RESULT_BASE + 0xE0
+    hold_clocks = 40
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, expected)
+    await h.setup(program)
+
+    prev_as_n = 1
+    phase = 0  # 0=waiting for target, 1=berr+halt, 2=holding halt only, 3=released
+    held = 0
+    as_low_while_halted = 0
+    found = False
+
+    for _ in range(40000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+        except ValueError:
+            continue
+
+        if phase == 0 and prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr == data_addr:
+            dut.BERRn.value = 0
+            dut.HALT_INn.value = 0
+            phase = 1
+        elif phase == 1 and as_n == 1:
+            # Terminated. Negate BERR but keep holding HALT.
+            dut.BERRn.value = 1
+            phase = 2
+        elif phase == 2:
+            if as_n == 0:
+                as_low_while_halted += 1
+            held += 1
+            if held >= hold_clocks:
+                dut.HALT_INn.value = 1
+                phase = 3
+
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert phase == 3, f"Retry sequence did not complete, stuck in phase {phase}"
+    assert as_low_while_halted == 0, (
+        f"Bus cycle began before HALT was negated: ASn low for "
+        f"{as_low_while_halted} of {hold_clocks} held clocks"
+    )
+    assert found, "Retry test did not complete after HALT negation"
+    assert h.mem.read(res, 4) == expected, (
+        f"Retried read data mismatch: expected 0x{expected:08X}, "
+        f"got 0x{h.mem.read(res, 4):08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_late_berr_after_dsack_faults(dut):
+    """UM Table 7-8 case 4: BERR one clock after DSACK still terminates in error.
+
+    The read is aligned, so DSACK terminates the whole transfer in one
+    sub-cycle and the fault lands on the edge the transfer completes on.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x200
+    res = h.RESULT_BASE + 0xF0
+    berr_handler = 0x000780
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 0),          # faulted read
+        *moveq(0x5A, 1),
+        *move_to_abs_long(LONG, DN, 1, res),    # must not run
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x89ABCDEF)
+    await h.setup(program)
+
+    h.mem.load_long(2 * 4, berr_handler)
+    h.mem.load_words(
+        berr_handler,
+        [
+            *moveq(0x6E, 2),
+            *move_to_abs_long(LONG, DN, 2, res + 4),
+            *h.sentinel_program(),
+        ],
+    )
+
+    injected = False
+    found = False
+
+    for _ in range(40000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            dsack = int(dut.DSACKn.value)
+        except ValueError:
+            continue
+
+        if not injected and as_n == 0 and rw_n == 1 and addr == data_addr and dsack != 0b11:
+            # DSACK was asserted one clock ago (state N); assert BERR now so it
+            # is sampled in state N + 2, the late-BERR case.
+            dut.BERRn.value = 0
+            injected = True
+        elif injected and as_n == 1:
+            dut.BERRn.value = 1
+
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert injected, "Never injected a late BERR on the target read"
+    assert found, "Test did not complete"
+    assert h.mem.read(res + 4, 4) == 0x0000006E, (
+        "Bus-error handler did not run: late BERR was dropped and the core "
+        f"consumed uncorrected data (res+4=0x{h.mem.read(res + 4, 4):08X})"
+    )
+    assert h.mem.read(res, 4) != 0x0000005A, (
+        "Faulted read continued into the following store"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_avec_ignored_outside_iack_cycle(dut):
+    """UM 7.4.1.2: AVEC only terminates interrupt acknowledge cycles.
+
+    Many systems ground AVEC permanently. AVECn reaches the bus interface
+    only while the exception handler is busy, so the exposed cycles are the
+    frame writes: with the stack placed so they carry the interrupt
+    acknowledge type field in A19:A16, they must still wait for DSACK.
+    """
+    h = CPUTestHarness(dut, wait_states=3)
+    stack_top = 0x000F8000  # frame writes land at 0x000F7FFx -> A19:A16 = $F
+    marker = 0x0000005A
+    handler = 0x000700
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),   # A7 = supervisor stack in $000Fxxxx
+        *imm_long(stack_top),
+        *trap(0),
+        *moveq(0x33, 3),
+        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE + 4),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+
+    h.mem.load_long(32 * 4, handler)           # TRAP #0 -> vector 32
+    h.mem.load_words(handler, [
+        *moveq(marker, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *rte(),
+    ])
+
+    dut.AVECn.value = 0  # Grounded, as on many boards.
+
+    found = await h.run_until_sentinel(max_cycles=20000)
+    assert found, (
+        "Sentinel not reached: a grounded AVEC mis-terminated an exception "
+        "frame write"
+    )
+    assert h.read_result_long(0) == marker, (
+        f"TRAP handler marker wrong: got 0x{h.read_result_long(0):08X}")
+    assert h.read_result_long(4) == 0x00000033, (
+        "RTE did not return correctly: exception frame was corrupted "
+        f"(got 0x{h.read_result_long(4):08X})")
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_bus_fault_info_held_until_exception_entry(dut):
+    """The fault SSW must survive until the exception handler captures it.
+
+    A queued prefetch runs in the clocks between the fault and the handler
+    leaving its idle state. It must not recapture SSW_80, or the stacked
+    frame reports the prefetch (FC = 6, DF clear) instead of the faulted
+    data access (FC = 5, DF set).
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x240
+    berr_handler = 0x0007A0
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 0),          # faulted supervisor data read
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+
+    h.mem.load_long(2 * 4, berr_handler)
+    h.mem.load_words(berr_handler, h.sentinel_program())
+
+    bi = dut.I_BUS_IF
+    injected = False
+    samples = []
+    found = False
+
+    for _ in range(20000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            ssw = int(bi.SSW_80.value)
+            busy_exh = int(bi.BUSY_EXH.value)
+        except ValueError:
+            continue
+
+        if not injected and as_n == 0 and rw_n == 1 and addr == data_addr:
+            dut.BERRn.value = 0
+            injected = True
+        elif injected and as_n == 1:
+            dut.BERRn.value = 1
+
+        # From the cycle DF is first set, record until the handler engages.
+        if (samples or (ssw >> 8) & 1) and not busy_exh:
+            samples.append(ssw)
+        elif samples and busy_exh:
+            break
+
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert injected, "Never injected BERR on the target read"
+    assert samples, "SSW never reported a data fault"
+    bad = [s for s in samples if ((s >> 8) & 1) == 0 or (s & 0x7) != 0b101]
+    assert not bad, (
+        "Fault info was overwritten before exception entry: "
+        f"saw SSW {[hex(s) for s in samples]}, expected DF set and FC = 5 "
+        f"throughout ({len(bad)} bad of {len(samples)} clocks)"
+    )
+    h.cleanup()
+
+
+# ===================================================================
+# 6. Reset Operation (UM 7.8)
+# ===================================================================
+
+async def _bringup_reset_only(dut, h, program):
+    """Bring the CPU up driving RESET_INn alone, with HALT_INn left negated.
+
+    This is what a standard MC68030 reset circuit does: HALT is an input the
+    reset logic never touches, so it sits pulled up.
+    """
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    h._init_idle_inputs()
+    h._load_memory(program)
+    await RisingEdge(dut.CLK)
+    await RisingEdge(dut.CLK)
+
+    dut.RESET_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+
+    h.bus = BusModel(dut, h.mem, h.wait_states)
+    await h.bus.start()
+
+    dut.RESET_INn.value = 1
+    await ClockCycles(dut.CLK, 4)
+
+
+@cocotb.test()
+async def test_external_reset_without_halt(dut):
+    """UM 7.8: RESET alone resets the processor logic; HALT is not involved."""
+    h = CPUTestHarness(dut)
+    await _bringup_reset_only(dut, h, _arithmetic_program(h))
+
+    assert int(dut.HALT_INn.value) == 1, "HALT_INn must stay negated in this test"
+
+    found = await h.run_until_sentinel(max_cycles=4000)
+    assert found, "CPU never ran: RESET alone did not reset the core"
+    assert h.read_result_long(0) == EXPECTED_D0, (
+        f"D0: expected {EXPECTED_D0}, got 0x{h.read_result_long(0):08X}")
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_repeated_external_reset_without_halt(dut):
+    """A later RESET-only assertion must reset the core again (UM 7.8)."""
+    h = CPUTestHarness(dut)
+    await _bringup_reset_only(dut, h, _arithmetic_program(h))
+    assert await h.run_until_sentinel(max_cycles=4000), "first run did not complete"
+
+    # Clear the completion markers, then pulse RESET only.
+    h.mem.load_long(h.SENTINEL_ADDR, 0)
+    h.mem.load_long(h.RESULT_BASE, 0)
+    dut.RESET_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+    dut.RESET_INn.value = 1
+    await ClockCycles(dut.CLK, 4)
+
+    found = await h.run_until_sentinel(max_cycles=6000)
+    assert found, "CPU did not restart after a second RESET-only assertion"
+    assert h.read_result_long(0) == EXPECTED_D0, (
+        f"D0 after re-reset: expected {EXPECTED_D0}, "
+        f"got 0x{h.read_result_long(0):08X}")
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_reset_instruction_does_not_reset_core(dut):
+    """UM 5.8.1/7.8: RESET resets external devices only, never the core itself.
+
+    RESET_OUT and RESET_INn share one open-drain net in a real system, so the
+    core sees its own assertion on RESET_INn and must ignore it.
+    """
+    h = CPUTestHarness(dut)
+    counter = h.RESULT_BASE
+    program = [
+        *move(LONG, SPECIAL, ABS_L, DN, 0),      # D0 = run counter
+        *abs_long(counter),
+        *addq(LONG, 1, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, counter),
+        0x4E70,                                   # RESET
+        *h.sentinel_program(),
+    ]
+    await _bringup_reset_only(dut, h, program)
+
+    found = False
+    saw_reset_out = False
+    for _ in range(40000):
+        await RisingEdge(dut.CLK)
+        try:
+            reset_out = int(dut.RESET_OUT.value)
+        except ValueError:
+            reset_out = 0
+        dut.RESET_INn.value = 0 if reset_out else 1
+        saw_reset_out |= bool(reset_out)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert saw_reset_out, "RESET instruction never asserted RESET_OUT"
+    assert found, "core reset itself from its own RESET instruction output"
+    runs = h.read_result_long(0)
+    assert runs == 1, f"program ran {runs} times; RESET restarted the core"
     h.cleanup()
