@@ -96,8 +96,9 @@ always_ff @(posedge CLK) begin : cbreq_latch
         CBREQ_REQ_LATCH <= 1'b0;
     end else if (!BUS_BSY) begin
         CBREQ_REQ_LATCH <= CBREQ_REQ_NOW;
-    end else if (!CBACKn) begin
+    end else if (!CBACKn || CACHE_INHIBIT_IN) begin
         // In this surface model, a burst acknowledge consumes the request.
+        // UM 6.1.3.1: CIIN also negates CBREQ, aborting the burst.
         CBREQ_REQ_LATCH <= 1'b0;
     end
 end

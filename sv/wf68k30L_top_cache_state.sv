@@ -29,6 +29,7 @@ module WF68K30L_TOP_CACHE_STATE (
     input  logic        DATA_VALID_BUSIF,
     input  logic        OPCODE_VALID_BUSIF,
     input  logic        BERRn,
+    input  logic        CACHE_INHIBIT_IN,
     input  logic        CBACKn,
     input  logic        BUS_CYCLE_BURST,
     input  logic [15:0] OPCODE_TO_CORE_BUSIF,
@@ -323,7 +324,7 @@ always_ff @(posedge CLK) begin : cache_registers
             DCACHE_WRITE_PENDING <= 1'b0;
         end
 
-        if (OPCODE_RDY_BUSIF && OPCODE_VALID_BUSIF && BERRn &&
+        if (OPCODE_RDY_BUSIF && OPCODE_VALID_BUSIF && BERRn && !CACHE_INHIBIT_IN &&
             ICACHE_FILL_PENDING && ICACHE_FILL_CACHEABLE && CACR[0] && !CACR[1]) begin
             fill_line = ICACHE_FILL_ADDR[7:4];
             fill_word = ICACHE_FILL_ADDR[3:1];
@@ -374,7 +375,7 @@ always_ff @(posedge CLK) begin : cache_registers
             end
         end
 
-        if (DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn &&
+        if (DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn && !CACHE_INHIBIT_IN &&
             DCACHE_READ_FILL_PENDING && DCACHE_READ_FILL_CACHEABLE &&
             CACR[8] && !CACR[9] && DCACHE_READ_FILL_SIZE == LONG && DCACHE_READ_FILL_ADDR[1:0] == 2'b00) begin
             dcache_line = DCACHE_READ_FILL_ADDR[7:4];
@@ -426,6 +427,23 @@ always_ff @(posedge CLK) begin : cache_registers
             end
         end
 
+        // UM 6.1.3.1: CIIN on any cycle of a burst keeps that cycle's data out
+        // of the cache and aborts the burst; the data still reaches the core.
+        if (CACHE_INHIBIT_IN) begin
+            if (OPCODE_RDY_BUSIF && ICACHE_FILL_PENDING) begin
+                ICACHE_BURST_TRACK_VALID <= 1'b0;
+                ICACHE_BURST_FILL_VALID <= 1'b0;
+                ICACHE_BURST_FILL_PENDING <= 8'h00;
+            end
+            if (DATA_RDY_BUSIF && DCACHE_READ_FILL_PENDING) begin
+                DCACHE_BURST_TRACK_VALID <= 1'b0;
+                DCACHE_BURST_FILL_VALID <= 1'b0;
+                DCACHE_BURST_FILL_PENDING <= 4'h0;
+            end
+        end
+
+        // UM 5.7.1: CIIN is ignored during write cycles, so the write path is
+        // not gated on it.
         if (DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn &&
             DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE && CACR[8]) begin
             dcache_line = DCACHE_WRITE_ADDR[7:4];

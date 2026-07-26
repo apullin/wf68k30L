@@ -79,6 +79,7 @@ logic        CAAR_WR;
 logic [31:0] CACR;
 logic        CACR_RD;
 logic        CACR_WR;
+logic        CACHE_INHIBIT_IN;
 logic        CPU_SPACE;
 logic        CPU_SPACE_EXH;
 logic [2:0]  DFC;

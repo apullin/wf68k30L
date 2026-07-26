@@ -50,6 +50,8 @@ module WF68K30L_BUS_INTERFACE (
     output logic        DBENn,
 
     input  logic        STERMn,
+    input  logic        CIINn,
+    output logic        CACHE_INHIBIT_IN,
 
     input  logic        BRn,
     input  logic        BGACKn,
@@ -128,6 +130,7 @@ logic [2:0]         SLICE_CNT_P;
 logic               SSW_FROZEN;
 logic               STARTUP = 1'b0;
 logic               STERM_In;
+logic               CIIN_In;
 TIME_SLICES         T_SLICE;
 logic               WAITSTATES;
 logic [31:0]        WP_BUFFER;
@@ -147,6 +150,7 @@ always_ff @(negedge CLK) begin : sync_bus_termination
     HALT_In <= HALTn;
     BUS_FLT_VAR <= ~BERRn;
     STERM_In <= STERMn;
+    CIIN_In <= CIINn;
     BR_In <= BRn;
     BGACK_In <= BGACKn;
     AVEC_In <= AVECn;
@@ -200,6 +204,21 @@ always_ff @(posedge CLK) begin : access_type
         WRITE_ACCESS <= 1'b0;
         OPCODE_ACCESS <= 1'b0;
     end
+end
+
+// ---- Cache inhibit input ----
+// UM 5.7.1: CIIN is a synchronous input interpreted on a bus-cycle-by-bus-cycle
+// basis. UM 7.4.1 requires it to be stable at every rising edge while AS is
+// asserted, so accumulating it over that window yields the value the UM's single
+// S4 / STERM-recognition edge would, without depending on which slice this model
+// calls the termination point. The accumulation also spans every sub-cycle of a
+// transfer, as UM 6.1.3.1 requires: an entry with any non-cachable part must not
+// be cached at all.
+always_ff @(posedge CLK) begin : ciin_sample
+    if (RESET_CPU_I || BUS_CTRL_STATE == START_CYCLE)
+        CACHE_INHIBIT_IN <= 1'b0;
+    else if (BUS_CTRL_STATE == DATA_C1C4 && SLICE_S0_TO_S4)
+        CACHE_INHIBIT_IN <= CACHE_INHIBIT_IN || !CIIN_In;
 end
 
 // ---- Special Status Word (SSW) and exception buffers ----

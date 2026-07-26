@@ -51,6 +51,7 @@ module WF68K30L_CPU_WRAPPER #(
 
     // Synchronous bus control.
     input  logic        CBACKn,
+    input  logic        CIINn,
     input  logic        STERMn,
 
     // Cache/status sideband.
@@ -147,6 +148,7 @@ WF68K30L_TOP #(
     .BUS_EN(BUS_EN),
 
     .CBACKn(CBACKn),
+    .CIINn(CIINn),
     .STERMn(STERMn),
 
     .STATUSn(STATUSn),
