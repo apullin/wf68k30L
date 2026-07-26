@@ -6,6 +6,7 @@ DC-4 (TRAPcc reserved opmode).
 import cocotb
 from cocotb.triggers import RisingEdge, ClockCycles
 
+import m68k_encode as enc
 from cpu_harness import CPUTestHarness
 from bus_model import BusModel
 
@@ -45,13 +46,10 @@ async def _run(h, program, handlers=(), cycles=6000):
     return False
 
 
-@cocotb.test()
-async def test_rtd_stack_adjust(dut):
-    """RTD #4: SP must end at entry_SP + 4 (PC pop) + 4 (displacement)."""
+async def _rtd_case(dut, disp):
+    """JSR to a stub that does RTD #disp; return the resulting A7."""
     h = CPUTestHarness(dut)
-    sub = [
-        0x4E74, 0x0004,              # RTD #4
-    ]
+    h.mem.load_words(0x800, enc.rtd(disp))
     program = [
         0x2E7C, 0x0000, 0x1000,      # MOVEA.L #$1000,A7
         0x4EB9, 0x0000, 0x0800,      # JSR ($800).L     -> pushes 4, SP=0xFFC
@@ -59,12 +57,47 @@ async def test_rtd_stack_adjust(dut):
         0x23CF, 0x0002, 0x0000,      # MOVE.L A7,($20000).L
         *SENTINEL, 0x60FE,
     ]
-    h.mem.load_words(0x800, sub)
     assert await _run(h, program), "program did not complete"
-    sp = h.mem.read(RES, 4)
+    return h.mem.read(RES, 4)
+
+
+@cocotb.test()
+async def test_rtd_stack_adjust(dut):
+    """RTD #4: SP must end at entry_SP + 4 (PC pop) + 4 (displacement)."""
+    sp = await _rtd_case(dut, 4)
     assert sp == 0x1004, (
         f"After JSR then RTD #4: A7=0x{sp:08X}, expected 0x00001004 "
         f"(0x1000 - 4 pushed, then +4 popped +4 displacement)"
+    )
+
+
+@cocotb.test()
+async def test_rtd_zero_displacement(dut):
+    """RTD #0 must behave exactly like RTS: SP + 4 + 0."""
+    sp = await _rtd_case(dut, 0)
+    assert sp == 0x1000, (
+        f"After JSR then RTD #0: A7=0x{sp:08X}, expected 0x00001000 "
+        f"(pure PC pop, no deallocation)"
+    )
+
+
+@cocotb.test()
+async def test_rtd_negative_displacement(dut):
+    """RTD #-8: the displacement is sign-extended, so SP + 4 - 8."""
+    sp = await _rtd_case(dut, -8)
+    assert sp == 0x0FF8, (
+        f"After JSR then RTD #-8: A7=0x{sp:08X}, expected 0x00000FF8 "
+        f"(0xFFC + 4 popped - 8; 16-bit displacement is sign-extended)"
+    )
+
+
+@cocotb.test()
+async def test_rtd_large_displacement(dut):
+    """RTD #$1000: full 16-bit positive displacement range."""
+    sp = await _rtd_case(dut, 0x1000)
+    assert sp == 0x2000, (
+        f"After JSR then RTD #$1000: A7=0x{sp:08X}, expected 0x00002000 "
+        f"(0xFFC + 4 popped + 0x1000)"
     )
 
 

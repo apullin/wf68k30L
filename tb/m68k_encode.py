@@ -952,6 +952,15 @@ def rte():
     return [0x4E73]
 
 
+def rtd(disp):
+    """RTD #<displacement> - Return and Deallocate.
+
+    Encoding: 0100 1110 0111 0100 = 0x4E74, then a 16-bit displacement.
+    Operation: (SP) -> PC; SP + 4 + dn -> SP.
+    """
+    return [0x4E74, _w(disp)]
+
+
 def rtr():
     """RTR - Return and Restore Condition Codes.
 
