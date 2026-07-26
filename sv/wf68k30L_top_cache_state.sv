@@ -190,6 +190,8 @@ always_ff @(posedge CLK) begin : cache_registers
     logic [3:0]  dcache_valid_after;
     logic [3:0]  dcache_burst_pending_after;
     logic        dcache_hit;
+    logic [31:0] dcache_write_end;
+    logic        dcache_write_spans;
     if (RESET_CPU) begin
         CACR <= 32'h0;
         CAAR <= 32'h0;
@@ -421,19 +423,21 @@ always_ff @(posedge CLK) begin : cache_registers
         end
 
         if (DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn &&
-            DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE &&
-            CACR[8] && dcache_access_supported(DCACHE_WRITE_SIZE, DCACHE_WRITE_ADDR[1:0])) begin
+            DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE && CACR[8]) begin
             dcache_line = DCACHE_WRITE_ADDR[7:4];
             dcache_entry = DCACHE_WRITE_ADDR[3:2];
             dcache_tag = DCACHE_WRITE_ADDR[31:8];
             dcache_hit = (DCACHE_TAG[dcache_line] == dcache_tag) && DCACHE_VALID[dcache_line][dcache_entry];
+            dcache_write_end = DCACHE_WRITE_ADDR + {30'd0, dcache_size_last_byte(DCACHE_WRITE_SIZE)};
+            dcache_write_spans = (dcache_write_end[31:2] != DCACHE_WRITE_ADDR[31:2]);
             if (dcache_hit) begin
                 if (DCACHE_WRITE_SIZE == LONG && DCACHE_WRITE_ADDR[1:0] == 2'b00) begin
                     DCACHE_RAM_WR_EN <= 1'b1;
                     DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
                     DCACHE_RAM_WR_DATA <= DCACHE_WRITE_DATA;
                     DCACHE_VALID[dcache_line][dcache_entry] <= 1'b1;
-                end else if (DCACHE_MERGE_RDY) begin
+                end else if (DCACHE_MERGE_RDY &&
+                             dcache_access_supported(DCACHE_WRITE_SIZE, DCACHE_WRITE_ADDR[1:0])) begin
                     DCACHE_RAM_WR_EN <= 1'b1;
                     DCACHE_RAM_WR_ADDR <= {dcache_line, dcache_entry};
                     DCACHE_RAM_WR_DATA <= dcache_write_merge(
@@ -446,7 +450,17 @@ always_ff @(posedge CLK) begin : cache_registers
                 end else begin
                     DCACHE_VALID[dcache_line][dcache_entry] <= 1'b0;
                 end
-            end else if (CACR[13] && !CACR[9] && DCACHE_WRITE_SIZE == LONG && DCACHE_WRITE_ADDR[1:0] == 2'b00) begin
+            end
+
+            // A misaligned transfer spans a second entry, hit or miss
+            // independently of the first (UM 6.1.2).
+            if (dcache_write_spans &&
+                DCACHE_TAG[dcache_write_end[7:4]] == dcache_write_end[31:8]) begin
+                DCACHE_VALID[dcache_write_end[7:4]][dcache_write_end[3:2]] <= 1'b0;
+            end
+
+            if (!dcache_hit &&
+                CACR[13] && !CACR[9] && DCACHE_WRITE_SIZE == LONG && DCACHE_WRITE_ADDR[1:0] == 2'b00) begin
                 if (DCACHE_TAG[dcache_line] != dcache_tag)
                     DCACHE_VALID[dcache_line] <= 4'h0;
                 DCACHE_TAG[dcache_line] <= dcache_tag;

@@ -550,6 +550,64 @@ async def test_dcache_write_hit_updates_entry(dut):
 
 
 @cocotb.test()
+async def test_dcache_misaligned_write_invalidates_overlapping_entry(dut):
+    """ED=1: a misaligned long write must not leave a stale hit on the entry it overlaps."""
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x400        # Aligned entry that gets cached.
+    write_addr = data_addr - 2             # Misaligned long spanning into data_addr.
+    res = h.RESULT_BASE + 0x68
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0100),                    # ED=1
+        *movec_dn_to_cr(0, CR_CACR),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # miss/fill entry for data_addr
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(0x1122_3344),
+        *move_to_abs_long(LONG, DN, 2, write_addr),  # misaligned write over data_addr[0:1]
+        *move(LONG, AN_IND, 0, DN, 3),             # must not be served from the stale entry
+        *move_to_abs_long(LONG, DN, 3, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(write_addr, 0x0000_0000)
+    h.mem.load_long(data_addr, 0xAABB_CCDD)
+    await h.setup(program)
+
+    found = False
+    prev_as_n = 1
+    data_reads = 0
+    for _ in range(28000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+        except ValueError:
+            continue
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and int(dut.ADR_OUT.value) == data_addr:
+            data_reads += 1
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, "D-cache misaligned-write invalidation test did not complete"
+    # The write put 0x33,0x44 over the first two bytes of the cached longword.
+    assert h.mem.read(data_addr, 4) == 0x3344_CCDD, (
+        f"Memory not updated as expected, got 0x{h.mem.read(data_addr, 4):08X}"
+    )
+    assert h.mem.read(res, 4) == 0x3344_CCDD, (
+        f"Post-write read returned pre-write bytes, got 0x{h.mem.read(res, 4):08X}"
+    )
+    assert data_reads == 2, (
+        f"Expected the overlapped entry to be invalidated and refetched, saw {data_reads} reads"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
 async def test_dcache_wa_allocates_on_write_miss(dut):
     """ED=1,WA=1: aligned long write miss allocates; following read should hit."""
     h = CPUTestHarness(dut)
