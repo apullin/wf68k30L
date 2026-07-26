@@ -814,12 +814,15 @@ always_comb begin : cond_codes_comb
     endcase
 
     // Multiplication flags
-    if (OP_SIZE == LONG && BIW_1[10] && RESULT_MUL[63])
-        NFLAG_MUL_sig = 1'b1;
-    else if (RESULT_MUL[31])
-        NFLAG_MUL_sig = 1'b1;
+    // The 64-bit long form reports N and Z over the whole quad-word product;
+    // every other form reports them over the returned 32 bits. Falling through
+    // to the 32-bit test when the 64-bit test happens to be false made the
+    // low half decide the flags of a 64-bit product: 0x80000000 * 1 in the
+    // Dh:Dl form set N even though bit 63 of the product is clear.
+    if (OP_SIZE == LONG && BIW_1[10])
+        NFLAG_MUL_sig = RESULT_MUL[63];
     else
-        NFLAG_MUL_sig = 1'b0;
+        NFLAG_MUL_sig = RESULT_MUL[31];
 
     if (OP_SIZE == LONG && !BIW_1[10] && OP == MULS && !RESULT_MUL[31] && RESULT_MUL[63:32] != 32'h0)
         VFLAG_MUL_sig = 1'b1;
@@ -863,12 +866,13 @@ always_comb begin : cond_codes_comb
         EXT, EXTB, MOVE, SWAP, TST:
             Z = compute_z_sized(RESULT_OTHERS, OP_SIZE);
         MULS, MULU: begin
-            if (OP_SIZE == LONG && BIW_1[10] && RESULT_MUL == 64'h0)
-                Z = 1'b1;
-            else if (RESULT_MUL[31:0] == 32'h0)
-                Z = 1'b1;
+            // Same rule as the N flag above: the Dh:Dl form tests all 64 bits,
+            // and must not fall through to the 32-bit test, which would set Z
+            // for 0x00000001_00000000.
+            if (OP_SIZE == LONG && BIW_1[10])
+                Z = (RESULT_MUL == 64'h0);
             else
-                Z = 1'b0;
+                Z = (RESULT_MUL[31:0] == 32'h0);
         end
         TAS:
             Z = compute_z_sized(OP2_SIGNEXT, OP_SIZE);

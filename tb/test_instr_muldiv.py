@@ -1,7 +1,9 @@
 """
 Multiply/divide instruction compliance tests for WF68K30L.
 
-Tests MULU.W, MULS.W, DIVU.W, DIVS.W against the MC68030 specification.
+Tests MULU.W, MULS.W, DIVU.W, DIVS.W and the MC68020+ 32-bit forms
+MULU.L, MULS.L, DIVU.L, DIVS.L, DIVUL.L and DIVSL.L against the MC68030
+specification.
 
 Multiply (MULS/MULU):
   - 16-bit source * 16-bit low word of Dn -> 32-bit result in Dn
@@ -33,8 +35,9 @@ from cpu_harness import CPUTestHarness
 from m68k_encode import (
     BYTE, WORD, LONG,
     DN, AN, AN_IND, SPECIAL, IMMEDIATE,
-    moveq, move, movea, nop, addq,
+    moveq, move, movea, move_to_abs_long, nop, addq,
     muls_w, mulu_w, divs_w, divu_w,
+    muls_l, mulu_l, divs_l, divu_l,
     move_from_ccr, move_to_ccr,
     imm_long, imm_word,
 )
@@ -1156,4 +1159,574 @@ async def test_divs_neg_overflow(dut):
     )
     ccr = h.read_result_long(4)
     assert_flags("DIVS neg overflow", ccr, cc_divs(0, True))
+    h.cleanup()
+
+
+# =========================================================================
+# MULU.L / MULS.L / DIVU.L / DIVS.L / DIVUL.L / DIVSL.L
+#
+# The 0x4C00 (MUL) and 0x4C40 (DIV) decode paths and the register-pair forms
+# had no instruction-level coverage: the divider and the 64-bit multiplier were
+# exercised only by driving the ALU ports directly, so nothing had ever fetched
+# and decoded one of these opcodes.
+#
+# PRM MULU/MULS: "In the long form, the multiplier and multiplicand are both
+# long-word operands, and the result is either a long word or a quad word."
+# "Overflow (V = 1) can occur only when multiplying 32-bit operands to yield a
+# 32-bit result.  Overflow occurs if any of the high-order 32 bits of the
+# quad-word product are not equal to zero."  (For MULS the test is against the
+# sign extension of the low half rather than against zero.)
+#
+# PRM DIVS/DIVU size field: "0 - 32-bit dividend is in register Dq.  1 - 64-bit
+# dividend is in Dr - Dq."  And on Dr: "After the division, this register
+# contains the 32-bit remainder.  If Dr and Dq are the same register, only the
+# quotient is returned."
+#
+# Every expected value below was cross-checked against
+# `qemu-system-m68k -cpu m68030`.
+# =========================================================================
+
+def _load_long_reg(dn, value):
+    return [*move(LONG, SPECIAL, IMMEDIATE, DN, dn), *imm_long(value)]
+
+
+async def _run_muldiv_l(dut, setup, instr, capture_regs, budget=8000):
+    """Run a long-form multiply/divide and return (register values, ccr)."""
+    h = CPUTestHarness(dut)
+    words = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0), *imm_long(h.RESULT_BASE),
+        *setup,
+        *instr,
+        *nop(), *nop(),
+        *move_from_ccr(DN, 6),
+    ]
+    for dn in capture_regs:
+        words += [*move(LONG, DN, dn, AN_IND, 0), *addq(LONG, 4, AN, 0)]
+    words += [*move(LONG, DN, 6, AN_IND, 0), *addq(LONG, 4, AN, 0)]
+    words += h.sentinel_program()
+    await h.setup(words)
+    found = await h.run_until_sentinel(max_cycles=budget)
+    assert found, "Sentinel not reached"
+    values = [h.read_result_long(4 * i) for i in range(len(capture_regs))]
+    ccr = h.read_result_long(4 * len(capture_regs))
+    h.cleanup()
+    return values, ccr
+
+
+# ---- MULU.L / MULS.L, 32x32 -> 32 ----------------------------------------
+
+@cocotb.test()
+async def test_mulu_l_32x32_to_32(dut):
+    """MULU.L D2,D0: 100 * 200 = 20000 in D0, no overflow."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 100) + _load_long_reg(2, 200),
+        mulu_l(DN, 2, 0), [0])
+    assert vals[0] == 20000, f"expected 20000, got 0x{vals[0]:08X}"
+    assert_flags("MULU.L 100*200", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_mulu_l_32x32_to_32_overflow(dut):
+    """MULU.L 0x10000 * 0x10000: the low 32 bits are zero and V is set.
+
+    The high half of the quad-word product is nonzero, so V=1; the returned
+    32-bit result is zero, so Z=1 as well.
+    """
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0x10000) + _load_long_reg(2, 0x10000),
+        mulu_l(DN, 2, 0), [0])
+    assert vals[0] == 0x00000000, f"expected 0, got 0x{vals[0]:08X}"
+    assert_flags("MULU.L overflow", ccr,
+                 {'x': None, 'n': 0, 'z': 1, 'v': 1, 'c': 0})
+
+
+@cocotb.test()
+async def test_mulu_l_32x32_to_32_overflow_negative_looking(dut):
+    """MULU.L 0xFFFFFFFF * 2 = 0x1_FFFFFFFE: V=1, N from the returned half."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFFFF) + _load_long_reg(2, 2),
+        mulu_l(DN, 2, 0), [0])
+    assert vals[0] == 0xFFFFFFFE, f"expected 0xFFFFFFFE, got 0x{vals[0]:08X}"
+    assert_flags("MULU.L 0xFFFFFFFF*2", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 1, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_32x32_to_32_negative(dut):
+    """MULS.L D2,D0: -2 * 3 = -6, in range so V=0."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFFFE) + _load_long_reg(2, 3),
+        muls_l(DN, 2, 0), [0])
+    assert vals[0] == 0xFFFFFFFA, f"expected 0xFFFFFFFA, got 0x{vals[0]:08X}"
+    assert_flags("MULS.L -2*3", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_32x32_to_32_two_negatives(dut):
+    """MULS.L -1 * -1 = 1."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFFFF) + _load_long_reg(2, 0xFFFFFFFF),
+        muls_l(DN, 2, 0), [0])
+    assert vals[0] == 1, f"expected 1, got 0x{vals[0]:08X}"
+    assert_flags("MULS.L -1*-1", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_32x32_to_32_overflow(dut):
+    """MULS.L 0x40000000 * 4 = 0x1_00000000: out of signed 32-bit range, V=1."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0x40000000) + _load_long_reg(2, 4),
+        muls_l(DN, 2, 0), [0])
+    assert vals[0] == 0x00000000, f"expected 0, got 0x{vals[0]:08X}"
+    assert_flags("MULS.L overflow", ccr,
+                 {'x': None, 'n': 0, 'z': 1, 'v': 1, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_32x32_to_32_zero(dut):
+    """MULS.L 0 * -5 = 0 with Z=1 and no overflow."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0) + _load_long_reg(2, 0xFFFFFFFB),
+        muls_l(DN, 2, 0), [0])
+    assert vals[0] == 0, f"expected 0, got 0x{vals[0]:08X}"
+    assert_flags("MULS.L 0*-5", ccr,
+                 {'x': None, 'n': 0, 'z': 1, 'v': 0, 'c': 0})
+
+
+# ---- MULU.L / MULS.L, 32x32 -> 64 ---------------------------------------
+
+@cocotb.test()
+async def test_mulu_l_64bit_product(dut):
+    """MULU.L D2,D1:D0 with 0x10000 * 0x10000 = 0x00000001_00000000."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0x10000) + _load_long_reg(2, 0x10000),
+        mulu_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0x00000000, f"Dl expected 0, got 0x{vals[0]:08X}"
+    assert vals[1] == 0x00000001, f"Dh expected 1, got 0x{vals[1]:08X}"
+    # The 64-bit form cannot overflow, and Z/N are taken from all 64 bits.
+    assert_flags("MULU.L 64-bit", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_mulu_l_64bit_product_max(dut):
+    """MULU.L 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE_00000001."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFFFF) + _load_long_reg(2, 0xFFFFFFFF),
+        mulu_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0x00000001, f"Dl expected 1, got 0x{vals[0]:08X}"
+    assert vals[1] == 0xFFFFFFFE, f"Dh expected 0xFFFFFFFE, got 0x{vals[1]:08X}"
+    assert_flags("MULU.L 64-bit max", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_64bit_product_negative(dut):
+    """MULS.L D2,D1:D0 with -2 * 3 = 0xFFFFFFFF_FFFFFFFA.
+
+    The upper half must be the sign extension, not a zero-extended product;
+    audit finding A2 was exactly this case computing 0x00000002 in Dh.
+    """
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFFFE) + _load_long_reg(2, 3),
+        muls_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0xFFFFFFFA, f"Dl expected 0xFFFFFFFA, got 0x{vals[0]:08X}"
+    assert vals[1] == 0xFFFFFFFF, f"Dh expected 0xFFFFFFFF, got 0x{vals[1]:08X}"
+    assert_flags("MULS.L 64-bit -2*3", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_64bit_product_two_negatives(dut):
+    """MULS.L -1 * -1 = 0x00000000_00000001 in the 64-bit form."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFFFF) + _load_long_reg(2, 0xFFFFFFFF),
+        muls_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0x00000001, f"Dl expected 1, got 0x{vals[0]:08X}"
+    assert vals[1] == 0x00000000, f"Dh expected 0, got 0x{vals[1]:08X}"
+    assert_flags("MULS.L 64-bit -1*-1", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_64bit_product_large_positive(dut):
+    """MULS.L 0x7FFFFFFF * 0x7FFFFFFF = 0x3FFFFFFF_00000001."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0x7FFFFFFF) + _load_long_reg(2, 0x7FFFFFFF),
+        muls_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0x00000001, f"Dl expected 1, got 0x{vals[0]:08X}"
+    assert vals[1] == 0x3FFFFFFF, f"Dh expected 0x3FFFFFFF, got 0x{vals[1]:08X}"
+    assert_flags("MULS.L 64-bit large", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_64bit_product_zero_sets_z(dut):
+    """A zero 64-bit product sets Z (all 64 bits are zero)."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0) + _load_long_reg(2, 3),
+        muls_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0 and vals[1] == 0, (
+        f"expected zero, got 0x{vals[1]:08X}_{vals[0]:08X}")
+    assert_flags("MULS.L 64-bit zero", ccr,
+                 {'x': None, 'n': 0, 'z': 1, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_mulu_l_64bit_n_comes_from_bit63_not_bit31(dut):
+    """MULU.L D2,D1:D0 with 0x80000000 * 1 = 0x00000000_80000000 gives N=0.
+
+    N is the MSB of the whole quad-word product.  Bit 31 of the product is set
+    here, so a core that fell back to the 32-bit test would report N=1.
+    """
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0x80000000) + _load_long_reg(2, 1),
+        mulu_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0x80000000, f"Dl expected 0x80000000, got 0x{vals[0]:08X}"
+    assert vals[1] == 0x00000000, f"Dh expected 0, got 0x{vals[1]:08X}"
+    assert_flags("MULU.L 64-bit N from bit 63", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_64bit_n_comes_from_bit63_not_bit31(dut):
+    """MULS.L 0x40000000 * 2 = 0x00000000_80000000 is positive, so N=0."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0x40000000) + _load_long_reg(2, 2),
+        muls_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0x80000000, f"Dl expected 0x80000000, got 0x{vals[0]:08X}"
+    assert vals[1] == 0x00000000, f"Dh expected 0, got 0x{vals[1]:08X}"
+    assert_flags("MULS.L 64-bit N from bit 63", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_muls_l_64bit_negative_product_sets_n(dut):
+    """MULS.L -1 * 0x100000 = 0xFFFFFFFF_FFF00000 sets N from bit 63."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFFFF) + _load_long_reg(2, 0x100000),
+        muls_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0xFFF00000, f"Dl expected 0xFFF00000, got 0x{vals[0]:08X}"
+    assert vals[1] == 0xFFFFFFFF, f"Dh expected 0xFFFFFFFF, got 0x{vals[1]:08X}"
+    assert_flags("MULS.L 64-bit negative", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_mulu_l_64bit_immediate_source(dut):
+    """MULU.L #$10,D1:D0 with D0 = 0x12345678 -> 0x00000001_23456780.
+
+    Exercises the immediate operand of the 0x4C00 decode path.
+    """
+    words = mulu_l(SPECIAL, IMMEDIATE, 0, 1) + imm_long(0x10)
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0x12345678), words, [0, 1])
+    assert vals[0] == 0x23456780, f"Dl expected 0x23456780, got 0x{vals[0]:08X}"
+    assert vals[1] == 0x00000001, f"Dh expected 1, got 0x{vals[1]:08X}"
+    assert_flags("MULU.L #imm 64-bit", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_mulu_l_memory_source(dut):
+    """MULU.L (A1),D0 reads the multiplier from memory."""
+    h = CPUTestHarness(dut)
+    data = h.DATA_BASE
+    words = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0), *imm_long(h.RESULT_BASE),
+        *movea(LONG, SPECIAL, IMMEDIATE, 1), *imm_long(data),
+        *_load_long_reg(0, 1000),
+        *mulu_l(AN_IND, 1, 0),
+        *nop(), *nop(),
+        *move_from_ccr(DN, 6),
+        *move(LONG, DN, 0, AN_IND, 0), *addq(LONG, 4, AN, 0),
+        *move(LONG, DN, 6, AN_IND, 0), *addq(LONG, 4, AN, 0),
+        *h.sentinel_program(),
+    ]
+    await h.setup(words)
+    h.mem.write(data, 4, 3000)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+    assert h.read_result_long(0) == 3000000, (
+        f"expected 3000000, got 0x{h.read_result_long(0):08X}")
+    assert_flags("MULU.L (A1),D0", h.read_result_long(4),
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+    h.cleanup()
+
+
+# ---- DIVU.L / DIVS.L, 32/32 -> 32 quotient -------------------------------
+
+@cocotb.test()
+async def test_divu_l_32_by_32(dut):
+    """DIVU.L D2,D0: 1000 / 7 = 142; the remainder is discarded."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 1000) + _load_long_reg(2, 7),
+        divu_l(DN, 2, 0), [0, 2])
+    assert vals[0] == 142, f"quotient expected 142, got 0x{vals[0]:08X}"
+    assert vals[1] == 7, (
+        f"the divisor register must be untouched, got 0x{vals[1]:08X}")
+    assert_flags("DIVU.L 1000/7", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divu_l_full_range_quotient(dut):
+    """DIVU.L 0xFFFFFFFF / 1 = 0xFFFFFFFF: N follows the quotient's MSB."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFFFF) + _load_long_reg(2, 1),
+        divu_l(DN, 2, 0), [0])
+    assert vals[0] == 0xFFFFFFFF, f"expected 0xFFFFFFFF, got 0x{vals[0]:08X}"
+    assert_flags("DIVU.L 0xFFFFFFFF/1", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divs_l_negative_dividend(dut):
+    """DIVS.L D2,D0: -1000 / 7 = -142."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFC18) + _load_long_reg(2, 7),
+        divs_l(DN, 2, 0), [0])
+    assert vals[0] == 0xFFFFFF72, (
+        f"expected 0xFFFFFF72 (-142), got 0x{vals[0]:08X}")
+    assert_flags("DIVS.L -1000/7", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divs_l_negative_divisor(dut):
+    """DIVS.L D2,D0: 1000 / -7 = -142."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 1000) + _load_long_reg(2, 0xFFFFFFF9),
+        divs_l(DN, 2, 0), [0])
+    assert vals[0] == 0xFFFFFF72, (
+        f"expected 0xFFFFFF72 (-142), got 0x{vals[0]:08X}")
+    assert_flags("DIVS.L 1000/-7", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divs_l_both_negative(dut):
+    """DIVS.L D2,D0: -1000 / -7 = 142."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFC18) + _load_long_reg(2, 0xFFFFFFF9),
+        divs_l(DN, 2, 0), [0])
+    assert vals[0] == 142, f"expected 142, got 0x{vals[0]:08X}"
+    assert_flags("DIVS.L -1000/-7", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+# ---- DIVUL.L / DIVSL.L, 32/32 -> 32 remainder : 32 quotient --------------
+
+@cocotb.test()
+async def test_divul_l_returns_remainder_and_quotient(dut):
+    """DIVUL.L D2,D1:D0 with 1000 / 7 puts 142 in D0 (Dq) and 6 in D1 (Dr)."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 1000) + _load_long_reg(2, 7),
+        divu_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 142, f"quotient expected 142, got 0x{vals[0]:08X}"
+    assert vals[1] == 6, f"remainder expected 6, got 0x{vals[1]:08X}"
+    assert_flags("DIVUL.L 1000/7", ccr,
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divsl_l_remainder_takes_dividend_sign(dut):
+    """DIVSL.L -1000 / 7 = -142 remainder -6.
+
+    PRM DIVS: "The sign of the remainder is the same as the sign of the
+    dividend."
+    """
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 0xFFFFFC18) + _load_long_reg(2, 7),
+        divs_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0xFFFFFF72, f"quotient expected -142, got 0x{vals[0]:08X}"
+    assert vals[1] == 0xFFFFFFFA, f"remainder expected -6, got 0x{vals[1]:08X}"
+    assert_flags("DIVSL.L -1000/7", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divsl_l_positive_dividend_negative_divisor(dut):
+    """DIVSL.L 1000 / -7 = -142 remainder +6 (the dividend is positive)."""
+    vals, ccr = await _run_muldiv_l(
+        dut, _load_long_reg(0, 1000) + _load_long_reg(2, 0xFFFFFFF9),
+        divs_l(DN, 2, 0, 1), [0, 1])
+    assert vals[0] == 0xFFFFFF72, f"quotient expected -142, got 0x{vals[0]:08X}"
+    assert vals[1] == 6, f"remainder expected 6, got 0x{vals[1]:08X}"
+    assert_flags("DIVSL.L 1000/-7", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+# ---- DIVU.L / DIVS.L, 64/32 -> 32 remainder : 32 quotient ----------------
+
+@cocotb.test()
+async def test_divu_l_64_by_32(dut):
+    """DIVU.L D2,D1:D0 with the 64-bit dividend 0x00000001_00000000 / 2.
+
+    Dr (D1) supplies the high half of the dividend and receives the remainder;
+    Dq (D0) supplies the low half and receives the quotient.
+    """
+    vals, ccr = await _run_muldiv_l(
+        dut,
+        _load_long_reg(0, 0x00000000) + _load_long_reg(1, 0x00000001) +
+        _load_long_reg(2, 2),
+        divu_l(DN, 2, 0, 1, size64=True), [0, 1])
+    assert vals[0] == 0x80000000, (
+        f"quotient expected 0x80000000, got 0x{vals[0]:08X}")
+    assert vals[1] == 0x00000000, f"remainder expected 0, got 0x{vals[1]:08X}"
+    assert_flags("DIVU.L 64/32", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divu_l_64_by_32_odd(dut):
+    """DIVU.L 0x00000002_00000001 / 3 = 0xAAAAAAAB remainder 0."""
+    vals, ccr = await _run_muldiv_l(
+        dut,
+        _load_long_reg(0, 0x00000001) + _load_long_reg(1, 0x00000002) +
+        _load_long_reg(2, 3),
+        divu_l(DN, 2, 0, 1, size64=True), [0, 1])
+    assert vals[0] == 0xAAAAAAAB, (
+        f"quotient expected 0xAAAAAAAB, got 0x{vals[0]:08X}")
+    assert vals[1] == 0x00000000, f"remainder expected 0, got 0x{vals[1]:08X}"
+    assert_flags("DIVU.L 64/32 odd", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divs_l_64_by_32_negative(dut):
+    """DIVS.L with the sign-extended 64-bit dividend -1000 / 7 = -142 rem -6."""
+    vals, ccr = await _run_muldiv_l(
+        dut,
+        _load_long_reg(0, 0xFFFFFC18) + _load_long_reg(1, 0xFFFFFFFF) +
+        _load_long_reg(2, 7),
+        divs_l(DN, 2, 0, 1, size64=True), [0, 1])
+    assert vals[0] == 0xFFFFFF72, f"quotient expected -142, got 0x{vals[0]:08X}"
+    assert vals[1] == 0xFFFFFFFA, f"remainder expected -6, got 0x{vals[1]:08X}"
+    assert_flags("DIVS.L 64/32 negative", ccr,
+                 {'x': None, 'n': 1, 'z': 0, 'v': 0, 'c': 0})
+
+
+@cocotb.test()
+async def test_divu_l_64_by_32_overflow_preserves_registers(dut):
+    """DIVU.L 0x00000001_00000000 / 1 overflows: V=1 and both registers survive.
+
+    PRM: "Overflow may be detected and set before the instruction completes.
+    If the instruction detects an overflow, it sets the overflow condition
+    code, and the operands are unaffected."
+    """
+    vals, ccr = await _run_muldiv_l(
+        dut,
+        _load_long_reg(0, 0x00000000) + _load_long_reg(1, 0x00000001) +
+        _load_long_reg(2, 1),
+        divu_l(DN, 2, 0, 1, size64=True), [0, 1])
+    assert vals[0] == 0x00000000, (
+        f"Dq must be unaffected on overflow, got 0x{vals[0]:08X}")
+    assert vals[1] == 0x00000001, (
+        f"Dr must be unaffected on overflow, got 0x{vals[1]:08X}")
+    assert_flags("DIVU.L 64/32 overflow", ccr,
+                 {'x': None, 'n': None, 'z': None, 'v': 1, 'c': 0})
+
+
+@cocotb.test()
+async def test_divs_l_64_by_32_overflow_preserves_registers(dut):
+    """DIVS.L 0x00000001_00000000 / 1 overflows the signed 32-bit quotient."""
+    vals, ccr = await _run_muldiv_l(
+        dut,
+        _load_long_reg(0, 0x00000000) + _load_long_reg(1, 0x00000001) +
+        _load_long_reg(2, 1),
+        divs_l(DN, 2, 0, 1, size64=True), [0, 1])
+    assert vals[0] == 0x00000000, (
+        f"Dq must be unaffected on overflow, got 0x{vals[0]:08X}")
+    assert vals[1] == 0x00000001, (
+        f"Dr must be unaffected on overflow, got 0x{vals[1]:08X}")
+    assert_flags("DIVS.L 64/32 overflow", ccr,
+                 {'x': None, 'n': None, 'z': None, 'v': 1, 'c': 0})
+
+
+@cocotb.test()
+async def test_divu_l_zero_divisor_traps(dut):
+    """DIVU.L by zero takes the zero-divide vector (5)."""
+    h = CPUTestHarness(dut)
+    handler_addr = 0x000A00
+    handler = [
+        *moveq(0x05, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    program = [
+        *moveq(0x33, 1),                      # marker if no trap happens
+        *_load_long_reg(0, 1000),
+        *_load_long_reg(2, 0),
+        *divu_l(DN, 2, 0),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    h.mem.load_long(5 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler)
+    found = await h.run_until_sentinel(max_cycles=9000)
+    assert found, "DIVU.L zero-divide test did not complete"
+    marker = h.read_result_long(0)
+    assert marker == 0x05, (
+        f"expected the zero-divide handler marker 0x05, got 0x{marker:08X}")
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_divs_l_zero_divisor_traps(dut):
+    """DIVS.L by zero takes the zero-divide vector (5)."""
+    h = CPUTestHarness(dut)
+    handler_addr = 0x000A00
+    handler = [
+        *moveq(0x05, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    program = [
+        *moveq(0x33, 1),
+        *_load_long_reg(0, 0xFFFFFC18),
+        *_load_long_reg(2, 0),
+        *divs_l(DN, 2, 0),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    h.mem.load_long(5 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler)
+    found = await h.run_until_sentinel(max_cycles=9000)
+    assert found, "DIVS.L zero-divide test did not complete"
+    marker = h.read_result_long(0)
+    assert marker == 0x05, (
+        f"expected the zero-divide handler marker 0x05, got 0x{marker:08X}")
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_divu_l_memory_source(dut):
+    """DIVU.L (A1),D0 reads the divisor from memory."""
+    h = CPUTestHarness(dut)
+    data = h.DATA_BASE
+    words = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0), *imm_long(h.RESULT_BASE),
+        *movea(LONG, SPECIAL, IMMEDIATE, 1), *imm_long(data),
+        *_load_long_reg(0, 1000000),
+        *divu_l(AN_IND, 1, 0),
+        *nop(), *nop(),
+        *move_from_ccr(DN, 6),
+        *move(LONG, DN, 0, AN_IND, 0), *addq(LONG, 4, AN, 0),
+        *move(LONG, DN, 6, AN_IND, 0), *addq(LONG, 4, AN, 0),
+        *h.sentinel_program(),
+    ]
+    await h.setup(words)
+    h.mem.write(data, 4, 1000)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+    assert h.read_result_long(0) == 1000, (
+        f"expected 1000, got 0x{h.read_result_long(0):08X}")
+    assert_flags("DIVU.L (A1),D0", h.read_result_long(4),
+                 {'x': None, 'n': 0, 'z': 0, 'v': 0, 'c': 0})
     h.cleanup()
