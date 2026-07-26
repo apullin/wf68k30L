@@ -401,7 +401,7 @@ assign LOAD_OP2 = (OP == PMOVE && !BIW_1[9] && (PMOVE_SRP_SEL || PMOVE_CRP_SEL) 
 assign LOAD_OP3 = ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 :
                   ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 :
                   ((OP == BFCHG || OP == BFCLR) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
-                  ((OP == BFINS || OP == BSET) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
+                  ((OP == BFINS || OP == BFSET) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   ((OP == BFEXTS || OP == BFEXTU) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   ((OP == BFFFO || OP == BFTST) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   (OP == CAS2 && INIT_ENTRY && !PHASE2) ? 1'b1 : // Memory operand 2.

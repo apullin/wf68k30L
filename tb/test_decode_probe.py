@@ -626,3 +626,52 @@ async def test_cmpm_l_unequal_clears_z(dut):
     assert a0 == 0x020104, f"A0=0x{a0:08X}, expected 0x00020104"
     assert a1 == 0x020204, f"A1=0x{a1:08X}, expected 0x00020204"
     assert not z, "CMPM.L of two different longwords set Z"
+
+
+async def _bitfield_span_case(dut, opcode, fill_long, fill_byte):
+    """<bfop> (A0){1:32} - a 33-bit field, so BF_BYTES==5 and the access splits.
+
+    Returns (long_at_base, byte_at_base+4).
+    """
+    h = CPUTestHarness(dut)
+    program = [
+        *SETUP_A0_BOUNDS,            # A0 = $00020100
+        opcode, 0x0040,              # <bfop> (A0){1:32}  (offset 1, width 32)
+        *SENTINEL, 0x60FE,
+    ]
+    h.mem.load_long(BOUNDS, fill_long)
+    h.mem.load_words(BOUNDS + 4, [(fill_byte << 8) | fill_byte])
+    assert await _run(h, program), "no completion"
+    return h.mem.read(BOUNDS, 4), h.mem.read(BOUNDS + 4, 1)
+
+
+@cocotb.test()
+async def test_bfclr_spanning_field(dut):
+    """BFCLR (A0){1:32} clears offsets 1..32, spanning five bytes."""
+    got_long, got_byte = await _bitfield_span_case(dut, 0xECD0, 0xFFFFFFFF, 0xFF)
+    assert got_long == 0x80000000, (
+        f"BFCLR (A0){{1:32}}: long at base = 0x{got_long:08X}, expected "
+        f"0x80000000 (offset 0 untouched, offsets 1..31 cleared)"
+    )
+    assert got_byte == 0x7F, (
+        f"BFCLR (A0){{1:32}}: byte at base+4 = 0x{got_byte:02X}, expected 0x7F "
+        f"(offset 32 cleared, offsets 33..39 untouched)"
+    )
+
+
+@cocotb.test()
+async def test_bfset_spanning_field(dut):
+    """BFSET (A0){1:32} sets offsets 1..32, spanning five bytes.
+
+    The five-byte case needs the second (BF_HILOn) operand load, which the
+    LOAD_OP3 chain named BSET instead of BFSET.
+    """
+    got_long, got_byte = await _bitfield_span_case(dut, 0xEED0, 0x00000000, 0x00)
+    assert got_long == 0x7FFFFFFF, (
+        f"BFSET (A0){{1:32}}: long at base = 0x{got_long:08X}, expected "
+        f"0x7FFFFFFF (offset 0 untouched, offsets 1..31 set)"
+    )
+    assert got_byte == 0x80, (
+        f"BFSET (A0){{1:32}}: byte at base+4 = 0x{got_byte:02X}, expected 0x80 "
+        f"(offset 32 set, offsets 33..39 untouched)"
+    )
