@@ -157,6 +157,15 @@ always_comb begin : dcache_lookup
     end
 end
 
+// WF68K30L_SYNC_RAM_1R1W registers its read port: data addressed while RD_EN is
+// high is only readable in the following cycle. The enables are therefore
+// combinational so the *_HIT_PENDING stage below reads the value it requested.
+assign ICACHE_RAM_RD_EN = !ICACHE_HIT_PENDING && !BUS_BSY && OPCODE_REQ_CORE && ICACHE_HIT_NOW;
+assign ICACHE_RAM_RD_ADDR = {ADR_P_PHYS[7:4], ADR_P_PHYS[3:1]};
+assign DCACHE_RAM_RD_EN = !DCACHE_HIT_PENDING && !BUS_BSY && DATA_RD && DCACHE_HIT_NOW &&
+                          !DATA_RDY_BUSIF_CORE;
+assign DCACHE_RAM_RD_ADDR = {ADR_P_PHYS[7:4], ADR_P_PHYS[3:2]};
+
 always_ff @(posedge CLK) begin : cache_registers
     integer i;
     logic [31:0] cacr_write_value;
@@ -179,8 +188,6 @@ always_ff @(posedge CLK) begin : cache_registers
         ICACHE_RDY <= 1'b0;
         ICACHE_OPCODE_WORD <= 16'h0000;
         ICACHE_HIT_PENDING <= 1'b0;
-        ICACHE_RAM_RD_EN <= 1'b0;
-        ICACHE_RAM_RD_ADDR <= 7'h00;
         ICACHE_RAM_WR_EN <= 1'b0;
         ICACHE_RAM_WR_ADDR <= 7'h00;
         ICACHE_RAM_WR_DATA <= 16'h0000;
@@ -204,8 +211,6 @@ always_ff @(posedge CLK) begin : cache_registers
         DCACHE_HIT_PENDING <= 1'b0;
         DCACHE_HIT_SIZE_PENDING <= LONG;
         DCACHE_HIT_ADDR10_PENDING <= 2'b00;
-        DCACHE_RAM_RD_EN <= 1'b0;
-        DCACHE_RAM_RD_ADDR <= 6'h00;
         DCACHE_RAM_WR_EN <= 1'b0;
         DCACHE_RAM_WR_ADDR <= 6'h00;
         DCACHE_RAM_WR_DATA <= 32'h0000_0000;
@@ -238,9 +243,7 @@ always_ff @(posedge CLK) begin : cache_registers
         end
     end else begin
         ICACHE_RDY <= 1'b0;
-        ICACHE_RAM_RD_EN <= 1'b0;
         ICACHE_RAM_WR_EN <= 1'b0;
-        DCACHE_RAM_RD_EN <= 1'b0;
         DCACHE_RAM_WR_EN <= 1'b0;
         DATA_RDY_CACHE <= 1'b0;
         DATA_VALID_CACHE <= 1'b0;
@@ -254,9 +257,7 @@ always_ff @(posedge CLK) begin : cache_registers
             ICACHE_OPCODE_WORD <= ICACHE_RAM_RD_DATA;
             ICACHE_RDY <= 1'b1;
             ICACHE_HIT_PENDING <= 1'b0;
-        end else if (!BUS_BSY && OPCODE_REQ_CORE && ICACHE_HIT_NOW) begin
-            ICACHE_RAM_RD_EN <= 1'b1;
-            ICACHE_RAM_RD_ADDR <= {ADR_P_PHYS[7:4], ADR_P_PHYS[3:1]};
+        end else if (ICACHE_RAM_RD_EN) begin
             ICACHE_HIT_PENDING <= 1'b1;
         end
 
@@ -269,11 +270,7 @@ always_ff @(posedge CLK) begin : cache_registers
             DATA_RDY_CACHE <= 1'b1;
             DATA_VALID_CACHE <= 1'b1;
             DCACHE_HIT_PENDING <= 1'b0;
-        end else if (!BUS_BSY && DATA_RD && DCACHE_HIT_NOW && !DATA_RDY_BUSIF_CORE) begin
-            dcache_line = ADR_P_PHYS[7:4];
-            dcache_entry = ADR_P_PHYS[3:2];
-            DCACHE_RAM_RD_EN <= 1'b1;
-            DCACHE_RAM_RD_ADDR <= {dcache_line, dcache_entry};
+        end else if (DCACHE_RAM_RD_EN) begin
             DCACHE_HIT_SIZE_PENDING <= OP_SIZE_BUS;
             DCACHE_HIT_ADDR10_PENDING <= ADR_P_PHYS[1:0];
             DCACHE_HIT_PENDING <= 1'b1;
