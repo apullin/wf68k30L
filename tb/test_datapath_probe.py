@@ -290,6 +290,32 @@ async def test_nbcd_x1_wrap_and_sticky_z(dut):
 
 
 @cocotb.test()
+async def test_ccr_reserved_bits_read_as_zero(dut):
+    """Writes to the CCR must not latch bits 7:5; MOVE from SR has to read them as zero."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x44FC, 0x00FF,              # MOVE #$FF,CCR
+        0x40C0,                      # MOVE SR,D0
+        0x23C0, 0x0002, 0x0000,      # MOVE.L D0,($20000).L
+        0x44FC, 0x0000,              # MOVE #0,CCR
+        0x003C, 0x00E0,              # ORI #$E0,CCR
+        0x40C0,                      # MOVE SR,D0
+        0x23C0, 0x0002, 0x0004,      # MOVE.L D0,($20004).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+    sr_move = h.mem.read(RES, 4) & 0xFFFF
+    sr_ori = h.mem.read(RES + 4, 4) & 0xFFFF
+    assert (sr_move & 0x00E0, sr_move & 0x1F) == (0, 0x1F), (
+        f"MOVE #$FF,CCR then MOVE SR: SR=0x{sr_move:04X}, expected bits 7:5 clear "
+        f"and XNZVC all set"
+    )
+    assert sr_ori & 0x00E0 == 0, (
+        f"ORI #$E0,CCR then MOVE SR: SR=0x{sr_ori:04X}, expected bits 7:5 clear"
+    )
+
+
+@cocotb.test()
 async def test_chk2_l_in_bounds_no_trap(dut):
     """CHK2.L (A0),D3 with bounds 0x100..0x200 and D3=0x180 must not trap."""
     h = CPUTestHarness(dut)

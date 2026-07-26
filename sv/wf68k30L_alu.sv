@@ -997,10 +997,12 @@ always_ff @(posedge CLK) begin : status_reg_proc
         SREG_MEM[12] = 1'b0;
     else if (SR_WR && OP_IN == RTE) // Written by the exception handler, no ALU required.
         SREG_MEM = OP1_IN[15:0];
-    else if (SR_WR && (OP_WB == MOVE_TO_CCR || OP_WB == MOVE_TO_SR || OP_WB == STOP))
+    else if (SR_WR && OP_WB == MOVE_TO_CCR) // The undefined CCR bits read back as zero.
+        SREG_MEM = {RESULT_OTHERS[15:8], 3'b000, RESULT_OTHERS[4:0]};
+    else if (SR_WR && (OP_WB == MOVE_TO_SR || OP_WB == STOP))
         SREG_MEM = RESULT_OTHERS[15:0];
     else if (SR_WR && (OP_WB == ANDI_TO_CCR || OP_WB == EORI_TO_CCR || OP_WB == ORI_TO_CCR))
-        SREG_MEM[7:5] = RESULT_LOGOP[7:5]; // Bits 4 downto 0 are written via CC_UPDT.
+        SREG_MEM[7:5] = 3'b000; // Bits 4 downto 0 are written via CC_UPDT.
     else if (SR_WR) // ANDI_TO_SR, EORI_TO_SR, ORI_TO_SR.
         SREG_MEM = RESULT_LOGOP[15:0];
 
