@@ -73,17 +73,13 @@ class BusModel:
         Lane 0 is DATA[31:24], lane 1 is DATA[23:16], lane 2 is DATA[15:8],
         lane 3 is DATA[7:0].
 
-        This matches the WF68K30L bus-interface alignment behavior for
-        split transfers (e.g., unaligned long reads/writes).
+        Lanes are address-matched in both directions, as MC68030UM
+        Tables 7-4 and 7-5 require: the first byte of the transfer appears
+        on the lane selected by A1:A0.
         """
         a = addr & 0x3
         if size_code == 0:  # long
-            # WF68K30L read cycles consume long data from the top lanes and
-            # shift by cycle boundaries, while write cycles source valid bytes
-            # starting at A1:A0 for misaligned stores.
-            if is_write:
-                return a, 4 - a
-            return 0, 4 - a
+            return a, 4 - a
         if size_code == 1:  # byte
             return a, 1
         if size_code == 2:  # word
