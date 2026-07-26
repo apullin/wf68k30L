@@ -73,6 +73,10 @@ logic        CAS2_COND;
 logic        CB_BCD;
 logic        CHK_CMP_COND;
 logic        CHK2CMP2_DR;
+logic [31:0] CHK2_LB;
+logic        CHK2_OUT_OF_BND;
+logic [31:0] CHK2_R;
+logic [31:0] CHK2_UB;
 logic [4:0]  MSB;
 OP_68K       OP;
 logic [31:0] OP1;
@@ -575,16 +579,43 @@ end
 // ========================================================================
 // Out of bounds condition (CHK, CHK2, CMP2)
 // ========================================================================
+// CHK2/CMP2 compare the low byte or word of a data register but always the
+// full 32 bits of an address register, against sign extended bounds.
+always_comb begin : chk2_operands
+    if (!CHK2CMP2_DR) begin
+        CHK2_R  = OP2;
+        CHK2_LB = OP1_SIGNEXT;
+        CHK2_UB = OP3_SIGNEXT;
+    end else begin
+        case (OP_SIZE)
+            BYTE: begin
+                CHK2_R  = {24'h0, OP2[7:0]};
+                CHK2_LB = {24'h0, OP1[7:0]};
+                CHK2_UB = {24'h0, OP3[7:0]};
+            end
+            WORD: begin
+                CHK2_R  = {16'h0, OP2[15:0]};
+                CHK2_LB = {16'h0, OP1[15:0]};
+                CHK2_UB = {16'h0, OP3[15:0]};
+            end
+            default: begin
+                CHK2_R  = OP2;
+                CHK2_LB = OP1;
+                CHK2_UB = OP3;
+            end
+        endcase
+    end
+end
+
+// The bounds pair spans a circular range which wraps when the upper bound is
+// below the lower bound. Comparing unsigned covers signed bounds too, as
+// offsetting all three operands alike only rotates that range.
+assign CHK2_OUT_OF_BND = (CHK2_LB <= CHK2_UB) ? (CHK2_R < CHK2_LB || CHK2_R > CHK2_UB) :
+                                                (CHK2_R > CHK2_UB && CHK2_R < CHK2_LB);
+
 assign CHK_CMP_COND = (OP == CHK && OP2_SIGNEXT[MSB]) || // Negative destination.
                       (OP == CHK && $signed(OP2_SIGNEXT) > $signed(OP1_SIGNEXT)) ||
-                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == LONG && OP2 < OP1) ||
-                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == LONG && OP2 > OP3) ||
-                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == WORD && OP2[15:0] < OP1[15:0]) ||
-                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == WORD && OP2[15:0] > OP3[15:0]) ||
-                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == BYTE && OP2[7:0] < OP1[7:0]) ||
-                      ((OP == CHK2 || OP == CMP2) &&  CHK2CMP2_DR && OP_SIZE == BYTE && OP2[7:0] > OP3[7:0]) ||
-                      ((OP == CHK2 || OP == CMP2) && !CHK2CMP2_DR && $signed(OP2_SIGNEXT) < $signed(OP1_SIGNEXT)) ||
-                      ((OP == CHK2 || OP == CMP2) && !CHK2CMP2_DR && $signed(OP2_SIGNEXT) > $signed(OP3_SIGNEXT));
+                      ((OP == CHK2 || OP == CMP2) && CHK2_OUT_OF_BND);
 
 // All traps must be modeled as strobes.
 assign TRAP_CHK = ALU_ACK && (OP == CHK || OP == CHK2) && CHK_CMP_COND;
@@ -780,26 +811,8 @@ always_comb begin : cond_codes_comb
             bf_mask = ((40'd1 << (BF_UPPER_BND - BF_LOWER_BND + 6'd1)) - 40'd1) << BF_LOWER_BND;
             Z = ~|(BF_DATA_IN & bf_mask);
         end
-        CHK2, CMP2: begin
-            if (USE_DREG && OP_SIZE == LONG && OP2 == OP1)
-                Z = 1'b1;
-            else if (USE_DREG && OP_SIZE == LONG && OP2 == OP3)
-                Z = 1'b1;
-            else if (USE_DREG && OP_SIZE == WORD && OP2[15:0] == OP1[15:0])
-                Z = 1'b1;
-            else if (USE_DREG && OP_SIZE == WORD && OP2[15:0] == OP3[15:0])
-                Z = 1'b1;
-            else if (USE_DREG && OP_SIZE == BYTE && OP2[7:0] == OP1[7:0])
-                Z = 1'b1;
-            else if (USE_DREG && OP_SIZE == BYTE && OP2[7:0] == OP3[7:0])
-                Z = 1'b1;
-            else if (!USE_DREG && OP2_SIGNEXT == OP1_SIGNEXT)
-                Z = 1'b1;
-            else if (!USE_DREG && OP2_SIGNEXT == OP3_SIGNEXT)
-                Z = 1'b1;
-            else
-                Z = 1'b0;
-        end
+        CHK2, CMP2: // Set if the operand equals either bound.
+            Z = (CHK2_R == CHK2_LB) || (CHK2_R == CHK2_UB);
         BCHG, BCLR, BSET, BTST:
             Z = ~OP2[BITPOS];
         DIVS, DIVU:
