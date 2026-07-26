@@ -1981,3 +1981,148 @@ async def test_mmu_config_exception_is_post_instruction_format_2(dut):
         f"Code after the PMOVE did not run: marker=0x{resumed:08X}"
     )
     h.cleanup()
+
+
+# =========================================================================
+# Harness trap-detection self-tests
+#
+# These two tests are a matched pair. They exist because the hole they cover
+# was invisible for the life of the suite: with an exception vector left at
+# zero the CPU jumps to PC=0, where the zero-filled reset vectors decode as
+# ORI.B #0,D0 and slide it straight back into the program at PROGRAM_BASE. A
+# deterministic test then re-runs, recomputes the same results, writes the
+# sentinel and passes -- having taken an exception nobody asked for.
+#
+# The program below is the smallest faithful reproduction: it faults exactly
+# once, so the re-run takes the non-faulting path and produces the expected
+# result. The first test proves the harness now catches it; the second turns
+# the detection off and shows the false pass it used to produce, so a
+# regression in the detector cannot go unnoticed.
+# =========================================================================
+
+def _fault_once_program(h):
+    """Program that takes an unhandled ILLEGAL on its first pass only.
+
+    Layout (PROGRAM_BASE = 0x100):
+      MOVE.L (flag).L,D1     ; D1 = pass marker
+      BNE.S  skip            ; second pass: jump over the fault
+      MOVEQ  #1,D1
+      MOVE.L D1,(flag).L     ; remember that pass 1 happened
+      ILLEGAL                ; unhandled -> vector 4
+    skip:
+      MOVEQ  #42,D2
+      MOVE.L D2,(RESULT_BASE).L
+      <sentinel>
+    """
+    flag = h.DATA_BASE + 0x40
+    tail = [
+        *moveq(42, 2),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    skipped = [
+        *moveq(1, 1),
+        *move_to_abs_long(LONG, DN, 1, flag),
+        *illegal(),
+    ]
+    # BNE.S displacement is relative to PC+2 of the branch word.
+    return [
+        *move(LONG, SPECIAL, ABS_L, DN, 1), *abs_long(flag),
+        0x6600 | (len(skipped) * 2),           # BNE.S skip
+        *skipped,
+        *tail,
+    ]
+
+
+@cocotb.test()
+async def test_harness_detects_unhandled_exception(dut):
+    """An exception with no installed handler must fail the run, not slide."""
+    h = CPUTestHarness(dut)
+    program = _fault_once_program(h)
+
+    await h.setup(program)
+    try:
+        await h.run_until_sentinel(max_cycles=6000)
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        report = h.trap_report()
+        h.cleanup()
+        raise AssertionError(
+            "Unhandled ILLEGAL did not fail the run. The harness fail stubs "
+            f"are not catching spurious exceptions (trap_report={report}); "
+            f"result=0x{h.read_result_long(0):08X}"
+        )
+    h.cleanup()
+
+    assert "vector 4" in message, (
+        f"Detection fired but did not name vector 4: {message}"
+    )
+    report = h.trap_report()
+    assert report is not None and report["vector"] == 4, (
+        f"Trap report missing or wrong vector: {report}"
+    )
+    assert (report["format_vector"] & 0xFFF) == 0x010, (
+        f"Recorded frame vector offset 0x{report['format_vector'] & 0xFFF:03X}, "
+        f"expected 0x010 (vector 4)"
+    )
+    assert report["pc"] == 0x00000110, (
+        f"Recorded stacked PC 0x{report['pc']:08X}, expected 0x00000110 "
+        f"(the address of the ILLEGAL)"
+    )
+
+
+@cocotb.test()
+async def test_harness_trap_detect_off_reproduces_false_pass(dut):
+    """With detection off the same program passes -- the hole being closed.
+
+    Kept as a live demonstration that the detection in the test above is doing
+    real work: the identical program, differing only in trap_detect, writes the
+    expected result and the sentinel while having taken an unhandled exception.
+    """
+    h = CPUTestHarness(dut, trap_detect=False)
+    program = _fault_once_program(h)
+
+    await h.setup(program)
+    assert h.mem.read(4 * 4, 4) == 0, "trap_detect=False must leave vectors alone"
+    found = await h.run_until_sentinel(max_cycles=6000)
+    h.cleanup()
+
+    assert found, (
+        "Expected the pre-detection slide (PC=0 -> ORI.B sled -> PROGRAM_BASE) "
+        "to re-enter the program and reach the sentinel"
+    )
+    assert h.read_result_long(0) == 42, (
+        f"Slide re-run produced 0x{h.read_result_long(0):08X}, expected 42"
+    )
+    assert h.trap_report() is None, "No stub is installed when trap_detect=False"
+
+
+@cocotb.test()
+async def test_harness_expect_exception_opts_out(dut):
+    """expect_exception() suppresses detection and leaves the vector as found.
+
+    Note the difference between the two opt-outs. expect_exception(v) clears
+    only vector v, so the CPU still jumps to PC=0 but the sled it lands in now
+    contains the other vectors' stub addresses (0x000Dxxxx decodes as an
+    illegal ORI.B #imm,An) -- it does not slide back into the program.
+    trap_detect=False is the opt-out for a test that needs the old
+    all-zero-table behavior.
+    """
+    h = CPUTestHarness(dut)
+    h.expect_exception(4)
+    program = _fault_once_program(h)
+
+    await h.setup(program)
+    assert h.mem.read(4 * 4, 4) == 0, (
+        "expect_exception(4) must leave vector 4 exactly as the test found it"
+    )
+    assert h.mem.read(5 * 4, 4) != 0, (
+        "expect_exception(4) must not disturb the other vectors"
+    )
+    # Must complete without raising: the run simply does not reach the sentinel.
+    await h.run_until_sentinel(max_cycles=3000)
+    h.cleanup()
+    assert h.trap_report() is None, (
+        f"No stub should have run for an expected vector: {h.trap_report()}"
+    )
