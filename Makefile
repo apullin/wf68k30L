@@ -168,8 +168,10 @@ test-shakeout:
 # these two passes the SMT2 contains zero assertions and every run reports
 # PASSED vacuously. `make formal-selftest` guards against that regressing.
 #
-# The harnesses toggle CLK from $global_clock, so a depth of N global steps is
-# about N/2 clock edges.
+# The harnesses derive CLK by toggling it from $global_clock, so one clock cycle
+# costs two solver steps: measured, -t 24 reaches 11 posedges and -t 26 reaches
+# 12. FORMAL_CYCLES is therefore expressed in clock cycles and converted below,
+# so the knob means what it says.
 #
 # `memory_map` matters as much as the solver here: without it write_smt2 emits
 # the register file as an SMT-LIB array (store/select over
@@ -185,12 +187,33 @@ test-shakeout:
 # register-file property.
 FORMAL_LOWER := memory_map; clk2fflogic; chformal -lower
 SMT_SOLVER ?= bitwuzla
-FORMAL_DEPTH ?= 24
+FORMAL_CYCLES ?= 12
+FORMAL_DEPTH := $(shell expr 2 \* $(FORMAL_CYCLES) + 2)
 FORMAL_REGFILE ?= 1
 
-.PHONY: formal-selftest
+.PHONY: formal-selftest formal-solver-check
 
-formal-smoke: formal-selftest
+# The solver is load-bearing, not a preference: yices cannot finish the
+# register-file property at this depth. Fail loudly rather than silently
+# running something that will time out.
+formal-solver-check:
+	@command -v $(SMT_SOLVER) >/dev/null 2>&1 || { \
+	   echo "formal: SMT_SOLVER='$(SMT_SOLVER)' not found on PATH."; \
+	   echo "        bitwuzla or boolector is required for the register-file"; \
+	   echo "        property. With yices only, run:"; \
+	   echo "            make formal-smoke SMT_SOLVER=yices FORMAL_REGFILE=0"; \
+	   exit 1; }
+	@case '$(SMT_SOLVER)' in \
+	   bitwuzla|boolector) ;; \
+	   *) if [ '$(FORMAL_REGFILE)' = '1' ]; then \
+	        echo "formal: SMT_SOLVER='$(SMT_SOLVER)' is not bitwuzla/boolector;"; \
+	        echo "        the register-file property is expected to time out."; \
+	        echo "        Add FORMAL_REGFILE=0 to skip it."; \
+	      fi ;; \
+	 esac
+	@echo "formal: solver=$(SMT_SOLVER) cycles=$(FORMAL_CYCLES) (depth=$(FORMAL_DEPTH) steps) regfile=$(FORMAL_REGFILE)"
+
+formal-smoke: formal-selftest formal-solver-check
 	mkdir -p build/formal
 	# Hazard tracker: bounded, then proven unbounded by temporal induction.
 	yosys -q -p \
