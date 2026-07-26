@@ -92,7 +92,7 @@ logic [1:0]         ADR_10;
 logic [5:0]         ADR_OFFSET;
 logic [31:0]        ADR_OUT_I;
 logic               AERR_I;
-ARB_STATES          ARB_STATE;
+ARB_STATES          ARB_STATE = ARB_IDLE;
 logic               AVEC_In;
 logic               BGACK_In;
 logic               BR_In;
@@ -116,14 +116,17 @@ logic               OPCODE_ACCESS;
 logic               OPCODE_RDY_I;
 logic               READ_ACCESS;
 logic               RESET_CPU_I;
+logic [3:0]         RESET_FLT_CNT = 4'h0;
+logic [8:0]         RESET_OUT_CNT = 9'd0;
 logic               RESET_OUT_I;
 logic               RETRY;
 logic [1:0]         SIZE_D;
 logic [1:0]         SIZE_I;
-logic [2:0]         SIZE_N;
+logic [2:0]         SIZE_N = 3'b000;
 logic [2:0]         SLICE_CNT_N;
 logic [2:0]         SLICE_CNT_P;
 logic               SSW_FROZEN;
+logic               STARTUP = 1'b0;
 logic               STERM_In;
 TIME_SLICES         T_SLICE;
 logic               WAITSTATES;
@@ -749,16 +752,16 @@ assign BGn = (ARB_STATE == GRANT) ? 1'b0 : 1'b1;
 // ---- Reset input filter ----
 // Requires RESET_IN asserted for ~10 clock cycles to trigger. The core must
 // not reset on its own RESET instruction output, hence the RESET_OUT_I mask.
+// STARTUP and the counters are held at module scope so their power-on values
+// are honored once. Verilator re-applies a declaration initializer on every
+// entry to a procedural block, which would stall them instead.
 always_ff @(posedge CLK) begin : reset_filter
-    logic STARTUP;
-    logic [3:0] TMP;
-
-    if (RESET_IN && !RESET_OUT_I && TMP < 4'hF)
-        TMP = TMP + 1'b1;
+    if (RESET_IN && !RESET_OUT_I && RESET_FLT_CNT < 4'hF)
+        RESET_FLT_CNT = RESET_FLT_CNT + 1'b1;
     else if (!RESET_IN || RESET_OUT_I)
-        TMP = 4'h0;
+        RESET_FLT_CNT = 4'h0;
 
-    if (TMP > 4'hA) begin
+    if (RESET_FLT_CNT > 4'hA) begin
         RESET_CPU_I <= 1'b1;
         STARTUP = 1'b1;
     end else if (!STARTUP) begin
@@ -771,17 +774,15 @@ end
 // ---- Reset output timer ----
 // Drives RESET_OUT for 512 clock cycles when RESET_STRB is asserted.
 always_ff @(posedge CLK) begin : reset_timer
-    logic [8:0] TMP;
-
-    if (RESET_STRB || TMP > 9'd0)
+    if (RESET_STRB || RESET_OUT_CNT > 9'd0)
         RESET_OUT_I <= 1'b1;
     else
         RESET_OUT_I <= 1'b0;
 
     if (RESET_STRB)
-        TMP = 9'd511;
-    else if (TMP > 9'd0)
-        TMP = TMP - 1'b1;
+        RESET_OUT_CNT = 9'd511;
+    else if (RESET_OUT_CNT > 9'd0)
+        RESET_OUT_CNT = RESET_OUT_CNT - 1'b1;
 end
 
 assign RESET_CPU = RESET_CPU_I;
