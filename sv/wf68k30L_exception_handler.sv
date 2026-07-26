@@ -605,10 +605,12 @@ end
 
 // ---- Exception priority encoder (registered) ----
 // Latches the highest-priority pending exception when entering from idle.
+// TRAP_BERR is folded in live because entry happens in the same cycle it
+// strobes, one cycle before EX_P_BERR registers.
 always_ff @(posedge CLK) begin : store_current_exception
     if (EX_STATE == EXS_IDLE)
         EXCEPTION <= resolve_exception_priority(
-            EX_P_RESET, EX_P_AERR, EX_P_BERR,
+            EX_P_RESET, EX_P_AERR, EX_P_BERR | TRAP_BERR,
             EX_P_CP_PRE, EX_P_CP_MID, EX_P_CP_POST,
             EX_P_CHK, EX_P_TRAPcc, EX_P_DIVZERO, EX_P_TRAP, EX_P_TRAPV, EX_P_MMU_CFG, EX_P_FORMAT,
             EX_P_ILLEGAL, EX_P_RTE, EX_P_1010, EX_P_1111, EX_P_PRIV, EX_P_TRACE,
@@ -880,7 +882,14 @@ end
 always_comb begin : exception_handler_dec
     case (EX_STATE)
         EXS_IDLE: begin
-            if ((BUSY_MAIN || BUSY_OPD) && !EX_P_RESET)
+            // A bus error aborts the instruction, so entry must not wait for
+            // the pipeline. Waiting also lets the next prefetch re-capture the
+            // bus interface's fault info (SSW, data buffers), which only
+            // freezes on BUSY_EXH - the format A/B frame would then describe
+            // the prefetch instead of the faulted access.
+            if (TRAP_BERR)
+                NEXT_EX_STATE = EXS_INIT;
+            else if ((BUSY_MAIN || BUSY_OPD) && !EX_P_RESET)
                 NEXT_EX_STATE = EXS_IDLE; // Wait until the pipeline is idle.
             else if (any_exception_pending)
                 NEXT_EX_STATE = EXS_INIT;

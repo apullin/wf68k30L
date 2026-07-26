@@ -172,6 +172,17 @@ async def test_berr_exception_and_rte_rerun(dut):
     dut._log.warning("stacked frame @0xFA4 (46 words): %s",
                      " ".join(f"{w:04X}" for w in frame))
     assert bus.fault_count == 1, f"BERR injected {bus.fault_count} times"
+    # The SSW at frame +0x0A must describe the faulted cycle, not whatever bus
+    # cycle happened to run next: DF (bit 8) set, RW (bit 6) set for a read,
+    # FC (bits 2:0) = 5 (supervisor data).
+    ssw = frame[0x0A // 2]
+    assert ssw & 0x0100, (
+        f"SSW = 0x{ssw:04X}: DF clear, so RTE will not rerun the faulted access"
+    )
+    assert (ssw & 0x0007) == 5 and (ssw & 0x0040), (
+        f"SSW = 0x{ssw:04X}: expected a supervisor-data read (RW=1, FC=5); "
+        f"FC=6 means the SSW was overwritten by a later opcode prefetch"
+    )
     assert counter == 1, (
         f"Bus-error handler ran {counter} times (expected 1); fmt=0x{fmt:04X}"
     )
