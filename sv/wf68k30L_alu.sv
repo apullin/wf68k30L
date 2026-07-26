@@ -588,7 +588,10 @@ assign CHK_CMP_COND = (OP == CHK && OP2_SIGNEXT[MSB]) || // Negative destination
 
 // All traps must be modeled as strobes.
 assign TRAP_CHK = ALU_ACK && (OP == CHK || OP == CHK2) && CHK_CMP_COND;
-assign TRAP_DIVZERO = ALU_INIT && (OP_IN == DIVS || OP_IN == DIVU) && OP1_IN == 32'h0;
+// Only the divisor bits the operation actually uses may be tested: the word
+// divide divides by OP1[15:0].
+assign TRAP_DIVZERO = ALU_INIT && (OP_IN == DIVS || OP_IN == DIVU) &&
+                      ((OP_SIZE_IN == WORD) ? OP1_IN[15:0] == 16'h0 : OP1_IN == 32'h0);
 
 // ========================================================================
 // Condition code computation
