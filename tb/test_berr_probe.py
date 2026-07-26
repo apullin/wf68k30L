@@ -462,18 +462,36 @@ async def test_berr_on_speculative_prefetch_does_not_trap(dut):
 
 @cocotb.test(skip=True)
 async def test_berr_on_store_stacks_the_storing_instruction(dut):
-    """UM 8.1.2: a faulted store must stack its own instruction address, or the
-    RTE rerun re-executes the wrong instruction and the store is lost.
+    """A store that bus-faults must stack its own address; today it does not.
 
-    Skipped: the next instruction is dispatched, advancing PC, while the store
-    is still on the bus, and the format A/B frame stacks the live PC
-    (wf68k30L_top_helpers_datapath.svh). Fixing it needs a PC copy frozen while
-    a data cycle is outstanding, next to PC_INSTR_EXH, plus the same treatment
-    for the frame's data cycle fault address, which is snapshotted from the
-    live ADR_EFF at exception entry. Suppressing the overlapping dispatch
-    instead (OW_REQ during WRITE_DEST) makes this test pass but leaves ADR_EFF
-    reading zero at entry, failing
-    test_mmu_instr::test_mmu_runtime_short_descriptor_wp_fault_bus_error_vector2.
+    KNOWN DEFECT, deliberately left failing-but-skipped.
+
+    A short store (MOVE.L D3,(A0), CLR.L (A0), MOVE.L D0,(A0)+, any size) has the
+    following instruction dispatched before its write is acknowledged, so PC has
+    already advanced when the fault lands: the frame stacks 0x10E for a store at
+    0x10C. This is not cosmetic. RTE suppresses the pipe reload whenever the SSW
+    asks for a rerun, so the core reruns by re-executing from the restored PC --
+    which is past the store. The faulting write is therefore silently discarded.
+    Verified: handler runs once, RTE resumes at 0x10E, and the target is never
+    written.
+
+    Two candidate local fixes were built and measured, and both fail:
+
+    - Freezing PC while a data cycle is outstanding does not help: the write
+      request asserts *after* the next instruction is dispatched, so PC is
+      already 0x10E at the first cycle of the data access.
+    - Gating OW_REQ on EXEC_WB_STATE == WRITE_DEST does fix all ten store cases
+      at no measured cycle cost, but breaks the MMU write-protect fault frame:
+      ADR_CPY snapshots the live ADR_EFF at exception entry, and removing the
+      overlapping dispatch changes what address_registers leaves there, so the
+      frame's fault address comes out 0.
+
+    The real fix is a design change rather than a patch: carry a PC value
+    alongside the writeback stage so a bus-fault frame can report the
+    instruction that owned the faulted access, and freeze the fault address the
+    same way (the bus interface already does this for the SSW via SSW_FROZEN).
+    Nothing in the current design tracks a writeback-stage PC -- PC_VAR_MEM is a
+    stack-writeback offset, not an instruction address.
     """
     h = CPUTestHarness(dut)
     bus = BerrOnceBusModel(dut, h.mem, times=1)
