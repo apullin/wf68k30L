@@ -358,8 +358,8 @@ always_ff @(posedge CLK) begin : pending_system_faults
     // Bus error
     if (TRAP_BERR)
         EX_P_BERR <= 1'b1;
-    else if (EX_STATE != EXS_IDLE && DATA_RDY && !DATA_VALID)
-        EX_P_BERR <= 1'b1;
+    else if (EX_STATE != EXS_IDLE && EX_STATE != EXS_GET_VECTOR && DATA_RDY && !DATA_VALID)
+        EX_P_BERR <= 1'b1; // A faulted IACK is a spurious interrupt, not a bus error.
     else if (EX_STATE == EXS_INIT && EXCEPTION == EX_BERR)
         EX_P_BERR <= 1'b0; // Reset in the beginning to enable retriggering.
     else if (SYS_INIT)

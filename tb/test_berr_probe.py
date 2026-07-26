@@ -27,6 +27,9 @@ class BerrOnceBusModel(BusModel):
         self.fault_count = 0
         self.log = []
 
+    def _should_fault(self, addr, fc):
+        return (addr & ~3) == (self.fault_addr & ~3)
+
     async def _responder(self):
         while self._running:
             await RisingEdge(self.dut.CLK)
@@ -53,7 +56,7 @@ class BerrOnceBusModel(BusModel):
                         rw = -1
                     if not self.log or self.log[-1] != (addr, rw, fc):
                         self.log.append((addr, rw, fc))
-                if (addr & ~3) == (self.fault_addr & ~3) and self.faults_left > 0:
+                if self._should_fault(addr, fc) and self.faults_left > 0:
                     self.faults_left -= 1
                     self.fault_count += 1
                     self.dut.BERRn.value = 0
@@ -220,3 +223,74 @@ async def test_berr_probe_control_no_fault(dut):
     assert h.mem.read(COUNTER_ADDR, 4) == 0, "handler ran without fault"
     d0 = h.mem.read(D0_ADDR, 4)
     assert d0 == 0x5A5AA5A5, f"control run stored 0x{d0:08X}"
+
+
+class BerrOnIackBusModel(BerrOnceBusModel):
+    """Terminates every interrupt-acknowledge (FC=7) cycle with BERRn."""
+
+    def _should_fault(self, addr, fc):
+        return fc == 7
+
+
+MARK_ADDR = 0x020020
+
+
+def _marker_handler(marker):
+    return [
+        0x203C, 0x0000, marker,      # MOVE.L #marker,D0
+        0x23C0, 0x0002, 0x0020,      # MOVE.L D0,($20020).L
+        0x2E3C, 0xDEAD, 0xCAFE,      # MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,      # MOVE.L D7,($30000).L
+        0x4E72, 0x2700,              # STOP #$2700
+    ]
+
+
+@cocotb.test()
+async def test_berr_on_iack_is_spurious_only(dut):
+    """UM 8.1.9: a bus error during the interrupt acknowledge cycle makes the
+    interrupt spurious (vector 24). It must not also raise a bus error."""
+    h = CPUTestHarness(dut)
+    bus = BerrOnIackBusModel(dut, h.mem, times=1)
+
+    spurious_handler = _marker_handler(0x0018)
+    berr_handler = _marker_handler(0x0002)
+
+    clock = cocotb.clock.Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    h._init_idle_inputs()
+    h._load_memory([0x46FC, 0x2000, 0x60FE])   # MOVE #$2000,SR ; BRA.S self
+    h.mem.load_long(2 * 4, 0x000900)           # vector 2  (bus error)
+    h.mem.load_words(0x000900, berr_handler)
+    h.mem.load_long(24 * 4, 0x000800)          # vector 24 (spurious interrupt)
+    h.mem.load_words(0x000800, spurious_handler)
+    await RisingEdge(dut.CLK)
+    await RisingEdge(dut.CLK)
+    dut.RESET_INn.value = 0
+    dut.HALT_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+    h.bus = bus
+    await bus.start()
+    dut.RESET_INn.value = 1
+    dut.HALT_INn.value = 1
+    await ClockCycles(dut.CLK, 300)
+
+    dut.IPLn.value = 0b101                     # level 2 (active low)
+
+    found = False
+    for _ in range(6000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+    dut.IPLn.value = 0b111
+
+    marker = h.mem.read(MARK_ADDR, 4)
+    assert bus.fault_count == 1, (
+        f"BERRn asserted on {bus.fault_count} IACK cycles (expected 1)"
+    )
+    assert found, f"neither handler completed (marker=0x{marker:08X})"
+    assert marker == 0x0018, (
+        f"handler marker = 0x{marker:08X}; expected 0x00000018 (spurious "
+        f"interrupt, vector 24). 0x00000002 means a phantom bus-error "
+        f"exception ran as well."
+    )
