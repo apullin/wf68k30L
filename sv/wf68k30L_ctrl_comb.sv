@@ -706,6 +706,7 @@ assign AR_MARK_USED = (OP == UNLK && FETCH_STATE != SWITCH_STATE && NEXT_FETCH_S
                       (OP == MOVEA) ? 1'b1 :
                       (OP == MOVEC && !BIW_0[0] && BIW_1[15]) ? 1'b1 : // Destination is Ax.
                       (OP == MOVES && BIW_1[15] && !BIW_1[11]) ? 1'b1 :
+                      (OP == PTEST && BIW_1[8]) ? 1'b1 : // Descriptor address to An.
                       (OP == UNLK) ? 1'b1 : 1'b0;
 
 assign DR_MARK_USED = (OP_WB_I == CAS && EXEC_WB_STATE == EXECUTE && !ALU_COND) ? 1'b1 :
