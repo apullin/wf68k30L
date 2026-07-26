@@ -970,6 +970,77 @@ async def test_retry_rerun_waits_for_halt_negation(dut):
     h.cleanup()
 
 
+@cocotb.test()
+async def test_late_berr_after_dsack_faults(dut):
+    """UM Table 7-8 case 4: BERR one clock after DSACK still terminates in error.
+
+    The read is aligned, so DSACK terminates the whole transfer in one
+    sub-cycle and the fault lands on the edge the transfer completes on.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x200
+    res = h.RESULT_BASE + 0xF0
+    berr_handler = 0x000780
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 0),          # faulted read
+        *moveq(0x5A, 1),
+        *move_to_abs_long(LONG, DN, 1, res),    # must not run
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x89ABCDEF)
+    await h.setup(program)
+
+    h.mem.load_long(2 * 4, berr_handler)
+    h.mem.load_words(
+        berr_handler,
+        [
+            *moveq(0x6E, 2),
+            *move_to_abs_long(LONG, DN, 2, res + 4),
+            *h.sentinel_program(),
+        ],
+    )
+
+    injected = False
+    found = False
+
+    for _ in range(40000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            dsack = int(dut.DSACKn.value)
+        except ValueError:
+            continue
+
+        if not injected and as_n == 0 and rw_n == 1 and addr == data_addr and dsack != 0b11:
+            # DSACK was asserted one clock ago (state N); assert BERR now so it
+            # is sampled in state N + 2, the late-BERR case.
+            dut.BERRn.value = 0
+            injected = True
+        elif injected and as_n == 1:
+            dut.BERRn.value = 1
+
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert injected, "Never injected a late BERR on the target read"
+    assert found, "Test did not complete"
+    assert h.mem.read(res + 4, 4) == 0x0000006E, (
+        "Bus-error handler did not run: late BERR was dropped and the core "
+        f"consumed uncorrected data (res+4=0x{h.mem.read(res + 4, 4):08X})"
+    )
+    assert h.mem.read(res, 4) != 0x0000005A, (
+        "Faulted read continued into the following store"
+    )
+    h.cleanup()
+
+
 # ===================================================================
 # 6. Reset Operation (UM 7.8)
 # ===================================================================

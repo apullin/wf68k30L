@@ -100,6 +100,7 @@ logic               BR_In;
 BUS_CTRL_STATES     BUS_CTRL_STATE;
 logic               BUS_CYC_RDY;
 logic               BUS_FLT;
+logic               BUS_FLT_ANY;
 BUS_WIDTH_TYPE      BUS_WIDTH;
 logic [31:0]        DATA_INMUX;
 logic               DATA_RDY_I;
@@ -147,9 +148,11 @@ always_ff @(negedge CLK) begin : sync_bus_termination
     BGACK_In <= BGACKn;
     AVEC_In <= AVECn;
 
-    // Retry detection: BERR + HALT during active bus cycle with remaining transfers.
+    // Retry detection: BERR + HALT during an active bus cycle. A late retry is
+    // sampled after SIZE_N has already counted down, so the terminating
+    // sub-cycle has to qualify as well.
     // The rerun is held off until HALT is negated by external logic.
-    if (!BERRn && !HALTn && BUS_CTRL_STATE == DATA_C1C4 && SIZE_N != 3'b000)
+    if (!BERRn && !HALTn && BUS_CTRL_STATE == DATA_C1C4)
         RETRY <= 1'b1;
     else if (T_SLICE == SLICE_IDLE && HALTn)
         RETRY <= 1'b0;
@@ -166,6 +169,12 @@ always_ff @(posedge CLK) begin : fault_latch
         AERR <= 1'b0;
     end
 end
+
+// BUS_FLT only becomes visible on the posedge after the negedge that sampled
+// BERRn, which is the same edge the terminating sub-cycle leaves DATA_C1C4 on.
+// That cycle therefore has to qualify the negedge sample directly. When the
+// fault is a retry, BUS_CYC_RDY is already suppressed, so this stays clear.
+assign BUS_FLT_ANY = BUS_FLT || (BUS_CYC_RDY && SIZE_N == 3'b000 && BUS_FLT_VAR);
 
 // ---- Access type tracking ----
 // Latches which type of access (read/write/opcode) is active during a bus cycle.
@@ -209,7 +218,7 @@ always_ff @(posedge CLK) begin : data_fault_info
             SSW_80[5:4] <= SIZEVAR;
             SSW_80[3] <= 1'b0;
             SSW_80[2:0] <= FC_IN;
-        end else if (BUS_CTRL_STATE == DATA_C1C4 && (READ_ACCESS || WRITE_ACCESS) && BUS_FLT) begin
+        end else if (BUS_CTRL_STATE == DATA_C1C4 && (READ_ACCESS || WRITE_ACCESS) && BUS_FLT_ANY) begin
             SSW_80[8] <= 1'b1;
         end
 
@@ -526,18 +535,18 @@ end
 always_ff @(posedge CLK) begin : validation
     if (RESET_CPU_I)
         OPCODE_VALID <= 1'b1;
-    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT && !HALT_In)
+    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY && !HALT_In)
         ; // RETRY condition: no opcode bus error.
-    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT)
+    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY)
         OPCODE_VALID <= 1'b0;
     else if (OPCODE_RDY_I)
         OPCODE_VALID <= 1'b1;
 
     if (RESET_CPU_I)
         DATA_VALID <= 1'b1;
-    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT && !HALT_In)
+    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY && !HALT_In)
         ; // RETRY condition: no bus error.
-    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT)
+    else if (BUS_CTRL_STATE == DATA_C1C4 && BUS_FLT_ANY)
         DATA_VALID <= 1'b0;
     else if (DATA_RDY_I)
         DATA_VALID <= 1'b1;
