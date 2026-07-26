@@ -76,12 +76,13 @@ logic        walk_fetch_hi_valid_r;
 function automatic logic [15:0] ptest_root_mmusr(
     input logic [14:0] limit,
     input logic        limit_lower,
-    input logic [31:0] first_index
+    input logic [31:0] first_index,
+    input logic        limit_used
 );
     logic [15:0] mmusr;
 begin
     mmusr = 16'h0000;
-    if (mmu_limit_violation(limit_lower, limit, first_index))
+    if (limit_used && mmu_limit_violation(limit_lower, limit, first_index))
         mmusr = mmusr | MMUSR_L | MMUSR_I;
     ptest_root_mmusr = mmusr & ~MMUSR_N;
 end
@@ -247,7 +248,9 @@ always_ff @(posedge CLK) begin : ptest_fsm
                     walk_fetch_hi_valid_r <= 1'b0;
 
                     if (root_dt == 2'b01) begin
-                        PTEST_WALK_MMUSR <= ptest_root_mmusr(root_ptr[62:48], root_ptr[63], first_index);
+                        // UM 9.5.1.2: with TC.FCL set the root L/U and LIMIT are unused.
+                        PTEST_WALK_MMUSR <= ptest_root_mmusr(root_ptr[62:48], root_ptr[63],
+                                                            first_index, !MMU_TC[24]);
                         PTEST_READY <= 1'b1;
                     end else if (root_dt == 2'b10 || root_dt == 2'b11) begin
                         PTEST_BUSY <= 1'b1;

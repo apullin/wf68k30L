@@ -207,9 +207,11 @@
                                    !(BUS_CYCLE_BURST && BUS_CYCLE_BURST_IS_OP);
 
     // Data source mux: bus interface or data-cache hit path.
+    // An untranslatable access terminates with error (RDY without VALID) so the
+    // access aborts and the core takes a bus error exception (UM 8.1.2).
     assign DATA_RDY = DATA_RDY_BUSIF_CORE || DATA_RDY_CACHE || MMU_FAULT_DATA_ACK;
     assign DATA_VALID = DATA_RDY_CACHE ? DATA_VALID_CACHE :
-                        MMU_FAULT_DATA_ACK ? 1'b1 : DATA_VALID_BUSIF;
+                        MMU_FAULT_DATA_ACK ? 1'b0 : DATA_VALID_BUSIF;
     assign DATA_TO_CORE = DATA_RDY_CACHE ? DATA_TO_CORE_CACHE :
                           MMU_FAULT_DATA_ACK ? 32'h00000000 :
                           DATA_RDY_BUSIF_CORE ? DATA_TO_CORE_BUSIF :
@@ -218,9 +220,8 @@
     // Opcode source mux: bus interface or instruction-cache hit path.
     assign OPCODE_RDY = OPCODE_RDY_BUSIF_CORE || ICACHE_RDY || MMU_FAULT_OPCODE_ACK;
     assign OPCODE_VALID = ICACHE_RDY ? 1'b1 :
-                          MMU_FAULT_OPCODE_ACK ? 1'b1 : OPCODE_VALID_BUSIF;
-    assign OPCODE_TO_CORE = ICACHE_RDY ? ICACHE_OPCODE_WORD :
-                            MMU_FAULT_OPCODE_ACK ? 16'h4E71 : OPCODE_TO_CORE_BUSIF;
+                          MMU_FAULT_OPCODE_ACK ? 1'b0 : OPCODE_VALID_BUSIF;
+    assign OPCODE_TO_CORE = ICACHE_RDY ? ICACHE_OPCODE_WORD : OPCODE_TO_CORE_BUSIF;
 
     // Main pipeline controller (issue/writeback sequencing and sideband controls).
     WF68K30L_CONTROL #(

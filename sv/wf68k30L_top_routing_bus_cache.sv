@@ -16,6 +16,7 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     input  logic        DATA_WR_EXH,
     input  logic        DATA_WR_MAIN,
     input  logic        OPCODE_RD,
+    input  logic        RMC,
 
     input  logic        MMU_RUNTIME_REQ,
     input  logic        MMU_RUNTIME_FAULT,
@@ -27,6 +28,7 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     input  logic [63:0] MMU_CRP,
     input  logic [31:0] ADR_P,
     input  logic [31:0] ADR_P_PHYS,
+    input  logic [1:0]  OP_SIZE_BUS,
     input  logic [31:0] DATA_OUT,
     input  logic [31:0] DATA_TO_CORE_BUSIF,
     input  logic        DATA_RDY_BUSIF_CORE,
@@ -53,6 +55,13 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     input  logic [1:0]  DCACHE_BURST_FILL_NEXT_ENTRY,
 
     input  logic        MMU_TWALK_START,
+
+    input  logic        MMU_PLOAD_START,
+    input  logic [2:0]  MMU_PLOAD_FC,
+    input  logic [31:0] MMU_PLOAD_LOGICAL,
+    input  logic        MMU_PLOAD_WRITE,
+    output logic        MMU_PLOAD_DONE,
+    output logic [35:0] MMU_PLOAD_RESULT,
 
     output logic        DATA_RD,
     output logic        DATA_WR,
@@ -114,9 +123,18 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
 logic        MMU_DESC_SHADOW_PENDING;
 logic [31:0] MMU_DESC_SHADOW_PENDING_ADDR;
 logic        MMU_DESC_SHADOW_PENDING_WR;
+logic        MMU_DESC_SHADOW_PENDING_FULL;
+logic        MMU_DESC_SHADOW_PENDING_SPAN;
 logic        MMU_DESC_SHADOW_WR_EN;
+logic        MMU_DESC_SHADOW_WR_VALID;
 logic [31:0] MMU_DESC_SHADOW_WR_ADDR;
 logic [31:0] MMU_DESC_SHADOW_WR_DATA;
+logic        MMU_DESC_SHADOW_INV_EN;
+logic [31:0] MMU_DESC_SHADOW_INV_ADDR;
+logic        MMU_DESC_SNOOP_WR;
+logic        MMU_DESC_HIST_WR_EN;
+logic [31:0] MMU_DESC_HIST_ADDR;
+logic [31:0] MMU_DESC_HIST_DATA;
 logic [31:0] MMU_TWALK_FETCH_LO_WORD;
 logic [31:0] MMU_TWALK_FETCH_HI_WORD;
 logic        MMU_TWALK_FETCH_LO_VALID;
@@ -134,9 +152,63 @@ logic [31:0] MMU_TWALK_DESC_PAGE_BASE;
 logic [31:0] MMU_TWALK_DESC_TABLE_BASE_NEXT;
 logic [31:0] MMU_TWALK_NEXT_LIMIT_INDEX;
 logic [31:0] MMU_TWALK_OFFSET_MASK_CUR;
+logic        MMU_TWALK_IS_PLOAD;
+logic        MMU_PLOAD_PENDING;
+logic        OPCODE_REQ_BUS_OK;
+logic        BURST_PREFETCH_OP_REQ_NOW;
+logic        BURST_PREFETCH_DATA_REQ_NOW;
+logic [2:0]  BURST_PREFETCH_OP_WORD_NOW;
+logic [1:0]  BURST_PREFETCH_DATA_ENTRY_NOW;
+logic [31:0] BURST_PREFETCH_ADDR_NOW;
+logic [2:0]  BURST_PREFETCH_FC_NOW;
+logic        BURST_PREFETCH_OP_REQ_HELD;
+logic        BURST_PREFETCH_DATA_REQ_HELD;
+logic [2:0]  BURST_PREFETCH_OP_WORD_HELD;
+logic [1:0]  BURST_PREFETCH_DATA_ENTRY_HELD;
+logic [31:0] BURST_PREFETCH_ADDR_HELD;
+logic [2:0]  BURST_PREFETCH_FC_HELD;
 
 assign MMU_TWALK_INDIRECT_SHORT_ADDR = {MMU_TWALK_DESC_PTR[31:2], 2'b00};
 assign MMU_TWALK_INDIRECT_LONG_ADDR = {MMU_TWALK_DESC_PTR[31:3], 3'b000};
+
+// UM 9.5.2: during a table search the U bit of every descriptor encountered is
+// set, and for a write access the M bit of the page descriptor is set unless a
+// WP bit or a supervisor violation was encountered. U is bit 3, M is bit 4 of
+// the descriptor status (UM Figures 9-10..9-14).
+function automatic logic [31:0] mmu_desc_history_bits(
+    input logic [31:0] desc,
+    input logic        set_modified
+);
+begin
+    mmu_desc_history_bits = desc | 32'h0000_0008;
+    if (set_modified)
+        mmu_desc_history_bits = mmu_desc_history_bits | 32'h0000_0010;
+end
+endfunction
+
+// Descriptors are longword entities, so only an aligned longword access carries
+// a complete shadow update; anything else is captured as an invalidation.
+function automatic logic mmu_desc_snoop_full_long(
+    input logic [1:0] size_in,
+    input logic [1:0] a10
+);
+begin
+    mmu_desc_snoop_full_long = (size_in == LONG) && (a10 == 2'b00);
+end
+endfunction
+
+function automatic logic mmu_desc_snoop_spans_long(
+    input logic [1:0] size_in,
+    input logic [1:0] a10
+);
+begin
+    case (size_in)
+        LONG: mmu_desc_snoop_spans_long = (a10 != 2'b00);
+        WORD: mmu_desc_snoop_spans_long = (a10 == 2'b11);
+        default: mmu_desc_snoop_spans_long = 1'b0;
+    endcase
+end
+endfunction
 
 function automatic logic [35:0] mmu_twalk_fault_result(
     input logic [31:0] logical_addr,
@@ -209,8 +281,11 @@ WF68K30L_TOP_DESC_SHADOW_PORT #(
     .RD_ADDR(MMU_TWALK_SHADOW_RD_ADDR),
     .RD_LOOKUP(MMU_TWALK_SHADOW_LOOKUP),
     .WR_EN(MMU_DESC_SHADOW_WR_EN),
+    .WR_VALID(MMU_DESC_SHADOW_WR_VALID),
     .WR_ADDR(MMU_DESC_SHADOW_WR_ADDR),
-    .WR_DATA(MMU_DESC_SHADOW_WR_DATA)
+    .WR_DATA(MMU_DESC_SHADOW_WR_DATA),
+    .INV_EN(MMU_DESC_SHADOW_INV_EN),
+    .INV_ADDR(MMU_DESC_SHADOW_INV_ADDR)
 );
 
 WF68K30L_TOP_DESC_SHADOW_PORT #(
@@ -226,8 +301,11 @@ WF68K30L_TOP_DESC_SHADOW_PORT #(
     .RD_ADDR(MMU_PTEST_SHADOW_RD_ADDR),
     .RD_LOOKUP(MMU_PTEST_SHADOW_LOOKUP),
     .WR_EN(MMU_DESC_SHADOW_WR_EN),
+    .WR_VALID(MMU_DESC_SHADOW_WR_VALID),
     .WR_ADDR(MMU_DESC_SHADOW_WR_ADDR),
-    .WR_DATA(MMU_DESC_SHADOW_WR_DATA)
+    .WR_DATA(MMU_DESC_SHADOW_WR_DATA),
+    .INV_EN(MMU_DESC_SHADOW_INV_EN),
+    .INV_ADDR(MMU_DESC_SHADOW_INV_ADDR)
 );
 
 WF68K30L_TOP_MMU_PTEST I_TOP_MMU_PTEST (
@@ -262,58 +340,89 @@ always_comb begin : burst_prefetch_select
     logic [2:0]  icache_scan_word;
     logic        dcache_found;
     logic [1:0]  dcache_scan_entry;
-    BURST_PREFETCH_OP_REQ = 1'b0;
-    BURST_PREFETCH_DATA_REQ = 1'b0;
-    BURST_PREFETCH_OP_WORD = 3'b000;
-    BURST_PREFETCH_DATA_ENTRY = 2'b00;
-    BURST_PREFETCH_ADDR = 32'h0000_0000;
-    BURST_PREFETCH_FC = FC_USER_PROG;
+    BURST_PREFETCH_OP_REQ_NOW = 1'b0;
+    BURST_PREFETCH_DATA_REQ_NOW = 1'b0;
+    BURST_PREFETCH_OP_WORD_NOW = 3'b000;
+    BURST_PREFETCH_DATA_ENTRY_NOW = 2'b00;
+    BURST_PREFETCH_ADDR_NOW = 32'h0000_0000;
+    BURST_PREFETCH_FC_NOW = FC_USER_PROG;
     scan_idx = 0;
     icache_found = 1'b0;
     icache_scan_word = ICACHE_BURST_FILL_NEXT_WORD;
     dcache_found = 1'b0;
     dcache_scan_entry = DCACHE_BURST_FILL_NEXT_ENTRY;
 
-    if (!BUS_BSY && !DATA_WR && !DATA_RD && !OPCODE_RD && !BUSY_EXH) begin
+    // UM 7.3.7: RMC is asserted for the whole indivisible read-modify-write
+    // sequence and no burst filling occurs during it, so no background fill
+    // cycle may be injected between its halves either.
+    if (!BUS_BSY && !DATA_WR && !DATA_RD && !OPCODE_RD && !BUSY_EXH && !RMC) begin
         if (ICACHE_BURST_FILL_VALID && ICACHE_BURST_FILL_PENDING != 8'h00) begin
             for (scan_idx = 0; scan_idx < 8; scan_idx = scan_idx + 1) begin
                 if (!icache_found) begin
                     icache_scan_word = ICACHE_BURST_FILL_NEXT_WORD + scan_idx[2:0];
                     if (ICACHE_BURST_FILL_PENDING[icache_scan_word]) begin
-                        BURST_PREFETCH_OP_WORD = icache_scan_word;
+                        BURST_PREFETCH_OP_WORD_NOW = icache_scan_word;
                         icache_found = 1'b1;
                     end
                 end
             end
-            BURST_PREFETCH_OP_REQ = 1'b1;
-            BURST_PREFETCH_ADDR = {
+            BURST_PREFETCH_OP_REQ_NOW = 1'b1;
+            BURST_PREFETCH_ADDR_NOW = {
                 ICACHE_BURST_FILL_TAG,
                 ICACHE_BURST_FILL_LINE,
-                BURST_PREFETCH_OP_WORD,
+                BURST_PREFETCH_OP_WORD_NOW,
                 1'b0
             };
-            BURST_PREFETCH_FC = ICACHE_BURST_FILL_FC;
+            BURST_PREFETCH_FC_NOW = ICACHE_BURST_FILL_FC;
         end else if (DCACHE_BURST_FILL_VALID && DCACHE_BURST_FILL_PENDING != 4'h0) begin
             for (scan_idx = 0; scan_idx < 4; scan_idx = scan_idx + 1) begin
                 if (!dcache_found) begin
                     dcache_scan_entry = DCACHE_BURST_FILL_NEXT_ENTRY + scan_idx[1:0];
                     if (DCACHE_BURST_FILL_PENDING[dcache_scan_entry]) begin
-                        BURST_PREFETCH_DATA_ENTRY = dcache_scan_entry;
+                        BURST_PREFETCH_DATA_ENTRY_NOW = dcache_scan_entry;
                         dcache_found = 1'b1;
                     end
                 end
             end
-            BURST_PREFETCH_DATA_REQ = 1'b1;
-            BURST_PREFETCH_ADDR = {
+            BURST_PREFETCH_DATA_REQ_NOW = 1'b1;
+            BURST_PREFETCH_ADDR_NOW = {
                 DCACHE_BURST_FILL_TAG,
                 DCACHE_BURST_FILL_LINE,
-                BURST_PREFETCH_DATA_ENTRY,
+                BURST_PREFETCH_DATA_ENTRY_NOW,
                 2'b00
             };
-            BURST_PREFETCH_FC = DCACHE_BURST_FILL_FC;
+            BURST_PREFETCH_FC_NOW = DCACHE_BURST_FILL_FC;
         end
     end
 end
+
+// The bus controller samples address, size and function code live for the whole
+// cycle, so the selected burst context must be held until the cycle completes
+// instead of collapsing when BUS_BSY rises.
+always_ff @(posedge CLK) begin : burst_prefetch_hold
+    if (RESET_CPU) begin
+        BURST_PREFETCH_OP_REQ_HELD <= 1'b0;
+        BURST_PREFETCH_DATA_REQ_HELD <= 1'b0;
+        BURST_PREFETCH_OP_WORD_HELD <= 3'b000;
+        BURST_PREFETCH_DATA_ENTRY_HELD <= 2'b00;
+        BURST_PREFETCH_ADDR_HELD <= 32'h0000_0000;
+        BURST_PREFETCH_FC_HELD <= FC_USER_PROG;
+    end else if (!BUS_BSY) begin
+        BURST_PREFETCH_OP_REQ_HELD <= BURST_PREFETCH_OP_REQ_NOW;
+        BURST_PREFETCH_DATA_REQ_HELD <= BURST_PREFETCH_DATA_REQ_NOW;
+        BURST_PREFETCH_OP_WORD_HELD <= BURST_PREFETCH_OP_WORD_NOW;
+        BURST_PREFETCH_DATA_ENTRY_HELD <= BURST_PREFETCH_DATA_ENTRY_NOW;
+        BURST_PREFETCH_ADDR_HELD <= BURST_PREFETCH_ADDR_NOW;
+        BURST_PREFETCH_FC_HELD <= BURST_PREFETCH_FC_NOW;
+    end
+end
+
+assign BURST_PREFETCH_OP_REQ = BUS_BSY ? BURST_PREFETCH_OP_REQ_HELD : BURST_PREFETCH_OP_REQ_NOW;
+assign BURST_PREFETCH_DATA_REQ = BUS_BSY ? BURST_PREFETCH_DATA_REQ_HELD : BURST_PREFETCH_DATA_REQ_NOW;
+assign BURST_PREFETCH_OP_WORD = BUS_BSY ? BURST_PREFETCH_OP_WORD_HELD : BURST_PREFETCH_OP_WORD_NOW;
+assign BURST_PREFETCH_DATA_ENTRY = BUS_BSY ? BURST_PREFETCH_DATA_ENTRY_HELD : BURST_PREFETCH_DATA_ENTRY_NOW;
+assign BURST_PREFETCH_ADDR = BUS_BSY ? BURST_PREFETCH_ADDR_HELD : BURST_PREFETCH_ADDR_NOW;
+assign BURST_PREFETCH_FC = BUS_BSY ? BURST_PREFETCH_FC_HELD : BURST_PREFETCH_FC_NOW;
 
 // Request/fault latches that decouple core-side combinational logic from bus FSM timing.
 always_ff @(posedge CLK) begin : bus_req_latch
@@ -332,7 +441,8 @@ always_ff @(posedge CLK) begin : bus_req_latch
         MMU_FAULT_OPCODE_ACK <= MMU_RUNTIME_FAULT && OPCODE_REQ_CORE_MISS && !DATA_RD_BUS && !DATA_WR;
         RD_REQ_I <= (DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_DATA_REQ;
         WR_REQ_I <= DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL;
-        OPCODE_REQ_I <= (OPCODE_REQ_CORE_MISS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
+        OPCODE_REQ_I <= (OPCODE_REQ_CORE_MISS && !DATA_RD && !DATA_WR &&
+                         !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
         if (BURST_PREFETCH_OP_REQ) begin
             BUS_CYCLE_BURST <= 1'b1;
             BUS_CYCLE_BURST_IS_OP <= 1'b1;
@@ -428,7 +538,17 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
     logic        walk_fault;
     logic        walk_wp_accum;
     logic        walk_page_m;
+    logic        walk_is_pload;
+    logic [2:0]  walk_start_fc;
+    logic [31:0] walk_start_logical;
+    logic        walk_start_write;
+    logic [31:0] walk_hist_data;
     if (RESET_CPU) begin
+        MMU_TWALK_IS_PLOAD <= 1'b0;
+        MMU_PLOAD_PENDING <= 1'b0;
+        MMU_DESC_HIST_WR_EN <= 1'b0;
+        MMU_DESC_HIST_ADDR <= 32'h0;
+        MMU_DESC_HIST_DATA <= 32'h0;
         MMU_TWALK_BUSY <= 1'b0;
         MMU_TWALK_VALID <= 1'b0;
         MMU_TWALK_FC <= 3'b000;
@@ -457,32 +577,49 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
         MMU_TWALK_FETCH_LO_VALID <= 1'b0;
         MMU_TWALK_FETCH_HI_VALID <= 1'b0;
         MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
-    end else if (BUS_BSY) begin
+    end else if (BUS_BSY && !MMU_TWALK_IS_PLOAD) begin
+        // A runtime walk belongs to the pending access, so it is abandoned once
+        // a bus cycle starts. A PLOAD walk carries its own latched operands.
         MMU_TWALK_BUSY <= 1'b0;
         MMU_TWALK_VALID <= 1'b0;
         MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
         MMU_TWALK_FETCH_LO_VALID <= 1'b0;
         MMU_TWALK_FETCH_HI_VALID <= 1'b0;
+        MMU_DESC_HIST_WR_EN <= 1'b0;
+        if (MMU_PLOAD_START)
+            MMU_PLOAD_PENDING <= 1'b1;
     end else begin
+        MMU_DESC_HIST_WR_EN <= 1'b0;
+        if (MMU_PLOAD_START)
+            MMU_PLOAD_PENDING <= 1'b1;
         case (MMU_TWALK_STATE_INT)
             MMU_TWALK_ST_IDLE: begin
                 MMU_TWALK_BUSY <= 1'b0;
                 if (!MMU_RUNTIME_REQ)
                     MMU_TWALK_VALID <= 1'b0;
+                if (MMU_TWALK_IS_PLOAD && !MMU_TWALK_BUSY)
+                    MMU_TWALK_IS_PLOAD <= 1'b0;
 
-                if (MMU_TWALK_START && !MMU_TWALK_BUSY) begin
-                    root_ptr = (MMU_TC[25] && MMU_RUNTIME_ATC_FC[2]) ? MMU_SRP : MMU_CRP;
+                walk_is_pload = !MMU_TWALK_START && (MMU_PLOAD_START || MMU_PLOAD_PENDING);
+                if ((MMU_TWALK_START || walk_is_pload) && !MMU_TWALK_BUSY && !BUS_BSY) begin
+                    walk_start_fc = walk_is_pload ? MMU_PLOAD_FC : MMU_RUNTIME_ATC_FC;
+                    walk_start_logical = walk_is_pload ? MMU_PLOAD_LOGICAL : ADR_P;
+                    walk_start_write = walk_is_pload ? MMU_PLOAD_WRITE : DATA_WR;
+                    root_ptr = (MMU_TC[25] && walk_start_fc[2]) ? MMU_SRP : MMU_CRP;
 
-                    MMU_TWALK_FC <= MMU_RUNTIME_ATC_FC;
-                    MMU_TWALK_LOGICAL <= ADR_P;
-                    MMU_TWALK_WRITE <= DATA_WR;
+                    MMU_TWALK_IS_PLOAD <= walk_is_pload;
+                    if (walk_is_pload)
+                        MMU_PLOAD_PENDING <= 1'b0;
+                    MMU_TWALK_FC <= walk_start_fc;
+                    MMU_TWALK_LOGICAL <= walk_start_logical;
+                    MMU_TWALK_WRITE <= walk_start_write;
                     MMU_TWALK_TC <= MMU_TC;
                     MMU_TWALK_ROOT_LIMIT <= root_ptr[62:48];
                     MMU_TWALK_ROOT_LIMIT_LOWER <= root_ptr[63];
                     MMU_TWALK_TABLE_BASE <= {root_ptr[31:4], 4'b0000};
                     MMU_TWALK_DESC_SIZE <= (root_ptr[33:32] == 2'b11) ? 4'd8 : 4'd4;
                     MMU_TWALK_DESC_ADDR <= 32'h0;
-                    MMU_TWALK_PAGE_BASE <= ADR_P;
+                    MMU_TWALK_PAGE_BASE <= walk_start_logical;
                     MMU_TWALK_DESC_PTR <= 32'h0;
                     MMU_TWALK_INDEX <= 32'h0;
                     MMU_TWALK_CONSUMED <= 6'd0;
@@ -499,8 +636,28 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                     MMU_TWALK_FETCH_HI_VALID <= 1'b0;
                     MMU_TWALK_VALID <= 1'b0;
 
-                    if (root_ptr[33:32] != 2'b10 && root_ptr[33:32] != 2'b11) begin
-                        walk_result = mmu_twalk_fault_result(ADR_P, 1'b0, DATA_WR);
+                    if (root_ptr[33:32] == 2'b01) begin
+                        // DT=1 root: the table address field is a page offset.
+                        // Its limit applies only when FCL is clear (UM 9.5.1.2).
+                        walk_index = MMU_TC[24] ? {29'h0, walk_start_fc} :
+                                     mmu_index_extract(walk_start_logical, MMU_TC[19:16], 6'd0, MMU_TC[15:12]);
+                        walk_fault = !MMU_TC[24] &&
+                                     mmu_limit_violation(root_ptr[63], root_ptr[62:48], walk_index);
+                        if (walk_fault)
+                            walk_result = mmu_twalk_fault_result(walk_start_logical, 1'b0, walk_start_write);
+                        else
+                            walk_result = mmu_twalk_page_result(
+                                walk_start_logical + {root_ptr[31:4], 4'b0000},
+                                1'b0,
+                                1'b0,
+                                walk_start_write
+                            );
+                        MMU_TWALK_RESULT <= walk_result;
+                        MMU_TWALK_VALID <= 1'b1;
+                        MMU_TWALK_BUSY <= 1'b0;
+                        MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                    end else if (root_ptr[33:32] != 2'b10 && root_ptr[33:32] != 2'b11) begin
+                        walk_result = mmu_twalk_fault_result(walk_start_logical, 1'b0, walk_start_write);
                         MMU_TWALK_RESULT <= walk_result;
                         MMU_TWALK_VALID <= 1'b1;
                         MMU_TWALK_BUSY <= 1'b0;
@@ -616,6 +773,18 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                     walk_fault = 1'b1;
                 if (!walk_fault && MMU_TWALK_DESC_SIZE == 4'd8 && !MMU_TWALK_FC[2] && walk_desc[8])
                     walk_fault = 1'b1;
+
+                if (!walk_fault) begin
+                    walk_hist_data = mmu_desc_history_bits(
+                        walk_desc,
+                        (walk_desc_dt == 2'b01) && MMU_TWALK_WRITE && !walk_wp_accum
+                    );
+                    if (walk_hist_data != walk_desc) begin
+                        MMU_DESC_HIST_WR_EN <= 1'b1;
+                        MMU_DESC_HIST_ADDR <= MMU_TWALK_DESC_ADDR;
+                        MMU_DESC_HIST_DATA <= walk_hist_data;
+                    end
+                end
 
                 if (!walk_fault) begin
                     case (walk_desc_dt)
@@ -753,6 +922,19 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
 
                 if (MMU_TWALK_WRITE && walk_wp_accum)
                     walk_result[32] = 1'b1;
+                if (!walk_fault) begin
+                    walk_hist_data = mmu_desc_history_bits(
+                        walk_lookup[31:0],
+                        MMU_TWALK_WRITE && !walk_wp_accum
+                    );
+                    if (walk_hist_data != walk_lookup[31:0]) begin
+                        MMU_DESC_HIST_WR_EN <= 1'b1;
+                        MMU_DESC_HIST_ADDR <= (MMU_TWALK_DESC_DT == 2'b10) ?
+                                              MMU_TWALK_INDIRECT_SHORT_ADDR :
+                                              MMU_TWALK_INDIRECT_LONG_ADDR;
+                        MMU_DESC_HIST_DATA <= walk_hist_data;
+                    end
+                end
                 MMU_TWALK_RESULT <= walk_result;
                 MMU_TWALK_VALID <= 1'b1;
                 MMU_TWALK_BUSY <= 1'b0;
@@ -768,17 +950,34 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
     end
 end
 
+// PLOAD collects the result of the walk it started; the sequencer writes
+// MMU_TWALK_RESULT in the same cycle it drops MMU_TWALK_BUSY.
+always_ff @(posedge CLK) begin : mmu_pload_result_capture
+    if (RESET_CPU) begin
+        MMU_PLOAD_DONE <= 1'b0;
+        MMU_PLOAD_RESULT <= 36'h0;
+    end else begin
+        MMU_PLOAD_DONE <= MMU_TWALK_IS_PLOAD && !MMU_TWALK_BUSY;
+        if (MMU_TWALK_IS_PLOAD && !MMU_TWALK_BUSY)
+            MMU_PLOAD_RESULT <= MMU_TWALK_RESULT;
+    end
+end
+
 // Descriptor-shadow update model used by MMU table-walk lookups.
 always_ff @(posedge CLK) begin : mmu_desc_shadow_update
     if (RESET_CPU) begin
         MMU_DESC_SHADOW_PENDING <= 1'b0;
         MMU_DESC_SHADOW_PENDING_ADDR <= 32'h0;
         MMU_DESC_SHADOW_PENDING_WR <= 1'b0;
+        MMU_DESC_SHADOW_PENDING_FULL <= 1'b0;
+        MMU_DESC_SHADOW_PENDING_SPAN <= 1'b0;
     end else begin
         if (!BUS_BSY && (DATA_RD_BUS || DATA_WR) && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) begin
             MMU_DESC_SHADOW_PENDING <= 1'b1;
             MMU_DESC_SHADOW_PENDING_ADDR <= ADR_P_PHYS;
             MMU_DESC_SHADOW_PENDING_WR <= DATA_WR;
+            MMU_DESC_SHADOW_PENDING_FULL <= mmu_desc_snoop_full_long(OP_SIZE_BUS, ADR_P_PHYS[1:0]);
+            MMU_DESC_SHADOW_PENDING_SPAN <= mmu_desc_snoop_spans_long(OP_SIZE_BUS, ADR_P_PHYS[1:0]);
         end
 
         if (DATA_RDY_BUSIF_CORE && MMU_DESC_SHADOW_PENDING) begin
@@ -789,9 +988,19 @@ always_ff @(posedge CLK) begin : mmu_desc_shadow_update
     end
 end
 
-assign MMU_DESC_SHADOW_WR_EN = DATA_RDY_BUSIF_CORE && MMU_DESC_SHADOW_PENDING;
-assign MMU_DESC_SHADOW_WR_ADDR = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00};
-assign MMU_DESC_SHADOW_WR_DATA = MMU_DESC_SHADOW_PENDING_WR ? DATA_OUT : DATA_TO_CORE_BUSIF;
+// Snooped bus traffic and table-search history write-back share the shadow write
+// port; the snoop wins so a real memory update is never dropped.
+assign MMU_DESC_SNOOP_WR = DATA_RDY_BUSIF_CORE && MMU_DESC_SHADOW_PENDING;
+assign MMU_DESC_SHADOW_WR_EN = MMU_DESC_SNOOP_WR || MMU_DESC_HIST_WR_EN;
+assign MMU_DESC_SHADOW_WR_VALID = MMU_DESC_SNOOP_WR ? MMU_DESC_SHADOW_PENDING_FULL : 1'b1;
+assign MMU_DESC_SHADOW_WR_ADDR = MMU_DESC_SNOOP_WR ?
+                                 {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00} :
+                                 {MMU_DESC_HIST_ADDR[31:2], 2'b00};
+assign MMU_DESC_SHADOW_WR_DATA = MMU_DESC_SNOOP_WR ?
+                                 (MMU_DESC_SHADOW_PENDING_WR ? DATA_OUT : DATA_TO_CORE_BUSIF) :
+                                 MMU_DESC_HIST_DATA;
+assign MMU_DESC_SHADOW_INV_EN = MMU_DESC_SNOOP_WR && MMU_DESC_SHADOW_PENDING_SPAN;
+assign MMU_DESC_SHADOW_INV_ADDR = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00} + 32'd4;
 
 // Core-visible bus requests: direct when idle, held via latches while BUS_BSY.
 assign RD_REQ = !BUS_BSY ? ((DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_DATA_REQ) : RD_REQ_I;
@@ -800,8 +1009,15 @@ assign OPCODE_REQ_CORE = !BUS_BSY ? OPCODE_RD : OPCODE_REQ_I;
 
 assign OPCODE_REQ_CORE_MISS = OPCODE_REQ_CORE && !ICACHE_HIT_NOW;
 
+// ADR_P presents the data address for as long as the core asserts DATA_RD or
+// DATA_WR, even when no data bus cycle results (cache hit), so an opcode fetch
+// started in that window would run at the data address. While BUS_BSY the
+// request comes from the held latch, which was already qualified.
+assign OPCODE_REQ_BUS_OK = BUS_BSY || (!DATA_RD && !DATA_WR);
+
 // On an instruction-cache hit, satisfy the opcode fetch internally.
-assign OPCODE_REQ = (OPCODE_REQ_CORE_MISS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
+assign OPCODE_REQ = (OPCODE_REQ_CORE_MISS && OPCODE_REQ_BUS_OK &&
+                     !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
 
 assign DATA_RD_BUS = DATA_RD && !DCACHE_HIT_NOW;
 
