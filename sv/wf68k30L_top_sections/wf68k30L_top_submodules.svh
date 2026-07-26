@@ -182,6 +182,8 @@
         .DBENn              (DBENn),
 
         .STERMn             (STERMn),
+        .CIINn              (CIINn),
+        .CACHE_INHIBIT_IN   (CACHE_INHIBIT_IN),
 
         .BRn                (BRn),
         .BGACKn             (BGACKn),

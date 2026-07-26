@@ -1616,3 +1616,259 @@ async def test_dcache_phase8_wrap_order_from_midline_miss(dut):
     assert burst_fill_seen, "D-cache burst-fill context never became active"
     assert bg_order_entries, "Did not observe any D-cache background burst selection"
     h.cleanup()
+
+
+@cocotb.test()
+async def test_ciout_holds_for_the_whole_cycle(dut):
+    """CIOUTn must stay asserted for every clock of the cycle it belongs to.
+
+    UM 7.3.1 drives CIOUT with the address and keeps it valid until the cycle
+    terminates. This TT entry has RWM clear, so the CI decision depends on the
+    read/write request strobes, which the request latches drop after the first
+    clock of the cycle.
+    """
+    h = CPUTestHarness(dut)
+    tt_addr = h.DATA_BASE + 0x260
+    data_addr = h.DATA_BASE + 0x220
+    res = h.RESULT_BASE + 0x7C
+
+    # E=1, CI=1, R/W=1 (read), RWM=0, FC base=supervisor data, FC mask=000.
+    tt0_ci_super_data_read = 0x00FF_8650
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(tt_addr),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(tt0_ci_super_data_read),
+        *move(LONG, DN, 0, AN_IND, 0),             # (A0) = TT0 value
+        *pmove_an_to_tt0(0),                       # PMOVE (A0),TT0
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # supervisor data read
+        *move_to_abs_long(LONG, DN, 1, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x5566_7788)
+    await h.setup(program)
+
+    found = False
+    saw_data_read = False
+    ciout_low_clocks = 0
+    ciout_high_clocks = 0
+
+    for _ in range(28000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            ciout_n = int(dut.CIOUTn.value)
+        except ValueError:
+            continue
+
+        # Every clock of the read cycle, not just its first.
+        if as_n == 0 and rw_n == 1 and addr == data_addr:
+            saw_data_read = True
+            if ciout_n == 0:
+                ciout_low_clocks += 1
+            else:
+                ciout_high_clocks += 1
+
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, "CIOUT hold test did not complete"
+    assert h.mem.read(res, 4) == 0x5566_7788, "Result writeback mismatch in CIOUT hold test"
+    assert saw_data_read, "Did not observe the TT-CI-matched data read cycle"
+    assert ciout_low_clocks >= 2, (
+        f"Expected the read cycle to span at least two clocks with CIOUTn asserted, saw {ciout_low_clocks}"
+    )
+    assert ciout_high_clocks == 0, (
+        f"CIOUTn negated for {ciout_high_clocks} clock(s) inside a cache-inhibited read cycle"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_ciin_prevents_dcache_read_fill(dut):
+    """CIIN on a read cycle must keep the data out of the D-cache (UM 6.1.3.1).
+
+    The control for this case is test_dcache_read_hit_after_fill, which shows
+    the second read of the same longword served from the cache.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x3A0
+    res = h.RESULT_BASE + 0xC0
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0100),                    # ED=1
+        *movec_dn_to_cr(0, CR_CACR),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # read 1 with CIIN asserted
+        *move(LONG, AN_IND, 0, DN, 2),             # read 2 must reach the bus again
+        *move_to_abs_long(LONG, DN, 2, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x1234_ABCD)
+    await h.setup(program)
+
+    found = False
+    prev_as_n = 1
+    data_reads = 0
+    for _ in range(28000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+        except ValueError:
+            continue
+
+        # The responding device marks this longword non-cachable.
+        dut.CIINn.value = 0 if (as_n == 0 and addr == data_addr) else 1
+
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr == data_addr:
+            data_reads += 1
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    dut.CIINn.value = 1
+    assert found, "CIIN D-cache read-fill test did not complete"
+    assert h.mem.read(res, 4) == 0x1234_ABCD, "CIIN read must still deliver the data to the core"
+    assert data_reads == 2, (
+        f"Expected both reads of a CIIN-marked longword to reach the bus, saw {data_reads}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_ciin_ignored_on_write_cycles(dut):
+    """CIIN is ignored during write cycles (UM 5.7.1), so a write hit still updates."""
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x3C0
+    res = h.RESULT_BASE + 0xC4
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0100),                    # ED=1
+        *movec_dn_to_cr(0, CR_CACR),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # warm fill, CIIN negated
+        *moveq(0x22, 2),
+        *addq(LONG, 3, AN, 0),                     # A0 = data_addr + 3
+        *move(BYTE, DN, 2, AN_IND, 0),             # write hit with CIIN asserted
+        *subq(LONG, 3, AN, 0),                     # A0 = data_addr
+        *move(LONG, AN_IND, 0, DN, 3),             # must hit the merged entry
+        *move_to_abs_long(LONG, DN, 3, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x7788_99AA)
+    await h.setup(program)
+
+    found = False
+    prev_as_n = 1
+    data_reads = 0
+    for _ in range(28000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+        except ValueError:
+            continue
+
+        # Assert CIIN on every write cycle; the core must ignore it there.
+        dut.CIINn.value = 0 if (as_n == 0 and rw_n == 0) else 1
+
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr == data_addr:
+            data_reads += 1
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    dut.CIINn.value = 1
+    assert found, "CIIN write-cycle test did not complete"
+    assert h.mem.read(res, 4) == 0x7788_9922, (
+        "CIIN on a write cycle must not stop the D-cache entry being updated"
+    )
+    assert data_reads == 1, f"Expected one external read (warm fill only), saw {data_reads}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_ciin_prevents_icache_fill(dut):
+    """CIIN on an instruction prefetch must keep the word out of the I-cache."""
+    h = CPUTestHarness(dut)
+
+    # Same two loops as test_icache_hits_reduce_branch_loop_refetches, but with
+    # CIIN asserted for every prefetch so the second loop cannot be cached.
+    loop1_addrs = {0x000102, 0x000104}
+    loop2_addrs = {0x000112, 0x000114}
+    res0 = h.RESULT_BASE + 0xC8
+    res1 = h.RESULT_BASE + 0xCC
+
+    program = [
+        *moveq(6, 2),
+        *subq(LONG, 1, DN, 2),
+        *bcc(CC_NE, -4),
+
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0001),                    # EI=1
+        *movec_dn_to_cr(0, CR_CACR),
+
+        *moveq(6, 3),
+        *subq(LONG, 1, DN, 3),
+        *bcc(CC_NE, -4),
+
+        *move_to_abs_long(LONG, DN, 2, res0),
+        *move_to_abs_long(LONG, DN, 3, res1),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+
+    found = False
+    prev_as_n = 1
+    loop1_fetches = 0
+    loop2_fetches = 0
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+        except ValueError:
+            continue
+
+        # Program space is non-cachable for this system.
+        dut.CIINn.value = 0 if (as_n == 0 and rw_n == 1 and addr < h.DATA_BASE) else 1
+
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1:
+            if addr in loop1_addrs:
+                loop1_fetches += 1
+            if addr in loop2_addrs:
+                loop2_fetches += 1
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    dut.CIINn.value = 1
+    assert found, "CIIN I-cache fill test did not complete"
+    assert h.mem.read(res0, 4) == 0, "Loop-1 counter did not terminate at zero"
+    assert h.mem.read(res1, 4) == 0, "Loop-2 counter did not terminate at zero"
+    assert loop2_fetches >= loop1_fetches, (
+        f"CIIN-marked prefetches were cached anyway: loop1={loop1_fetches}, loop2={loop2_fetches}"
+    )
+    h.cleanup()

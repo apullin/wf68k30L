@@ -4,6 +4,7 @@ always_ff @(posedge CLK) begin : adr_latches
         ADR_LATCH <= ADR_P;
         ADR_P_PHYS_LATCH <= ADR_P_PHYS_CALC;
         FC_LATCH <= FC_I;
+        CIOUT_LATCH <= CIOUT_ASSERT_NOW;
     end else if (!BERRn) begin
         FAULT_ADR <= ADR_LATCH;
     end
@@ -42,8 +43,19 @@ always_comb begin : ciout_generation
     write_access = WR_REQ;
     rmw_access = RMC;
 
-    CIOUT_ASSERT = mmu_ci_out(FC_I, ADR_P, read_access, write_access, rmw_access, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
+    // A background burst-completion cycle runs at the burst address, not at the
+    // core's, and is only ever started for a line that already passed the
+    // cache-inhibit check, so its CI status is negated by construction.
+    if (BURST_PREFETCH_OP_REQ || BURST_PREFETCH_DATA_REQ)
+        CIOUT_ASSERT_NOW = 1'b0;
+    else
+        CIOUT_ASSERT_NOW = mmu_ci_out(FC_I, ADR_P, read_access, write_access, rmw_access, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
 end
+
+// UM 7.3.1: CIOUT is driven with the address and stays valid for the whole
+// cycle, so it must reflect the access that requested it. ADR_P and the request
+// strobes both move on while BUS_BSY.
+assign CIOUT_ASSERT = BUS_BSY ? CIOUT_LATCH : CIOUT_ASSERT_NOW;
 
 assign CIOUTn = (ASn == 1'b0) ? !CIOUT_ASSERT : 1'b1;
 
@@ -84,8 +96,9 @@ always_ff @(posedge CLK) begin : cbreq_latch
         CBREQ_REQ_LATCH <= 1'b0;
     end else if (!BUS_BSY) begin
         CBREQ_REQ_LATCH <= CBREQ_REQ_NOW;
-    end else if (!CBACKn) begin
+    end else if (!CBACKn || CACHE_INHIBIT_IN) begin
         // In this surface model, a burst acknowledge consumes the request.
+        // UM 6.1.3.1: CIIN also negates CBREQ, aborting the burst.
         CBREQ_REQ_LATCH <= 1'b0;
     end
 end
