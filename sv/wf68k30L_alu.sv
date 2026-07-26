@@ -717,7 +717,14 @@ always_comb begin : cond_codes_comb
 
     // Integer result/source/destination MSBs for arithmetic flag computation
     case (OP)
-        ADD, ADDI, ADDQ, ADDX, CMP, CMPA, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX: begin
+        CMPA: begin
+            // A word source is sign extended and compared against the full
+            // address register, so the flags are always 32 bit wide.
+            RM_sig = RESULT_INTOP[31];
+            SM_sig = OP1_SIGNEXT[31];
+            DM_sig = OP2[31];
+        end
+        ADD, ADDI, ADDQ, ADDX, CMP, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX: begin
             case (OP_SIZE)
                 BYTE: begin
                     RM_sig = RESULT_INTOP[7];
@@ -761,8 +768,10 @@ always_comb begin : cond_codes_comb
     // Z flag computation
     Z = 1'b0;
     case (OP)
-        ADD, ADDI, ADDQ, ADDX, CAS, CAS2, CMP, CMPA, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX:
+        ADD, ADDI, ADDQ, ADDX, CAS, CAS2, CMP, CMPI, CMPM, NEG, NEGX, SUB, SUBI, SUBQ, SUBX:
             Z = compute_z_sized(RESULT_INTOP, OP_SIZE);
+        CMPA: // See above: the comparison is 32 bit wide for both sizes.
+            Z = compute_z_sized(RESULT_INTOP, LONG);
         AND_B, ANDI, EOR, EORI, OR_B, ORI, NOT_B:
             Z = compute_z_sized(RESULT_LOGOP, OP_SIZE);
         ASL, ASR, LSL, LSR, ROTL, ROTR, ROXL, ROXR:

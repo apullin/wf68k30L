@@ -170,6 +170,34 @@ async def test_cmpa_w_full_width_flags(dut):
 
 
 @cocotb.test()
+async def test_cmpa_w_sign_extend_vs_cmpi_w_sizing(dut):
+    """CMPA.W compares the sign-extended source over 32 bits; CMPI.W stays 16-bit."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x207C, 0xFFFF, 0x8000,      # MOVEA.L #$FFFF8000,A0
+        0xB0FC, 0x8000,              # CMPA.W #$8000,A0 -> sext equal
+        0x42C2,                       # MOVE CCR,D2
+        0x23C2, 0x0002, 0x0000,      # MOVE.L D2,($20000).L
+        0x203C, 0x0001, 0x8000,      # MOVE.L #$00018000,D0
+        0x0C40, 0x8000,              # CMPI.W #$8000,D0 -> low word equal
+        0x42C2,                       # MOVE CCR,D2
+        0x23C2, 0x0002, 0x0004,      # MOVE.L D2,($20004).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+    cmpa = h.mem.read(RES, 4) & 0x0F
+    cmpi = h.mem.read(RES + 4, 4) & 0x0F
+    assert cmpa == 0b0100, (
+        f"CMPA.W #$8000 vs A0=0xFFFF8000: NZVC=0b{cmpa:04b}, expected 0b0100 "
+        f"(sign-extended source makes the 32-bit compare equal)"
+    )
+    assert cmpi == 0b0100, (
+        f"CMPI.W #$8000 vs D0=0x00018000: NZVC=0b{cmpi:04b}, expected 0b0100 "
+        f"(only the low word takes part)"
+    )
+
+
+@cocotb.test()
 async def test_divs_l_64bit_overflow(dut):
     """DIVS.L D2,D1:D0 with 2^32/1: quotient overflows 32 bits -> V=1, regs unchanged."""
     h = CPUTestHarness(dut)
