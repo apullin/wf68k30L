@@ -1391,6 +1391,98 @@ async def test_mmu_desc_shadow_survives_subword_traffic(dut):
 
 
 @cocotb.test()
+async def test_mmu_opcode_fetch_never_requested_at_data_address(dut):
+    """No opcode bus fetch may be requested while ADR_P still shows a data address.
+
+    `ADR_P` selects the data address for as long as the core asserts DATA_RD or
+    DATA_WR, including when the access is satisfied without a bus cycle, so an
+    opcode fetch started in that window fetches from the data address and the
+    result is latched into the instruction pipe.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xA40)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x13579BDF
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 3, DN, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *move(LONG, AN_IND, 0, DN, 2),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE + 4),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    done = False
+    for _ in range(70000):
+        await RisingEdge(dut.CLK)
+        try:
+            opcode_req = int(dut.OPCODE_REQ.value)
+            burst_op_req = int(dut.BURST_PREFETCH_OP_REQ.value)
+            bus_bsy = int(dut.BUS_BSY.value)
+            data_rd = int(dut.DATA_RD.value)
+            data_wr = int(dut.DATA_WR.value)
+        except ValueError:
+            continue
+        if opcode_req and not burst_op_req and not bus_bsy:
+            assert not (data_rd or data_wr), (
+                "Opcode bus fetch requested while ADR_P presents the data address "
+                f"0x{int(dut.ADR_P.value):08X}"
+            )
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            done = True
+            break
+
+    assert done, "Opcode-fetch address invariant test did not complete"
+    assert h.read_result_long(0) == expected_value
+    assert h.read_result_long(4) == expected_value
+    h.cleanup()
+
+
+@cocotb.test()
 async def test_mmu_desc_shadow_subword_touch_does_not_fabricate_translation(dut):
     """A byte write inside a descriptor longword must not synthesize a descriptor.
 

@@ -140,6 +140,7 @@ logic [31:0] MMU_TWALK_DESC_PAGE_BASE;
 logic [31:0] MMU_TWALK_DESC_TABLE_BASE_NEXT;
 logic [31:0] MMU_TWALK_NEXT_LIMIT_INDEX;
 logic [31:0] MMU_TWALK_OFFSET_MASK_CUR;
+logic        OPCODE_REQ_BUS_OK;
 
 assign MMU_TWALK_INDIRECT_SHORT_ADDR = {MMU_TWALK_DESC_PTR[31:2], 2'b00};
 assign MMU_TWALK_INDIRECT_LONG_ADDR = {MMU_TWALK_DESC_PTR[31:3], 3'b000};
@@ -368,7 +369,8 @@ always_ff @(posedge CLK) begin : bus_req_latch
         MMU_FAULT_OPCODE_ACK <= MMU_RUNTIME_FAULT && OPCODE_REQ_CORE_MISS && !DATA_RD_BUS && !DATA_WR;
         RD_REQ_I <= (DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_DATA_REQ;
         WR_REQ_I <= DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL;
-        OPCODE_REQ_I <= (OPCODE_REQ_CORE_MISS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
+        OPCODE_REQ_I <= (OPCODE_REQ_CORE_MISS && !DATA_RD && !DATA_WR &&
+                         !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
         if (BURST_PREFETCH_OP_REQ) begin
             BUS_CYCLE_BURST <= 1'b1;
             BUS_CYCLE_BURST_IS_OP <= 1'b1;
@@ -843,8 +845,15 @@ assign OPCODE_REQ_CORE = !BUS_BSY ? OPCODE_RD : OPCODE_REQ_I;
 
 assign OPCODE_REQ_CORE_MISS = OPCODE_REQ_CORE && !ICACHE_HIT_NOW;
 
+// ADR_P presents the data address for as long as the core asserts DATA_RD or
+// DATA_WR, even when no data bus cycle results (cache hit), so an opcode fetch
+// started in that window would run at the data address. While BUS_BSY the
+// request comes from the held latch, which was already qualified.
+assign OPCODE_REQ_BUS_OK = BUS_BSY || (!DATA_RD && !DATA_WR);
+
 // On an instruction-cache hit, satisfy the opcode fetch internally.
-assign OPCODE_REQ = (OPCODE_REQ_CORE_MISS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
+assign OPCODE_REQ = (OPCODE_REQ_CORE_MISS && OPCODE_REQ_BUS_OK &&
+                     !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
 
 assign DATA_RD_BUS = DATA_RD && !DCACHE_HIT_NOW;
 
