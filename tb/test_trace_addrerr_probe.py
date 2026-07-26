@@ -206,6 +206,40 @@ async def test_trace_t0_taken_branch_traces(dut):
 
 
 @cocotb.test()
+async def test_rte_with_odd_frame_pc_raises_address_error(dut):
+    """An odd return PC in an RTE frame must raise an address error (vector 3),
+    not spin re-executing the same RTE."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x001800
+    program = [
+        0x2E7C, 0x0000, 0x1800,      # MOVEA.L #$1800,A7
+        0x4E73,                      # RTE
+        0x4E71, 0x4E71,              # NOP NOP (must not be reached)
+    ]
+    await _setup(h, program, [(3 * 4, HANDLER2_BASE, ADDRERR_HANDLER)])
+    # Format-0 frame whose return PC is odd.
+    h.mem.load_words(frame_sp, [0x2700, 0x0000, 0x0501, 0x0080])
+
+    found = False
+    for _ in range(6000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+    marker = h.mem.read(MARKER_ADDR, 4)
+    fmt = h.mem.read(FMT_ADDR, 2)
+    assert found, (
+        f"RTE with an odd frame PC never raised an exception "
+        f"(marker=0x{marker:08X}) - the RTE is looping"
+    )
+    assert marker == 0xBAD00003, f"Wrong handler ran: marker=0x{marker:08X}"
+    assert (fmt & 0xFFF) == 0x00C, (
+        f"Vector offset in frame = 0x{fmt & 0xFFF:03X}; expected 0x00C (vec 3); "
+        f"full format word 0x{fmt:04X}"
+    )
+
+
+@cocotb.test()
 async def test_address_error_on_odd_jmp(dut):
     """JMP to an odd address must take vector 3 (address error)."""
     h = CPUTestHarness(dut)

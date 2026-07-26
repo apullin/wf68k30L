@@ -263,6 +263,8 @@ logic [15:0] rte_bf_ssw;
 logic        rte_bf_c_fault_restore;
 logic        rte_bf_b_fault_restore;
 logic        rte_bf_need_rerun;
+logic        rte_pc_odd;
+logic        rte_aerr_hold;
 
 // True when any exception pending flag is asserted.
 logic        any_exception_pending;
@@ -366,7 +368,7 @@ always_ff @(posedge CLK) begin : pending_system_faults
         EX_P_BERR <= 1'b0;
 
     // Address error
-    if (TRAP_AERR)
+    if (TRAP_AERR || rte_pc_odd)
         EX_P_AERR <= 1'b1;
     else if (EX_STATE == EXS_BUILD_STACK && EXCEPTION == EX_AERR)
         EX_P_AERR <= 1'b0;
@@ -444,8 +446,24 @@ always_comb begin : decode_instruction_trap_source
     else if ((EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE) ||
              (EX_STATE == EXS_EXAMINE_VERSION && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE))
         trap_source = TRAP_SRC_FORMAT;
-    else if (TRAP_CODE_OPC == T_RTE)
+    else if (TRAP_CODE_OPC == T_RTE && !rte_pc_odd && !rte_aerr_hold)
         trap_source = TRAP_SRC_RTE;
+end
+
+// An odd return PC in the frame abandons the RTE and raises an address error.
+// The opword trap code is only cleared by IPIPE_FLUSH, which does not happen
+// on the abort, so the RTE source stays suppressed until the address error has
+// refilled the pipe - otherwise the same RTE would immediately re-arm.
+assign rte_pc_odd = (EXCEPTION == EX_RTE && EX_STATE == EXS_RESTORE_PC &&
+                     DATA_RDY && DATA_VALID && DATA_0);
+
+always_ff @(posedge CLK) begin : rte_odd_pc_abort
+    if (SYS_INIT)
+        rte_aerr_hold <= 1'b0;
+    else if (rte_pc_odd)
+        rte_aerr_hold <= 1'b1;
+    else if (EX_STATE == EXS_REFILL_PIPE && NEXT_EX_STATE != EXS_REFILL_PIPE)
+        rte_aerr_hold <= 1'b0;
 end
 
 always_comb begin : decode_instruction_trap_clear
@@ -459,6 +477,8 @@ always_comb begin : decode_instruction_trap_clear
 		        clear_instruction_traps = 1'b1;
         else if (EXCEPTION == EX_RTE && EX_STATE == EXS_RESTORE_STATUS && DATA_RDY && DATA_VALID &&
                  NEXT_EX_STATE == EXS_IDLE)
+                clear_instruction_traps = 1'b1;
+        else if (rte_pc_odd)
                 clear_instruction_traps = 1'b1;
 end
 
