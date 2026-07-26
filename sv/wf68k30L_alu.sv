@@ -337,12 +337,14 @@ always_comb begin : bitfield_op
             RESULT_BITFIELD[39:8] = shifted_data[31:0] & width_mask;
         end
         BFFFO: begin // Result is in (39 downto 8).
-            // Locate first set bit in the extracted field; if none, count full field width.
+            // Scan from the field MSB (field_data[field_span-1]) towards the LSB:
+            // the result is the leading zero count, or the full field width when
+            // the field is zero. Bits at or above field_span are masked off.
             BFFFO_CNT = field_span;
             bfffo_found = 1'b0;
-            for (i = 0; i < 40; i = i + 1) begin
-                if (!bfffo_found && i < field_span && field_data[i]) begin
-                    BFFFO_CNT = i[5:0];
+            for (i = 39; i >= 0; i = i - 1) begin
+                if (!bfffo_found && field_data[i]) begin
+                    BFFFO_CNT = field_span - 6'd1 - i[5:0];
                     bfffo_found = 1'b1;
                 end
             end

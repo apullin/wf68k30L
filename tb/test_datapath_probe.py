@@ -102,6 +102,28 @@ async def test_bfffo_leading_zero_count(dut):
 
 
 @cocotb.test()
+async def test_bfffo_offset_and_empty_field(dut):
+    """BFFFO adds the field offset to the count; an all-zero field gives offset+width."""
+    h = CPUTestHarness(dut)
+    program = [
+        0x203C, 0x0030, 0x0000,      # MOVE.L #$00300000,D0
+        0xEDC0, 0x1210,              # BFFFO D0{8:16},D1
+        0x23C1, 0x0002, 0x0000,      # MOVE.L D1,($20000).L
+        0x203C, 0x0000, 0x0000,      # MOVE.L #0,D0
+        0xEDC0, 0x1000,              # BFFFO D0{0:32},D1
+        0x23C1, 0x0002, 0x0004,      # MOVE.L D1,($20004).L
+        *SENTINEL, 0x60FE,
+    ]
+    assert await _run(h, program), "program did not complete"
+    sub = h.mem.read(RES, 4)
+    empty = h.mem.read(RES + 4, 4)
+    assert (sub, empty) == (10, 32), (
+        f"BFFFO: D0=0x00300000{{8:16}} gave {sub} (expected 10); "
+        f"zero field {{0:32}} gave {empty} (expected 32)"
+    )
+
+
+@cocotb.test()
 async def test_divu_w_zero_word_divisor_traps(dut):
     """DIVU.W D2,D0 with D2=0x00010000 (low word 0) must take vector 5."""
     h = CPUTestHarness(dut)
