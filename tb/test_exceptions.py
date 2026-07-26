@@ -1751,6 +1751,46 @@ async def test_rte_format_a_rerun_ssw_uses_refill_path(dut):
     h.cleanup()
 
 
+@cocotb.test()
+async def test_rte_format_9_deallocates_twenty_bytes(dut):
+    """UM 8.1.13/Table 8-6: format $9 is a 10-word frame, so RTE must
+    deallocate 0x14 bytes - matching the ten words the builder pushes."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001C00
+    target_pc = 0x00000500
+    instr_adr = 0x00000100
+
+    target_code = _handler_code_read_sp(h, 0x5F)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    frame = [0x0000] * 10
+    frame[0x00 // 2] = 0x2700
+    frame[0x02 // 2] = (target_pc >> 16) & 0xFFFF
+    frame[0x04 // 2] = target_pc & 0xFFFF
+    frame[0x06 // 2] = 0x9000 | 0x034        # format 9, vector offset 0x34 (vector 13)
+    frame[0x08 // 2] = (instr_adr >> 16) & 0xFFFF
+    frame[0x0A // 2] = instr_adr & 0xFFFF
+    h.mem.load_words(frame_sp, frame)
+
+    found = await h.run_until_sentinel(max_cycles=6000)
+    marker = h.read_result_long(0)
+    sp_after = h.read_result_long(4)
+    assert found, f"Sentinel not reached after format-9 RTE (marker=0x{marker:08X})"
+    assert marker == 0x5F, f"Format-9 RTE reached the wrong code: 0x{marker:08X}"
+    assert sp_after == frame_sp + 0x14, (
+        f"SP after format-9 RTE = 0x{sp_after:08X}; expected 0x{frame_sp + 0x14:08X} "
+        f"(ten-word frame = 0x14 bytes)"
+    )
+    h.cleanup()
+
+
 # =========================================================================
 # TRAP with RTE: verify we can return from a trap handler
 # =========================================================================

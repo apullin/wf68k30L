@@ -628,7 +628,7 @@ always_comb begin : stack_frame_displacement
     case (STACK_FORMAT_I)
         4'h0, 4'h1: DISPLACEMENT = 8'h08; // Format 0/1: 4-word frame.
         4'h2:       DISPLACEMENT = 8'h0C; // Format 2: 6-word frame.
-        4'h9:       DISPLACEMENT = 8'h12; // Format 9: coprocessor mid-instruction.
+        4'h9:       DISPLACEMENT = 8'h14; // Format 9: 10-word coprocessor mid-instruction.
         4'hA:       DISPLACEMENT = 8'h20; // Format A: short bus/address error.
         default:    DISPLACEMENT = 8'h5C; // Format B: long bus/address error.
     endcase
