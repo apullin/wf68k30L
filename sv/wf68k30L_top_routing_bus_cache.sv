@@ -131,6 +131,10 @@ logic [31:0] MMU_DESC_SHADOW_WR_ADDR;
 logic [31:0] MMU_DESC_SHADOW_WR_DATA;
 logic        MMU_DESC_SHADOW_INV_EN;
 logic [31:0] MMU_DESC_SHADOW_INV_ADDR;
+logic        MMU_DESC_SNOOP_WR;
+logic        MMU_DESC_HIST_WR_EN;
+logic [31:0] MMU_DESC_HIST_ADDR;
+logic [31:0] MMU_DESC_HIST_DATA;
 logic [31:0] MMU_TWALK_FETCH_LO_WORD;
 logic [31:0] MMU_TWALK_FETCH_HI_WORD;
 logic        MMU_TWALK_FETCH_LO_VALID;
@@ -166,6 +170,21 @@ logic [2:0]  BURST_PREFETCH_FC_HELD;
 
 assign MMU_TWALK_INDIRECT_SHORT_ADDR = {MMU_TWALK_DESC_PTR[31:2], 2'b00};
 assign MMU_TWALK_INDIRECT_LONG_ADDR = {MMU_TWALK_DESC_PTR[31:3], 3'b000};
+
+// UM 9.5.2: during a table search the U bit of every descriptor encountered is
+// set, and for a write access the M bit of the page descriptor is set unless a
+// WP bit or a supervisor violation was encountered. U is bit 3, M is bit 4 of
+// the descriptor status (UM Figures 9-10..9-14).
+function automatic logic [31:0] mmu_desc_history_bits(
+    input logic [31:0] desc,
+    input logic        set_modified
+);
+begin
+    mmu_desc_history_bits = desc | 32'h0000_0008;
+    if (set_modified)
+        mmu_desc_history_bits = mmu_desc_history_bits | 32'h0000_0010;
+end
+endfunction
 
 // Descriptors are longword entities, so only an aligned longword access carries
 // a complete shadow update; anything else is captured as an invalidation.
@@ -523,9 +542,13 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
     logic [2:0]  walk_start_fc;
     logic [31:0] walk_start_logical;
     logic        walk_start_write;
+    logic [31:0] walk_hist_data;
     if (RESET_CPU) begin
         MMU_TWALK_IS_PLOAD <= 1'b0;
         MMU_PLOAD_PENDING <= 1'b0;
+        MMU_DESC_HIST_WR_EN <= 1'b0;
+        MMU_DESC_HIST_ADDR <= 32'h0;
+        MMU_DESC_HIST_DATA <= 32'h0;
         MMU_TWALK_BUSY <= 1'b0;
         MMU_TWALK_VALID <= 1'b0;
         MMU_TWALK_FC <= 3'b000;
@@ -562,9 +585,11 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
         MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
         MMU_TWALK_FETCH_LO_VALID <= 1'b0;
         MMU_TWALK_FETCH_HI_VALID <= 1'b0;
+        MMU_DESC_HIST_WR_EN <= 1'b0;
         if (MMU_PLOAD_START)
             MMU_PLOAD_PENDING <= 1'b1;
     end else begin
+        MMU_DESC_HIST_WR_EN <= 1'b0;
         if (MMU_PLOAD_START)
             MMU_PLOAD_PENDING <= 1'b1;
         case (MMU_TWALK_STATE_INT)
@@ -750,6 +775,18 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                     walk_fault = 1'b1;
 
                 if (!walk_fault) begin
+                    walk_hist_data = mmu_desc_history_bits(
+                        walk_desc,
+                        (walk_desc_dt == 2'b01) && MMU_TWALK_WRITE && !walk_wp_accum
+                    );
+                    if (walk_hist_data != walk_desc) begin
+                        MMU_DESC_HIST_WR_EN <= 1'b1;
+                        MMU_DESC_HIST_ADDR <= MMU_TWALK_DESC_ADDR;
+                        MMU_DESC_HIST_DATA <= walk_hist_data;
+                    end
+                end
+
+                if (!walk_fault) begin
                     case (walk_desc_dt)
                         2'b00: begin
                             walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
@@ -885,6 +922,19 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
 
                 if (MMU_TWALK_WRITE && walk_wp_accum)
                     walk_result[32] = 1'b1;
+                if (!walk_fault) begin
+                    walk_hist_data = mmu_desc_history_bits(
+                        walk_lookup[31:0],
+                        MMU_TWALK_WRITE && !walk_wp_accum
+                    );
+                    if (walk_hist_data != walk_lookup[31:0]) begin
+                        MMU_DESC_HIST_WR_EN <= 1'b1;
+                        MMU_DESC_HIST_ADDR <= (MMU_TWALK_DESC_DT == 2'b10) ?
+                                              MMU_TWALK_INDIRECT_SHORT_ADDR :
+                                              MMU_TWALK_INDIRECT_LONG_ADDR;
+                        MMU_DESC_HIST_DATA <= walk_hist_data;
+                    end
+                end
                 MMU_TWALK_RESULT <= walk_result;
                 MMU_TWALK_VALID <= 1'b1;
                 MMU_TWALK_BUSY <= 1'b0;
@@ -938,11 +988,18 @@ always_ff @(posedge CLK) begin : mmu_desc_shadow_update
     end
 end
 
-assign MMU_DESC_SHADOW_WR_EN = DATA_RDY_BUSIF_CORE && MMU_DESC_SHADOW_PENDING;
-assign MMU_DESC_SHADOW_WR_VALID = MMU_DESC_SHADOW_PENDING_FULL;
-assign MMU_DESC_SHADOW_WR_ADDR = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00};
-assign MMU_DESC_SHADOW_WR_DATA = MMU_DESC_SHADOW_PENDING_WR ? DATA_OUT : DATA_TO_CORE_BUSIF;
-assign MMU_DESC_SHADOW_INV_EN = MMU_DESC_SHADOW_WR_EN && MMU_DESC_SHADOW_PENDING_SPAN;
+// Snooped bus traffic and table-search history write-back share the shadow write
+// port; the snoop wins so a real memory update is never dropped.
+assign MMU_DESC_SNOOP_WR = DATA_RDY_BUSIF_CORE && MMU_DESC_SHADOW_PENDING;
+assign MMU_DESC_SHADOW_WR_EN = MMU_DESC_SNOOP_WR || MMU_DESC_HIST_WR_EN;
+assign MMU_DESC_SHADOW_WR_VALID = MMU_DESC_SNOOP_WR ? MMU_DESC_SHADOW_PENDING_FULL : 1'b1;
+assign MMU_DESC_SHADOW_WR_ADDR = MMU_DESC_SNOOP_WR ?
+                                 {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00} :
+                                 {MMU_DESC_HIST_ADDR[31:2], 2'b00};
+assign MMU_DESC_SHADOW_WR_DATA = MMU_DESC_SNOOP_WR ?
+                                 (MMU_DESC_SHADOW_PENDING_WR ? DATA_OUT : DATA_TO_CORE_BUSIF) :
+                                 MMU_DESC_HIST_DATA;
+assign MMU_DESC_SHADOW_INV_EN = MMU_DESC_SNOOP_WR && MMU_DESC_SHADOW_PENDING_SPAN;
 assign MMU_DESC_SHADOW_INV_ADDR = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00} + 32'd4;
 
 // Core-visible bus requests: direct when idle, held via latches while BUS_BSY.

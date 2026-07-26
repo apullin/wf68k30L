@@ -27,6 +27,7 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic        MMU_RUNTIME_ATC_B,
     input  logic        MMU_RUNTIME_ATC_W,
     input  logic        MMU_RUNTIME_ATC_M,
+    input  logic        MMU_RUNTIME_ATC_M_SET,
     input  logic [15:0] BIW_1,
     input  logic [31:0] DR_OUT_1,
     input  logic [2:0]  SFC,
@@ -376,6 +377,17 @@ always_ff @(posedge CLK) begin : mmu_registers
                 MMU_PLOAD_FC <= atc_fc;
                 MMU_PLOAD_LOGICAL <= atc_logical;
                 MMU_PLOAD_WRITE <= !BIW_1[9];
+            end
+        end
+
+        // A write to a page whose entry has M clear sets M in the entry (UM 9.4).
+        if (MMU_RUNTIME_ATC_M_SET) begin
+            atc_set_idx = mmu_atc_set_idx(MMU_RUNTIME_ATC_FC, MMU_RUNTIME_ATC_TAG);
+            for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
+                if (MMU_ATC_V[atc_set_idx][way_i] &&
+                    MMU_ATC_FC[atc_set_idx][way_i] == MMU_RUNTIME_ATC_FC &&
+                    MMU_ATC_TAG[atc_set_idx][way_i] == MMU_RUNTIME_ATC_TAG)
+                    MMU_ATC_M[atc_set_idx][way_i] <= 1'b1;
             end
         end
 

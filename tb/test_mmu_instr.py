@@ -1392,6 +1392,104 @@ async def test_mmu_desc_shadow_survives_subword_traffic(dut):
 
 
 @cocotb.test()
+async def test_mmu_write_sets_modified_in_atc_and_descriptor(dut):
+    """A write must set M in the ATC entry and in the page descriptor.
+
+    UM 9.4: "This bit is set when a valid write access to the logical address
+    corresponding to the entry occurs." UM 9.5.2: "when the table search is for
+    a write access and the M bit of the page descriptor is clear, the processor
+    sets the bit".
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xC00)
+    mmusr_read = h.DATA_BASE + 0xC80
+    mmusr_write = h.DATA_BASE + 0xCA0
+    mmusr_level7 = h.DATA_BASE + 0xCC0
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 3, DN, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+
+        *move(LONG, AN_IND, 0, DN, 1),        # Read: refills the ATC with M=0.
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(mmusr_read),
+        0xF012, 0x6200,                       # PMOVE MMUSR,(A2)
+
+        *move(LONG, DN, 1, AN_IND, 0),        # Write hit: must set M in the entry.
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_write),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+
+        0xF000, 0x2400,                       # PFLUSHA
+        *move(LONG, DN, 1, AN_IND, 0),        # Write miss: search sets M in the descriptor.
+        0xF010, 0x9E15,                       # PTESTR #5,(A0),#7
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(mmusr_level7),
+        0xF014, 0x6200,                       # PMOVE MMUSR,(A4)
+
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001)  # DT=1, U=0, M=0
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=90000)
+    assert found, "Modified-bit tracking test did not complete"
+
+    mmusr_r = h.mem.read(mmusr_read, 2)
+    mmusr_w = h.mem.read(mmusr_write, 2)
+    mmusr_7 = h.mem.read(mmusr_level7, 2)
+
+    assert (mmusr_r & MMUSR_I) == 0, f"Read should leave a valid entry, got 0x{mmusr_r:04X}"
+    assert (mmusr_r & MMUSR_M) == 0, f"Read must not set M, got 0x{mmusr_r:04X}"
+    assert (mmusr_w & MMUSR_M) != 0, f"Write hit must set M in the ATC entry, got 0x{mmusr_w:04X}"
+    assert (mmusr_7 & MMUSR_M) != 0, (
+        f"Write search must set M in the page descriptor, got 0x{mmusr_7:04X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
 async def test_mmu_runtime_fault_marks_atc_entry_bus_error(dut):
     """A faulting search must leave a B-marked ATC entry for the bus-error handler.
 

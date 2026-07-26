@@ -49,6 +49,7 @@ module WF68K30L_TOP_ROUTING_MMU_TRANSLATE #(
     output logic        MMU_RUNTIME_ATC_B,
     output logic        MMU_RUNTIME_ATC_W,
     output logic        MMU_RUNTIME_ATC_M,
+    output logic        MMU_RUNTIME_ATC_M_SET,
     output logic        MMU_RUNTIME_STALL,
     output logic        MMU_TWALK_START
 );
@@ -72,6 +73,7 @@ always_comb begin : mmu_address_translate
     logic        atc_b;
     logic        atc_w;
     logic        atc_m;
+    logic        atc_m_stored;
     logic        root_valid;
     logic        root_short_table;
     logic        root_long_table;
@@ -125,6 +127,7 @@ always_comb begin : mmu_address_translate
     atc_b = 1'b0;
     atc_w = 1'b0;
     atc_m = write_access;
+    atc_m_stored = 1'b0;
 
     atc_set_idx = atc_tag[MMU_ATC_SET_BITS-1:0] ^ atc_fc[MMU_ATC_SET_BITS-1:0];
     for (way = 0; way < MMU_ATC_WAYS; way = way + 1) begin
@@ -140,7 +143,8 @@ always_comb begin : mmu_address_translate
             atc_ptag = atc_way_ptag;
             atc_b = MMU_ATC_B_FLAT[atc_way_idx];
             atc_w = MMU_ATC_W_FLAT[atc_way_idx];
-            atc_m = MMU_ATC_M_FLAT[atc_way_idx] || write_access;
+            atc_m_stored = MMU_ATC_M_FLAT[atc_way_idx];
+            atc_m = atc_m_stored || write_access;
         end
     end
 
@@ -161,6 +165,7 @@ always_comb begin : mmu_address_translate
     MMU_RUNTIME_ATC_B = 1'b0;
     MMU_RUNTIME_ATC_W = 1'b0;
     MMU_RUNTIME_ATC_M = write_access;
+    MMU_RUNTIME_ATC_M_SET = 1'b0;
     MMU_RUNTIME_STALL = 1'b0;
     MMU_TWALK_START = 1'b0;
 
@@ -173,6 +178,8 @@ always_comb begin : mmu_address_translate
         if (atc_hit && !atc_fault) begin
             ADR_P_PHYS_CALC = atc_phys;
             MMU_RUNTIME_ATC_M = atc_m;
+            // UM 9.4: a valid write to the page sets M in the entry.
+            MMU_RUNTIME_ATC_M_SET = mmu_req_now && write_access && !atc_m_stored;
         end else if (atc_hit && atc_fault) begin
             ADR_P_PHYS_CALC = ADR_P;
             MMU_RUNTIME_FAULT = mmu_req_now;
