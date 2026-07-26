@@ -8,20 +8,35 @@ originally written in VHDL by Wolfgang Foerster.
 - **main** — Original VHDL with minor fixes for GHDL/Yosys synthesis compatibility
 - **verilog** — Full SystemVerilog port, synthesizable with Yosys
 
-## Synthesis Results (ECP5 via `synth_ecp5`)
+## Synthesis Results
 
-| Resource   | VHDL   | SystemVerilog | Change |
-|------------|--------|---------------|--------|
-| LUT4       | 26,902 | 19,205        | -29%   |
-| TRELLIS_FF |  2,542 |  2,534        | -0.3%  |
-| CCU2C      |  3,039 |  1,640        | -46%   |
-| PFUMX      |  6,274 |  4,598        | -27%   |
-| L6MUX21    |  2,127 |  1,699        | -20%   |
-| MULT18X18D |      4 |      4        | same   |
+Current tree, plain `synth_ecp5` defaults over all of `sv/` (`bash
+synth/synth_check.sh`, which also checks these as a +/-10% regression tripwire):
 
-The SV port fits in an LFE5U-25F (~77% utilization) or larger. LUT reduction
-comes primarily from replacing VHDL for-loops with direct equality comparisons
-and bitwise mask operations, plus eliminating `async2sync` overhead.
+| Resource   | Count  |
+|------------|--------|
+| LUT4       | 40,544 |
+| TRELLIS_FF |  6,924 |
+| CCU2C      |  2,180 |
+| DP16KD     |     10 |
+| MULT18X18D |      5 |
+
+At ~40.5k LUT4 this no longer fits an LFE5U-25F; it needs an LFE5U-45F (43,848
+LUT4, so tight at ~92%) or an 85F. The older "19,205 LUT4 / fits a 25F" figure
+that used to appear here predates the MMU, cache and coprocessor subsystems and
+is not comparable -- those were added after it was measured, and they dominate
+the growth.
+
+Xilinx, for cross-checking portability (Vivado 2025.2.1, xc7a200tfbg484-2,
+`synth_design -flatten_hierarchy none`): 18,899 LUTs (14.0%) and 6,170
+registers (2.3%), with zero latches, zero combinational loops and zero
+multiply-driven nets. LUT counts are not comparable across vendors -- ECP5 LUT4
+versus Xilinx LUT6.
+
+The original VHDL-vs-SV comparison (26,902 -> 19,205 LUT4) applied to the
+pre-MMU core only. The reduction came from replacing VHDL for-loops with
+equality comparisons and bitwise mask operations, plus dropping `async2sync`
+overhead.
 
 Build commands (repo flow):
 
