@@ -117,6 +117,50 @@ async def test_unallocated_4b40_is_illegal(dut):
     )
 
 
+async def _illegal_case(dut, opcode):
+    """Run a single suspect opcode; return True if vector 4 was taken."""
+    h = CPUTestHarness(dut)
+    program = [opcode, *SENTINEL, 0x60FE]
+    assert await _run(h, program, [(4 * 4, 0x900, ILLEGAL_HANDLER)]), "no completion"
+    return h.mem.read(RES + 0x10, 4) == 0x111E6A11
+
+
+@cocotb.test()
+async def test_invalid_lea_an_direct_is_illegal(dut):
+    """0x41C8 is LEA A0,A0 - An direct is not a control mode, so illegal."""
+    assert await _illegal_case(dut, 0x41C8), (
+        "0x41C8 (LEA with An-direct EA) did not take the illegal-instruction "
+        "vector; it falls through into the CHK arm"
+    )
+
+
+@cocotb.test()
+async def test_invalid_lea_immediate_is_illegal(dut):
+    """0x41FC is LEA #<data>,A0 - immediate is not a control mode."""
+    assert await _illegal_case(dut, 0x41FC), (
+        "0x41FC (LEA with immediate EA) did not take the illegal-instruction "
+        "vector; it falls through into the CHK arm"
+    )
+
+
+@cocotb.test()
+async def test_chk_bit6_set_dn_is_illegal(dut):
+    """0x4148: CHK.L pattern, mode 001 (An direct) with bit 6 set."""
+    assert await _illegal_case(dut, 0x4148), (
+        "0x4148 (CHK pattern with bit 6 = 1) did not take the "
+        "illegal-instruction vector; bit 6 is fixed 0 in CHK"
+    )
+
+
+@cocotb.test()
+async def test_chk_bit6_set_an_is_illegal(dut):
+    """0x4B48: CHK.L pattern, mode 001 with bit 6 set, register field 101."""
+    assert await _illegal_case(dut, 0x4B48), (
+        "0x4B48 (CHK pattern with bit 6 = 1) did not take the "
+        "illegal-instruction vector; bit 6 is fixed 0 in CHK"
+    )
+
+
 @cocotb.test()
 async def test_trapcc_reserved_opmode_is_illegal(dut):
     """0x50FD (TRAPT with reserved opmode 101) -> illegal instruction."""
