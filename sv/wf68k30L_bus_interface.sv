@@ -90,7 +90,6 @@ typedef enum logic [2:0] {SLICE_IDLE, S0, S1, S2, S3, S4, S5} TIME_SLICES;
 
 logic [1:0]         ADR_10;
 logic [5:0]         ADR_OFFSET;
-logic [2:0]         ADR_STEP;
 logic [31:0]        ADR_OUT_I;
 logic               AERR_I;
 ARB_STATES          ARB_STATE;
@@ -365,29 +364,34 @@ end
 
 // ---- Address offset accumulator ----
 // Tracks the byte offset within a multi-cycle transfer for dynamic bus sizing.
+// ADR_STEP must be a blocking variable, not a register: a synchronous cycle
+// terminates on the same edge that computes it, and would otherwise advance
+// the offset by the previous cycle's step.
 always_ff @(posedge CLK) begin : adr_offset_calc
+    logic [2:0] ADR_STEP;
+
     if (RESET_CPU_I) begin
-        ADR_STEP <= 3'b000;
+        ADR_STEP = 3'b000;
     end else if ((T_SLICE == S2 && !STERMn) || T_SLICE == S3) begin
         case (BUS_WIDTH)
             LONG_32: begin
                 case (ADR_OUT_I[1:0])
-                    2'b11:   ADR_STEP <= 3'b001;
-                    2'b10:   ADR_STEP <= 3'b010;
-                    2'b01:   ADR_STEP <= 3'b011;
-                    default: ADR_STEP <= 3'b100;
+                    2'b11:   ADR_STEP = 3'b001;
+                    2'b10:   ADR_STEP = 3'b010;
+                    2'b01:   ADR_STEP = 3'b011;
+                    default: ADR_STEP = 3'b100;
                 endcase
             end
             BW_WORD: begin
                 case (ADR_OUT_I[1:0])
-                    2'b01, 2'b11: ADR_STEP <= 3'b001;
-                    default:      ADR_STEP <= 3'b010;
+                    2'b01, 2'b11: ADR_STEP = 3'b001;
+                    default:      ADR_STEP = 3'b010;
                 endcase
             end
             BW_BYTE:
-                ADR_STEP <= 3'b001;
+                ADR_STEP = 3'b001;
             default:
-                ADR_STEP <= 3'b001;
+                ADR_STEP = 3'b001;
         endcase
     end
 

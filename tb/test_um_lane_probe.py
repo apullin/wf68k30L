@@ -279,6 +279,136 @@ def _check_writes(h, port_width):
     return errs
 
 
+class SyncTermBusModel(BusModel):
+    """32-bit port that terminates every cycle with STERMn (UM 7.3.2).
+
+    STERMn is held asserted the way a zero-wait-state SRAM region does: it
+    has setup and hold requirements against every rising edge while ASn is
+    asserted, so it must already be valid at the edge that ends S1.
+    """
+
+    def __init__(self, dut, memory, **kwargs):
+        super().__init__(dut, memory, sync_term=True, **kwargs)
+
+    async def start(self):
+        self.dut.STERMn.value = 0
+        await super().start()
+
+    def _negate_term(self):
+        self.dut.DSACKn.value = 0b11
+
+
+async def _run_sync(dut, program_fn, watch=None, max_cycles=40000):
+    """Run against a STERM port, collecting sub-cycle addresses from `watch` on."""
+    h = CPUTestHarness(dut)
+    bus = SyncTermBusModel(dut, h.mem)
+
+    clock = cocotb.clock.Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    h._init_idle_inputs()
+    h._load_memory(program_fn(h))
+    _fill_window(h.mem)
+    await RisingEdge(dut.CLK)
+    await RisingEdge(dut.CLK)
+    dut.RESET_INn.value = 0
+    dut.HALT_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+    h.bus = bus
+    await bus.start()
+    dut.RESET_INn.value = 1
+    dut.HALT_INn.value = 1
+    await ClockCycles(dut.CLK, 4)
+
+    found = False
+    addrs = []
+    prev_as = 1
+    for _ in range(max_cycles):
+        await RisingEdge(dut.CLK)
+        if watch is not None:
+            try:
+                as_n = int(dut.ASn.value)
+                addr = int(dut.ADR_OUT.value)
+            except ValueError:
+                as_n, addr = 1, 0
+            if prev_as == 1 and as_n == 0 and (addrs or addr == watch):
+                addrs.append(addr)
+            prev_as = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+    return h, found, addrs
+
+
+@cocotb.test()
+async def test_sync_term_aligned_transfers(dut):
+    """Aligned long/word/byte reads and writes on a STERM-terminated port."""
+    src = RD_WINDOW + 0x40
+    dst = WR_WINDOW + 0x40
+    pattern = 0x8797A7B7
+
+    def program(h):
+        words = []
+        for i, (size, _n) in enumerate(SIZES):
+            words += moveq(0, 0)
+            words += move_from_abs_long(size, src, DN, 0)
+            words += move_to_abs_long(LONG, DN, 0, h.RESULT_BASE + 4 * i)
+        for i, (size, _n) in enumerate(SIZES):
+            words += move(LONG, SPECIAL, IMMEDIATE, DN, 0)
+            words += imm_long(pattern)
+            words += move_to_abs_long(size, DN, 0, dst + 8 * i)
+        return words + h.sentinel_program()
+
+    h, found, _ = await _run_sync(dut, program)
+    assert found, "program did not complete"
+
+    errs = []
+    for i, (_size, nbytes) in enumerate(SIZES):
+        want = 0
+        for k in range(nbytes):
+            want = (want << 8) | (h.mem.read(src + k, 1) & 0xFF)
+        got = h.read_result_long(4 * i)
+        if got != want:
+            errs.append(f"read size={nbytes}: got 0x{got:08X} want 0x{want:08X}")
+    for i, (_size, nbytes) in enumerate(SIZES):
+        want = pattern & ((1 << (8 * nbytes)) - 1)
+        got = h.mem.read(dst + 8 * i, nbytes)
+        if got != want:
+            errs.append(f"write size={nbytes}: got 0x{got:X} want 0x{want:X}")
+    assert not errs, "STERM aligned transfer errors: " + "; ".join(errs)
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_sync_term_misaligned_address_step(dut):
+    """A synchronous cycle terminates on the same edge that computes its step.
+
+    The step therefore has to be applied within that cycle: the second
+    sub-cycle of a long read at A1:A0=01 must address base + 3. Only the
+    address sequence is checked here -- assembling the operand additionally
+    depends on the SIZE_N countdown, which does not reach zero correctly on
+    a synchronous split transfer.
+    """
+    target = RD_WINDOW + 0x21  # A1:A0 = 01
+
+    def program(h):
+        return [
+            *move_from_abs_long(LONG, target, DN, 0),
+            *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),
+            *h.sentinel_program(),
+        ]
+
+    h, found, addrs = await _run_sync(dut, program, watch=target)
+    assert found, "program did not complete"
+    assert len(addrs) >= 2, (
+        f"expected a split transfer, saw {[hex(a) for a in addrs]}"
+    )
+    assert addrs[1] == target + 3, (
+        f"second sub-cycle addressed 0x{addrs[1]:08X}, expected "
+        f"0x{target + 3:08X}: the address step lagged by one cycle"
+    )
+    h.cleanup()
+
+
 @cocotb.test()
 async def test_word_port_reads_all_alignments(dut):
     """Long/word/byte reads at every alignment from a 16-bit port."""

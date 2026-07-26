@@ -33,19 +33,23 @@ class BusModel:
     # connect, so that latching them shows up as corruption.
     POISON_BYTE = 0xA5
 
-    def __init__(self, dut, memory, wait_states=0, port_width=4):
+    def __init__(self, dut, memory, wait_states=0, port_width=4, sync_term=False):
         """
         Args:
             dut: cocotb handle to the DUT (WF68K30L_TOP).
             memory: Memory instance for read/write data.
             wait_states: Number of extra clock cycles before asserting DSACKn.
             port_width: Responding port width in bytes (4, 2 or 1).
+            sync_term: Terminate with STERMn instead of DSACKn. STERM implies a
+                32-bit port, and the two must never be asserted together.
         """
         assert port_width in self.DSACK_FOR_WIDTH, f"bad port_width {port_width}"
+        assert not (sync_term and port_width != 4), "STERM requires a 32-bit port"
         self.dut = dut
         self.memory = memory
         self.wait_states = wait_states
         self.port_width = port_width
+        self.sync_term = sync_term
         self._running = False
         self._trace = os.environ.get("BUS_TRACE", "0") not in ("", "0", "false", "False")
         self._trace_min = int(os.environ.get("BUS_TRACE_MIN", "0"), 0)
@@ -84,6 +88,18 @@ class BusModel:
         """
         return self.port_width
 
+    def _assert_term(self, dsack):
+        """Terminate the current cycle, synchronously or asynchronously."""
+        if self.sync_term:
+            self.dut.STERMn.value = 0
+        else:
+            self.dut.DSACKn.value = dsack
+
+    def _negate_term(self):
+        if self.sync_term:
+            self.dut.STERMn.value = 1
+        self.dut.DSACKn.value = 0b11
+
     def _cycle_layout(self, addr, size_code, *, is_write=False):
         """Return (start_lane, byte_count) for this bus cycle.
 
@@ -120,7 +136,7 @@ class BusModel:
                 as_n = int(self.dut.ASn.value)
             except ValueError:
                 # ASn is X or Z during reset
-                self.dut.DSACKn.value = 0b11  # Deassert
+                self._negate_term()  # Deassert
                 continue
 
             if as_n == 0:
@@ -128,7 +144,7 @@ class BusModel:
                 try:
                     rw_n = int(self.dut.RWn.value)
                 except ValueError:
-                    self.dut.DSACKn.value = 0b11
+                    self._negate_term()
                     continue
 
                 try:
@@ -171,7 +187,7 @@ class BusModel:
                             byte_count,
                             data,
                         )
-                    self.dut.DSACKn.value = dsack
+                    self._assert_term(dsack)
 
                 else:
                     # WRITE cycle: capture DATA_OUT
@@ -197,7 +213,7 @@ class BusModel:
                             data,
                         )
 
-                    self.dut.DSACKn.value = dsack
+                    self._assert_term(dsack)
 
                 # Wait for bus cycle to complete: ASn goes high
                 # This prevents responding to the same cycle twice when
@@ -211,9 +227,9 @@ class BusModel:
                     if as_n == 1:
                         break
 
-                # Deassert DSACKn after the bus cycle completes
-                self.dut.DSACKn.value = 0b11
+                # Deassert the termination signal after the cycle completes
+                self._negate_term()
 
             else:
-                # No bus cycle active -- deassert DSACKn
-                self.dut.DSACKn.value = 0b11
+                # No bus cycle active -- deassert
+                self._negate_term()
