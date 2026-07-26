@@ -1392,6 +1392,90 @@ async def test_mmu_desc_shadow_survives_subword_traffic(dut):
 
 
 @cocotb.test()
+async def test_mmu_runtime_fault_marks_atc_entry_bus_error(dut):
+    """A faulting search must leave a B-marked ATC entry for the bus-error handler.
+
+    UM 9.4: the B bit "is set for an entry if a bus error, an invalid descriptor,
+    a supervisor violation, or a limit violation is encountered during the table
+    search... remains set until a PFLUSH instruction or a PLOAD instruction for
+    this entry invalidates the entry".
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xB40)
+    handler_addr = 0x000B60
+    vector_addr = 2 * 4
+    mmusr_dst = h.DATA_BASE + 0xBC0
+    logical_addr = 0x12345008
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    handler_code = [
+        *moveq(0x02, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_dst),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 3, DN, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),        # Invalid leaf faults here.
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, 0x00000000)   # DT=0 invalid leaf.
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=80000)
+    assert found, "Fault-marked ATC entry test did not complete"
+
+    assert h.read_result_long(0) == 0x02, "Bus-error handler did not run"
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_B) != 0, f"Expected B=1 after a faulting search, got MMUSR 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_I) != 0, f"Expected I=1 with B set, got MMUSR 0x{mmusr:04X}"
+    h.cleanup()
+
+
+@cocotb.test()
 async def test_mmu_pload_short_table_walk_then_access(dut):
     """PLOADR must table-search a short-format tree and load a usable ATC entry.
 

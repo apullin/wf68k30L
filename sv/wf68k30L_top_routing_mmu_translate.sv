@@ -109,8 +109,10 @@ always_comb begin : mmu_address_translate
         first_index = {29'h0, FC_I};
     else
         first_index = mmu_index_extract(ADR_P, MMU_TC[19:16], 6'd0, MMU_TC[15:12]);
-    root_limit_fault = (root_limit_lower && first_index[14:0] < root_limit) ||
-                       (!root_limit_lower && first_index[14:0] > root_limit);
+    // UM 9.5.1.2: with TC.FCL set, the root pointer L/U and LIMIT fields are unused.
+    root_limit_fault = !MMU_TC[24] &&
+                       ((root_limit_lower && first_index[14:0] < root_limit) ||
+                        (!root_limit_lower && first_index[14:0] > root_limit));
 
     atc_fc = FC_I;
     atc_logical = ADR_P;
@@ -165,6 +167,9 @@ always_comb begin : mmu_address_translate
     if (tt_hit) begin
         ADR_P_PHYS_CALC = ADR_P;
     end else if (MMU_TC[31] && FC_I != FC_CPU_SPACE) begin
+        // UM 9.4: a bus error, invalid descriptor, supervisor violation or limit
+        // violation during a search loads an entry with the B bit set, which
+        // stays until a PFLUSH or PLOAD replaces the entry.
         if (atc_hit && !atc_fault) begin
             ADR_P_PHYS_CALC = atc_phys;
             MMU_RUNTIME_ATC_M = atc_m;
@@ -172,10 +177,11 @@ always_comb begin : mmu_address_translate
             ADR_P_PHYS_CALC = ADR_P;
             MMU_RUNTIME_FAULT = mmu_req_now;
         end else if (root_valid) begin
-            // Root DT=1 direct mapping still applies root limit checks (FCL-independent).
             if (root_limit_fault) begin
                 ADR_P_PHYS_CALC = ADR_P;
                 MMU_RUNTIME_FAULT = mmu_req_now;
+                MMU_RUNTIME_ATC_REFILL = mmu_req_now;
+                MMU_RUNTIME_ATC_B = 1'b1;
             end else begin
                 ADR_P_PHYS_CALC = ADR_P + root_offs;
                 MMU_RUNTIME_ATC_REFILL = mmu_req_now;
@@ -194,6 +200,9 @@ always_comb begin : mmu_address_translate
             end else if (MMU_TWALK_RESULT[32]) begin
                 ADR_P_PHYS_CALC = ADR_P;
                 MMU_RUNTIME_FAULT = mmu_req_now;
+                MMU_RUNTIME_ATC_REFILL = mmu_req_now;
+                MMU_RUNTIME_ATC_B = 1'b1;
+                MMU_RUNTIME_ATC_W = MMU_TWALK_RESULT[34];
             end else begin
                 ADR_P_PHYS_CALC = MMU_TWALK_RESULT[31:0];
                 MMU_RUNTIME_ATC_REFILL = mmu_req_now;
@@ -204,6 +213,8 @@ always_comb begin : mmu_address_translate
         end else begin
             ADR_P_PHYS_CALC = ADR_P;
             MMU_RUNTIME_FAULT = mmu_req_now;
+            MMU_RUNTIME_ATC_REFILL = mmu_req_now;
+            MMU_RUNTIME_ATC_B = 1'b1;
         end
     end else begin
         ADR_P_PHYS_CALC = ADR_P;
