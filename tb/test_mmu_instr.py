@@ -3714,3 +3714,347 @@ async def test_mmu_write_to_m_clear_entry_researches_the_table(dut):
         f"0x{stored_value:08X}"
     )
     h.cleanup()
+
+
+# =========================================================================
+# PTEST searches the tables over the bus (UM 9.8)
+#
+# UM 9.8: "PTEST ... performs a search of the address translation tables", and
+# UM 9.5.2 defines that search as reading descriptors from memory at physical
+# addresses. None of the tests below prime anything: the descriptors exist only
+# because the testbench or another bus master put them in memory, so a PTEST
+# that reported anything but the real table status would have to be reading
+# something other than the table.
+# =========================================================================
+
+
+@cocotb.test()
+async def test_mmu_ptest_level7_searches_a_table_the_cpu_never_touched(dut):
+    """A level-7 PTEST of an untouched resident table reports it, not MMUSR.B.
+
+    This is the case the PTEST search could not handle while it read a snooped
+    shadow of ordinary data traffic: a table that is resident and valid but that
+    the CPU has never read has nothing in any such shadow, and the miss came out
+    as MMUSR.B -- a bus fault on a table that never faulted.
+
+    It also holds UM 9.8's "the ATC is not affected by a PTEST": the level-0
+    PTEST afterwards asks the ATC alone, and must still find nothing.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x1000)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    mmusr7_dst = h.DATA_BASE + 0x1080
+    mmusr0_dst = h.DATA_BASE + 0x10A0
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        0xF010, 0x9E15,                       # PTESTR #5,(A0),#7
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(mmusr7_dst),
+        0xF015, 0x6200,                       # PMOVE MMUSR,(A5)
+
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(mmusr0_dst),
+        0xF015, 0x6200,                       # PMOVE MMUSR,(A5)
+
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    cycles = _start_cycle_log(dut)
+    desc_a_addr, desc_b_addr, desc_c_addr = _load_short_tree(h, s, page_base)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "Unprimed PTEST level-7 search did not complete"
+
+    mmusr7 = h.mem.read(mmusr7_dst, 2)
+    assert (mmusr7 & MMUSR_B) == 0, (
+        f"PTEST reported a bus fault on a resident, valid table the CPU had "
+        f"never read: MMUSR=0x{mmusr7:04X}"
+    )
+    assert (mmusr7 & MMUSR_I) == 0, (
+        f"Expected a valid translation (I=0), got 0x{mmusr7:04X}"
+    )
+    assert (mmusr7 & MMUSR_N) == 0x3, (
+        f"Expected N=3 levels searched, got N={mmusr7 & MMUSR_N} "
+        f"(MMUSR=0x{mmusr7:04X})"
+    )
+    assert (mmusr7 & (MMUSR_L | MMUSR_S | MMUSR_T)) == 0, (
+        f"Unexpected fault/transparent bits set: 0x{mmusr7:04X}"
+    )
+
+    # The status can only have come from the bus: every descriptor must appear
+    # as a supervisor-data read with RMC asserted (UM 9.5.2, UM 7.3.7 list).
+    for name, addr in (("root", desc_a_addr), ("level B", desc_b_addr),
+                       ("page", desc_c_addr)):
+        hits = [c for c in cycles if c[0] == addr and c[2] == 1]
+        assert hits, (
+            f"No bus read cycle at the {name} descriptor address 0x{addr:08X}; "
+            f"the PTEST search did not fetch it from memory"
+        )
+        for _, fc, _, rmc_n in hits:
+            assert fc == FC_SUPERVISOR_DATA, (
+                f"{name} descriptor fetched with FC={fc}, expected "
+                f"{FC_SUPERVISOR_DATA} (supervisor data)"
+            )
+            assert rmc_n == 0, (
+                f"{name} descriptor fetched with RMCn negated; UM 9.5.2 requires "
+                f"RMC asserted throughout the search"
+            )
+
+    # UM 9.8: a PTEST does not load the ATC, so a level-0 test of the same
+    # address still has nothing to report.
+    mmusr0 = h.mem.read(mmusr0_dst, 2)
+    assert (mmusr0 & MMUSR_I) != 0, (
+        f"The level-7 PTEST loaded the ATC: a level-0 PTEST of the same address "
+        f"found an entry (MMUSR=0x{mmusr0:04X})"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_ptest_an_returns_descriptor_address_of_a_dma_written_table(dut):
+    """PTEST <ea>,An names the leaf of a table only another master ever wrote.
+
+    The program first zeroes all three descriptors with its own stores, which is
+    what any snoop-fed copy of the tree would record (DT=0, invalid). A DMA
+    master then writes the real tree straight into memory. A PTEST that reads
+    memory reports N=3 and puts the leaf descriptor's physical address in An;
+    one reading snooped state would stop at the root with I set and leave An at
+    the root descriptor.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x1100)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    an_dst = h.DATA_BASE + 0x1180
+    mmusr_dst = h.DATA_BASE + 0x11A0
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    program = [
+        # CPU stores that poison every snoopable copy of the tree with DT=0.
+        *moveq(0x00, 0),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_a_addr),
+        *move(LONG, DN, 0, AN_IND, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_b_addr),
+        *move(LONG, DN, 0, AN_IND, 4),
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(desc_c_addr),
+        *move(LONG, DN, 0, AN_IND, 5),        # DMA rewrite fires here.
+
+        *_mmu_enable_words(s),
+        # A3 carries a marker so an absent write is distinguishable from a wrong one.
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(PTEST_AN_MARKER),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        0xF010, 0x9F75,                       # PTESTR #5,(A0),#7,A3
+        *move_to_abs_long(LONG, AN, 3, an_dst),
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(mmusr_dst),
+        0xF015, 0x6200,                       # PMOVE MMUSR,(A5)
+
+        *h.sentinel_program(),
+    ]
+
+    dma_writes = [
+        (desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002),
+        (desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002),
+        (desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001),
+    ]
+    bus = TableDmaBusModel(dut, h.mem, desc_c_addr, dma_writes)
+    await _setup_with_bus(h, program, bus)
+
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=90000)
+    assert bus.fired, "DMA rewrite never fired; the trigger store was not seen"
+    assert found, "PTEST on a DMA-built table did not complete"
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & (MMUSR_B | MMUSR_I)) == 0, (
+        f"PTEST faulted on the DMA-written tree instead of reading it: "
+        f"MMUSR=0x{mmusr:04X}"
+    )
+    assert (mmusr & MMUSR_N) == 0x3, (
+        f"Expected N=3 levels searched, got N={mmusr & MMUSR_N} "
+        f"(MMUSR=0x{mmusr:04X})"
+    )
+    got_a3 = h.mem.read(an_dst, 4)
+    assert got_a3 == desc_c_addr, (
+        f"Expected A3 = leaf descriptor address 0x{desc_c_addr:08X}, got "
+        f"0x{got_a3:08X} (0x{desc_a_addr:08X} means the search stopped at the "
+        f"root, 0x{PTEST_AN_MARKER:08X} means it never wrote An)"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_ptest_berr_on_descriptor_fetch_reports_mmusr_b(dut):
+    """BERR on a PTEST descriptor fetch is the one thing that may set MMUSR.B.
+
+    UM 8.1.2 lists "the assertion of the BERR signal during a bus cycle used to
+    access the translation tables" among the reasons a translation cannot
+    succeed, and MMUSR.B is where PTEST reports it. UM 9.8 has PTEST report
+    status rather than fault, so the instruction must also retire normally: the
+    harness's fail stubs cover every vector this test does not populate, so
+    taking a bus error here would abort the run.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x1200)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    mmusr_dst = h.DATA_BASE + 0x1280
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        0xF010, 0x9E15,                       # PTESTR #5,(A0),#7
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(mmusr_dst),
+        0xF015, 0x6200,                       # PMOVE MMUSR,(A5)
+        *h.sentinel_program(),
+    ]
+
+    bus = BerrOnAddressBusModel(dut, h.mem, desc_a_addr, times=1)
+    await _setup_with_bus(h, program, bus)
+    _load_short_tree(h, s, page_base)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, (
+        f"PTEST did not retire after a bus error on its root descriptor fetch "
+        f"(BERRn asserted {bus.fault_count} times)"
+    )
+    assert bus.fault_count == 1, (
+        f"BERRn asserted on {bus.fault_count} supervisor-data cycles at the root "
+        f"descriptor (expected 1); 0 means the PTEST search never read it"
+    )
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_B) != 0, (
+        f"Expected MMUSR.B for a bus error on the descriptor fetch, got "
+        f"0x{mmusr:04X}"
+    )
+    assert (mmusr & MMUSR_I) != 0, (
+        f"A bus error means no usable translation, so I must be set; got "
+        f"0x{mmusr:04X}"
+    )
+    assert (mmusr & MMUSR_N) == 0x1, (
+        f"Expected N=1 (the fault was on the first descriptor), got "
+        f"N={mmusr & MMUSR_N} (MMUSR=0x{mmusr:04X})"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_ptest_and_runtime_walk_share_the_descriptor_bus(dut):
+    """A PTEST search and runtime searches interleave without losing either.
+
+    Both now master the same descriptor-bus port, and a table search has to run
+    uninterrupted (UM 9.5.2), so they are mutually exclusive: whichever is in
+    flight finishes and the other is deferred. Each start is a level, so a
+    deferred search is retried rather than dropped -- if that were wrong, the
+    PTEST would hang the pipeline in EXECUTE or the access would stall forever
+    and the sentinel would never appear.
+
+    The PTEST is placed between two accesses that each need their own search,
+    with the ATC flushed in front of each so no search can be answered from a
+    resident entry, and it tests a different page from either access so a shared
+    descriptor-port state leak would show up as a wrong result.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x1300)
+    logical_5 = 0x12345008                    # level-C index 5
+    logical_6 = 0x12346008                    # level-C index 6, same A/B path
+    page_base_5 = 0x00234000
+    page_base_6 = 0x00235000
+    phys_5 = page_base_5 + (logical_5 & 0xFFF)
+    phys_6 = page_base_6 + (logical_6 & 0xFFF)
+    value_5 = 0x5151A1A1
+    value_6 = 0x6262B2B2
+    desc_c6_addr = s["page_tbl"] + (0x6 << 2)
+    mmusr_dst = h.DATA_BASE + 0x1380
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_5),
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(logical_6),
+
+        # Runtime search for page 5.
+        0xF000, 0x2400,                       # PFLUSHA
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE + 0),
+
+        # PTEST search for page 6, with nothing resident for it.
+        0xF000, 0x2400,                       # PFLUSHA
+        0xF011, 0x9E15,                       # PTESTR #5,(A1),#7
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(mmusr_dst),
+        0xF015, 0x6200,                       # PMOVE MMUSR,(A5)
+
+        # Runtime search for page 6 straight after it.
+        *move(LONG, AN_IND, 1, DN, 2),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE + 4),
+
+        # And page 5 again, so a corrupted level-C table base is visible.
+        0xF000, 0x2400,                       # PFLUSHA
+        *move(LONG, AN_IND, 0, DN, 3),
+        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE + 8),
+
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    _load_short_tree(h, s, page_base_5)
+    h.mem.load_long(desc_c6_addr, (page_base_6 & 0xFFFFFF00) | 0x00000001)
+    h.mem.load_long(phys_5 & 0xFFFFF, value_5)
+    h.mem.load_long(phys_6 & 0xFFFFF, value_6)
+
+    found = await h.run_until_sentinel(max_cycles=120000)
+    assert found, (
+        "PTEST interleaved with runtime table searches did not complete; a "
+        "search that is deferred and never retried deadlocks here"
+    )
+
+    assert h.read_result_long(0) == value_5, (
+        f"First runtime search returned 0x{h.read_result_long(0):08X}, expected "
+        f"0x{value_5:08X}"
+    )
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & (MMUSR_B | MMUSR_I)) == 0, (
+        f"PTEST between two runtime searches faulted: MMUSR=0x{mmusr:04X}"
+    )
+    assert (mmusr & MMUSR_N) == 0x3, (
+        f"Expected N=3 levels searched, got N={mmusr & MMUSR_N} "
+        f"(MMUSR=0x{mmusr:04X})"
+    )
+    assert h.read_result_long(4) == value_6, (
+        f"The runtime search after the PTEST returned "
+        f"0x{h.read_result_long(4):08X}, expected 0x{value_6:08X}"
+    )
+    assert h.read_result_long(8) == value_5, (
+        f"The runtime search for the first page after the PTEST returned "
+        f"0x{h.read_result_long(8):08X}, expected 0x{value_5:08X}"
+    )
+    h.cleanup()
