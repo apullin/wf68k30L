@@ -1314,10 +1314,10 @@ def _sync_fill(mem):
         mem.write(a, 1, a & 0xFF)
 
 
-async def _run_sterm(dut, program_fn, max_cycles=40000):
+async def _run_sterm(dut, program_fn, max_cycles=40000, wait_states=0):
     """Bring the CPU up against an all-synchronous bus and run to the sentinel."""
     h = CPUTestHarness(dut)
-    bus = SyncTermBusModel(dut, h.mem)
+    bus = SyncTermBusModel(dut, h.mem, wait_states=wait_states)
 
     clock = Clock(dut.CLK, 10, unit="ns")
     cocotb.start_soon(clock.start())
@@ -1400,6 +1400,40 @@ async def test_sterm_reads_all_sizes_and_alignments(dut):
                 f"got 0x{got:08X} want 0x{want:08X}"
             )
     assert not errs, "synchronous read errors: " + "; ".join(errs)
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_sterm_wait_stated_reads_all_sizes_and_alignments(dut):
+    """The same reads against a synchronous port that inserts wait states.
+
+    A wait-stated synchronous cycle recognises STERM at a later S3 than a
+    zero-wait-state one and captures its data from the S3 branch of the input
+    mux rather than the S2 branch, so it reaches the remaining-byte count
+    through a different path.
+    """
+    h, bus, found = await _run_sterm(dut, _sync_read_program, wait_states=2)
+    assert found, "program did not complete"
+
+    errs = []
+    for idx in range(len(SYNC_SIZES) * 4):
+        _size, nbytes = SYNC_SIZES[idx // 4]
+        align = idx % 4
+        src = _sync_case_addr(SYNC_RD_WINDOW, idx, align)
+        want = 0
+        for i in range(nbytes):
+            want = (want << 8) | (h.mem.read(src + i, 1) & 0xFF)
+        got = h.read_result_long(4 * idx)
+        if got != want:
+            errs.append(
+                f"wait-stated STERM read size={nbytes} a={align} "
+                f"addr=0x{src:08X}: got 0x{got:08X} want 0x{want:08X}"
+            )
+    assert not errs, "wait-stated synchronous read errors: " + "; ".join(errs)
+    errs = _check_sterm_shapes(bus, SYNC_RD_WINDOW, is_write=False)
+    assert not errs, (
+        "wait-stated synchronous read sub-cycle errors: " + "; ".join(errs)
+    )
     h.cleanup()
 
 
