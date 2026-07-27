@@ -52,12 +52,22 @@ end
 // stale freeze cannot pin an old PC. Only a faulted write is redirected to
 // PC_WB; reads, opcode fetches and address errors keep the live PC they stack
 // today.
+//
+// The fault address field has the same entry-timing dependence and is frozen
+// alongside: ADR_CPY snapshots the live ADR_EFF at entry, which for a
+// postincrement store has already advanced past the address the write used --
+// MOVE.L D3,(A0)+ faulting at $E0000 stacked $E0004. ADR_EFF_WB is the address
+// the cycle actually drove, since ADR_L selects it for every core write.
 always_ff @(posedge CLK) begin : bus_fault_pc
     if (RESET_CPU) begin
         PC_BF        <= 32'h0;
+        ADR_BF       <= 32'h0;
+        BF_IS_WRITE  <= 1'b0;
         PC_BF_FROZEN <= 1'b0;
     end else if (!BUSY_EXH && (BERR_MAIN || !PC_BF_FROZEN)) begin
         PC_BF        <= (BERR_MAIN && DATA_WR_PENDING) ? PC_WB : PC;
+        ADR_BF       <= ADR_EFF_WB;
+        BF_IS_WRITE  <= BERR_MAIN && DATA_WR_PENDING;
         PC_BF_FROZEN <= BERR_MAIN;
     end else if (BUSY_EXH) begin
         PC_BF_FROZEN <= 1'b0;
@@ -68,6 +78,10 @@ end
 // format keeps the live PC, so the format $0/$2 stacked PC is unchanged.
 assign PC_STACKED = (STACK_FORMAT == 4'hA || STACK_FORMAT == 4'hB) ? PC_BF : PC;
 
+// Only formats $A and $B reach the STACK_POS 10 arm below (format $0/$2 frames
+// are too short and format $9 has its own arm), so this needs no format guard.
+assign ADR_STACKED = BF_IS_WRITE ? ADR_BF : ADR_CPY_EXH;
+
 assign DATA_EXH = (STACK_POS == 2) ? {SR_CPY, PC_STACKED[31:16]} :
                    (STACK_POS == 4) ? {PC_STACKED[15:0], STACK_FORMAT, 2'b00, IVECT_OFFS} :
                    (STACK_FORMAT == 4'h2 && STACK_POS == 6) ? PC_INSTR_EXH :
@@ -75,7 +89,7 @@ assign DATA_EXH = (STACK_POS == 2) ? {SR_CPY, PC_STACKED[31:16]} :
                    (STACK_POS == 6) ? {BIW_0, FC, FB, RC, RB, 3'b000, SSW_80} : // Format A and B.
                    (STACK_POS == 8) ? {BIW_1, BIW_2} : // Format A and B.
                    (STACK_FORMAT == 4'h9 && STACK_POS == 10) ? FAULT_ADR :
-                   (STACK_POS == 10) ? ADR_CPY_EXH :
+                   (STACK_POS == 10) ? ADR_STACKED :
                    (STACK_POS == 14) ? OUTBUFFER :
                    (STACK_POS == 20) ? PC + 32'd4 : // Stage B address.
                    (STACK_POS == 24) ? INBUFFER :

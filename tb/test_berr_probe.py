@@ -598,3 +598,54 @@ async def test_berr_on_word_store_stacks_the_storing_instruction(dut):
     assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
         "Execution did not continue correctly after the RTE rerun"
     )
+
+
+@cocotb.test()
+async def test_berr_frame_reports_the_address_the_write_cycle_drove(dut):
+    """UM 8.1.2/Table 8-6: the fault address is the address of the faulted cycle.
+
+    A postincrement store makes the distinction observable. By the time the
+    exception is entered the address register has already advanced, so a fault
+    address snapshotted from the live effective address reports one operand past
+    the cycle that actually faulted -- $E0004 for a write to $E0000.
+
+    Only the frame is checked here. Recovering the write itself would need the
+    faulted bus cycle to be rerun rather than the instruction re-executed: this
+    core reruns by re-execution, and MOVE.L D3,(A0)+ re-executed with A0 already
+    incremented targets the following longword, so the original write cannot be
+    recovered from a format $A/$B frame alone.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrOnceBusModel(dut, h.mem, times=1)
+
+    store_addr = 0x00010C
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x263C, 0x5A5A, 0xA5A5,                   # 0x106 MOVE.L #$5A5AA5A5,D3
+        0x20C3,                                   # 0x10C MOVE.L D3,(A0)+  <- BERR
+        0x7421,                                   # 0x10E MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x110 MOVE.L D2,($20018).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x116 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x11C MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x122 STOP #$2700
+    ]
+
+    found = await _boot(dut, h, bus, program, STORE_FAULT_HANDLER)
+
+    # SSP_INIT 0x1000 less the 0x5C-byte format $B frame.
+    frame_base = h.SSP_INIT - 0x5C
+    fmt = h.mem.read(frame_base + 0x06, 2)
+    fault_adr = h.mem.read(frame_base + 0x10, 4)
+    pc = h.mem.read(PC_ADDR, 4)
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert found, "Bus-error handler never completed"
+    assert (fmt >> 12) == 0xB, f"Frame format = 0x{fmt >> 12:X}, expected 0xB"
+    assert pc == store_addr, (
+        f"Stacked PC = 0x{pc:08X}, expected 0x{store_addr:08X} (the store)"
+    )
+    assert fault_adr == FAULT_ADDR, (
+        f"Frame fault address = 0x{fault_adr:08X}, expected 0x{FAULT_ADDR:08X}. "
+        f"0x{FAULT_ADDR + 4:08X} means the field was taken from the live "
+        f"effective address after the postincrement rather than from the "
+        f"address the faulted write cycle drove"
+    )
