@@ -35,13 +35,6 @@ because a test for either would fail today:
   - Index suppression (IS = 1) is also ignored: I_S_IS 4'b1000 still adds
     index_scaled_comb, so `(bd,An)` written in full format picks up a stray
     index term.
-
-  - A memory indirect effective address whose index register is written by the
-    immediately preceding instruction still computes the wrong address, even
-    with the index interlock in place, because FETCH_MEMADR issues its
-    intermediate read before the intermediate address is valid. Reproducer:
-    the program in test_fullformat_memory_indirect_outer_displacement with
-    moveq/lsr in place of the settled moveq #3,D2.
 """
 
 import cocotb
@@ -314,12 +307,9 @@ async def test_fullformat_memory_indirect_outer_displacement(dut):
     state. Those exits are on the same interlocked path as the displacement
     ones, so they need coverage that they still resolve.
 
-    The index is set well before the EA here on purpose: with the index written
-    by the *immediately* preceding instruction, this form computes the wrong
-    address both before and after the index interlock, because the intermediate
-    fetch in FETCH_MEMADR issues its read before the intermediate address is
-    valid. That is a separate defect from the index hazard; see the module
-    docstring.
+    The index is settled well before the EA here. The tight-spacing version of
+    the same form is test_fullformat_memory_indirect_index_hazard below, which
+    covers the separate FETCH_MEMADR intermediate-address defect.
 
         LEA ([A0,D2.L*4],4),A1   -> A1 = mem[A0 + D2*4] + 4
         LEA ([A0,D2.L*4]),A1     -> A1 = mem[A0 + D2*4]
@@ -364,6 +354,77 @@ async def test_fullformat_memory_indirect_outer_displacement(dut):
     assert od_val == TABLE_VALUE and null_val == TABLE_VALUE, (
         f"Loads through the EAs returned od=0x{od_val:08X} null=0x{null_val:08X}, "
         f"expected 0x{TABLE_VALUE:08X}"
+    )
+
+
+@cocotb.test()
+async def test_fullformat_memory_indirect_index_hazard(dut):
+    """Memory indirect whose index register is written by the previous instruction.
+
+    The intermediate read in FETCH_MEMADR uses ADR_EFF, which is registered:
+    ADR_EFF_I only becomes the intermediate address one cycle after the state is
+    entered, because FETCH_MEM_ADR (and the freshly latched F_E/I_S/I_IS) have to
+    be asserted for a whole cycle before the adder result is clocked in. With the
+    index settled the request is issued late enough that the bus samples the
+    right value; with the index written by the immediately preceding instruction
+    the fetch redirect that the write forces shortens the entry and the read goes
+    out against the stale ADR_EFF.
+
+    PRM 2.2 / Table 2-4: for a preindexed memory indirect address the
+    intermediate address is bd + An + Xn.SIZE * SCALE and Xn must be the
+    post-write value, exactly as for the non-indirect forms.
+
+        LEA ([A0,D2.L*4],4),A1   -> A1 = mem[A0 + D2*4] + 4
+
+    The settled-index copy of the same program runs second so that a difference
+    between the two is unambiguously a pipeline hazard.
+    """
+    h = CPUTestHarness(dut)
+    ptr_table = TABLE_BASE
+    target = CPUTestHarness.DATA_BASE + 0x800
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),       # A0 = ptr_table
+        *imm_long(ptr_table),
+        # Tight: D2 written by the instruction immediately before the EA.
+        *_shift_index_into_d2(),
+        # LEA ([A0,D2.L*4],4),A1 -- null bd, preindexed, word outer displacement
+        0x43F0, 0x2D12, *imm_word(4),
+        *_publish(h, 0),
+        # Control: the same EA with the index settled four NOPs earlier.
+        *_shift_index_into_d2(),
+        *nop(), *nop(), *nop(), *nop(),
+        0x43F0, 0x2D12, *imm_word(4),
+        *_publish(h, 8, an_to_dn=5),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(ptr_table + INDEX * 4, target)
+    h.mem.load_long(target + 4, TABLE_VALUE)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+
+    tight_ea = h.read_result_long(0)
+    tight_val = h.read_result_long(4)
+    settled_ea = h.read_result_long(8)
+    settled_val = h.read_result_long(12)
+    h.cleanup()
+
+    assert settled_ea == target + 4, (
+        f"Settled-index control is wrong too: LEA ([A0,D2.L*4],4),A1 computed "
+        f"0x{settled_ea:08X}, expected 0x{target + 4:08X}"
+    )
+    assert tight_ea == target + 4, (
+        f"LEA ([A0,D2.L*4],4),A1 with D2 written by the immediately preceding "
+        f"instruction computed 0x{tight_ea:08X}, expected 0x{target + 4:08X} "
+        f"(mem[0x{ptr_table + INDEX * 4:08X}] + 4). The identical sequence with "
+        f"the index settled computed 0x{settled_ea:08X}, so the intermediate "
+        f"read in FETCH_MEMADR is issued before the intermediate address is valid"
+    )
+    assert tight_val == TABLE_VALUE and settled_val == TABLE_VALUE, (
+        f"Loads through the EA returned tight=0x{tight_val:08X} "
+        f"settled=0x{settled_val:08X}, expected 0x{TABLE_VALUE:08X}"
     )
 
 
