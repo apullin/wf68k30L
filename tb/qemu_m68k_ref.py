@@ -1,8 +1,10 @@
 """
-QEMU-based m68k reference trace helper.
+QEMU-based m68k reference helpers.
 
-Runs qemu-system-m68k (CPU=m68030) on a flat RAM image and extracts
-instruction PC trace entries from QEMU's disassembly log.
+Runs qemu-system-m68k (CPU=m68030) on a flat RAM image and either extracts
+instruction/state trace entries from QEMU's disassembly log, or -- for programs
+far too long to trace instruction by instruction -- runs the image to
+completion and reads physical memory back through the QEMU monitor.
 """
 
 from __future__ import annotations
@@ -17,6 +19,8 @@ import time
 from pathlib import Path
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_XP_RE = re.compile(r"^([0-9a-fA-F]{8,16}):\s+((?:0x[0-9a-fA-F]+\s*)+)$")
 _PC_RE = re.compile(r"^0x([0-9a-fA-F]+):")
 _DA_RE = re.compile(r"^D([0-7])\s*=\s*([0-9A-Fa-f]{8}).*A\1\s*=\s*([0-9A-Fa-f]{8})")
 _PC_SR_RE = re.compile(r"^PC\s*=\s*([0-9A-Fa-f]{8})\s+SR\s*=\s*([0-9A-Fa-f]{4})")
@@ -86,6 +90,150 @@ def _parse_state_trace(log_text):
         )
         i = j + 1
     return snaps
+
+
+def _parse_xp_dump(text):
+    """Parse `xp` monitor output into {address: [word, ...]}."""
+    out = {}
+    for raw in text.splitlines():
+        line = _ANSI_RE.sub("", raw).strip()
+        match = _XP_RE.match(line)
+        if match is None:
+            continue
+        addr = int(match.group(1), 16)
+        out[addr] = [int(tok, 16) for tok in match.group(2).split()]
+    return out
+
+
+def qemu_m68030_image_memory(
+    image_bytes,
+    dumps,
+    *,
+    load_addr=0x00000100,
+    stack_pointer=0x0001FF00,
+    ram_size_bytes=16 * 1024 * 1024,
+    expect=None,
+    settle_s=2.0,
+    attempts=3,
+):
+    """Run a flat bare-metal image on QEMU m68030 and read physical memory.
+
+    Used as the reference side for compiled programs (csmith, CoreMark) that are
+    far too long to compare instruction by instruction: both implementations run
+    the *same* binary, so any difference in the values it computes is a
+    difference between the two ISA implementations.
+
+    QEMU's `-M none` does not fetch the reset vectors the cocotb harness
+    supplies, so a four-instruction preamble (MOVEA.L #sp,A7 ; JMP load_addr) is
+    placed in unused vector space and the loader's PC points at it.
+
+    Args:
+        image_bytes: Flat image to load at load_addr.
+        dumps: Iterable of (address, word_count) to read after the run.
+        load_addr: Load/entry address of the image (must leave room for the
+            preamble at 0x40).
+        stack_pointer: Value loaded into A7 before entry.
+        expect: Optional (address, value) that must be present before the dump
+            is trusted, e.g. the sentinel. Retried with a longer settle.
+        settle_s: Seconds to let the program run before reading memory.
+        attempts: Number of settle attempts (each doubles the wait).
+
+    Returns:
+        {address: [word, ...]} for each requested dump.
+    """
+    qemu = shutil.which("qemu-system-m68k")
+    if qemu is None:
+        raise RuntimeError("Missing qemu-system-m68k in PATH")
+    preamble_end = 0x40 + 12
+    if load_addr < preamble_end:
+        raise ValueError(
+            f"load_addr 0x{load_addr:X} overlaps the entry preamble at 0x40"
+        )
+
+    image = bytearray(load_addr + len(image_bytes))
+    image[load_addr:] = image_bytes
+    image[0x40:0x40 + 12] = (
+        struct.pack(">H", 0x2E7C)                    # MOVEA.L #imm32,A7
+        + struct.pack(">I", stack_pointer & 0xFFFFFFFF)
+        + struct.pack(">H", 0x4EF9)                  # JMP (xxx).L
+        + struct.pack(">I", load_addr & 0xFFFFFFFF)
+    )
+
+    requests = list(dumps)
+    if expect is not None:
+        requests = requests + [(expect[0], 1)]
+    commands = "".join(
+        f"xp /{count}xw 0x{addr:x}\n" for addr, count in requests
+    ) + "quit\n"
+
+    with tempfile.TemporaryDirectory(prefix="wf68k_qemu_mem_") as td:
+        image_path = Path(td) / "image.bin"
+        image_path.write_bytes(bytes(image))
+        cmd = [
+            qemu,
+            "-M",
+            "none,memory-backend=ram0",
+            "-object",
+            f"memory-backend-ram,id=ram0,size={ram_size_bytes}",
+            "-accel",
+            "tcg",
+            "-cpu",
+            "m68030",
+            "-nodefaults",
+            "-nographic",
+            "-serial",
+            "none",
+            "-display",
+            "none",
+            "-device",
+            f"loader,file={image_path},addr=0x0",
+            "-device",
+            "loader,addr=0x40,cpu-num=0",
+            "-monitor",
+            "stdio",
+        ]
+
+        wait = settle_s
+        last = {}
+        for _ in range(max(1, attempts)):
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                time.sleep(wait)
+                out, _err = proc.communicate(input=commands, timeout=30)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            last = _parse_xp_dump(out)
+            if expect is None:
+                break
+            values = last.get(expect[0] & ~0x3, [])
+            if values and values[0] == expect[1]:
+                break
+            wait *= 2
+        else:
+            raise RuntimeError(
+                f"QEMU run did not reach the expected marker "
+                f"0x{expect[1]:08X} at 0x{expect[0]:08X} within "
+                f"{wait:.1f}s; got {last}"
+            )
+
+        result = {}
+        for addr, count in dumps:
+            words = last.get(addr)
+            if words is None or len(words) < count:
+                raise RuntimeError(
+                    f"QEMU monitor did not return {count} word(s) at "
+                    f"0x{addr:08X}; parsed {last}"
+                )
+            result[addr] = words[:count]
+        return result
 
 
 def qemu_m68030_pc_trace(
