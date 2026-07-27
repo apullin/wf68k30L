@@ -59,22 +59,33 @@ Baseline seed sweep command:
 
     ./synth/fpga/run_ecp5_seed_sweep.sh
 
-Representative baseline from 10 seeds (`build/rep_ecp5_seed_sweep_task3/results.csv`):
+Current measured place-and-route (`./synth/fpga/run_ecp5_representative.sh`,
+LFE5U-85F CABGA381 speed 8, 25 MHz target, ABC9):
 
 | Metric | Value |
 |--------|-------|
-| Fmax min/med/max | 16.131 / 16.481 / 16.898 MHz |
-| TRELLIS_COMB | 18,689 (all 10 seeds) |
-| TRELLIS_FF | 2,522 (all 10 seeds) |
+| TRELLIS_COMB | 46,225 / 83,640 (55%) |
+| TRELLIS_FF | 6,922 / 83,640 (8%) |
+| DP16KD | 10 / 208 (4%) |
+| MULT18X18D | 5 / 156 (3%) |
+| Fmax | **11.21 MHz — FAILS the 25 MHz target** |
 
-Latest representative single-run log (`build/rep_ecp5/nextpnr.log`):
+**Timing does not close, and this is a known open item.** The figures that used
+to appear here (21,941 LUT4, 26.69 MHz passing, and a 16.1-16.9 MHz seed sweep)
+predate the MMU, caches and coprocessor surface; the design has roughly doubled
+in logic since, and nothing has been pipelined to pay for it.
 
-| Metric | Value |
-|--------|-------|
-| LUT4 | 21,941 / 43,848 (50%) |
-| TRELLIS_COMB | 22,603 / 43,848 (51%) |
-| TRELLIS_FF | 2,487 / 43,848 (5%) |
-| Fmax @ 25 MHz target | 26.69 MHz (timing pass) |
+The critical path is specific and worth knowing before anyone attacks it: it
+runs from the decoded-opcode register (`I_OPCODE_DECODER.OP`) through the
+control module's combinational next-state logic and ends at the `CIOUT` decision
+latch, across **127 logic stages** for about 89 ns. So the cache-inhibit
+decision depends combinationally on a very deep cone rooted at the opcode — the
+transparent-translation match, the ATC lookup and the function-code decode all
+sit in it. That is the cone to break up, not the arithmetic.
+
+This is a performance problem, not a correctness one: every functional gate is
+green at this commit. But the core should not be described as synthesizable *at
+25 MHz* until it closes.
 
 ## Equivalence Checking (SV revision vs SV revision)
 
