@@ -18,8 +18,6 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic        MMU_TT0_WR,
     input  logic        MMU_TT1_WR,
     input  logic        MMU_MMUSR_WR,
-    input  logic        MMU_RUNTIME_REQ,
-    input  logic        MMU_RUNTIME_FAULT,
     input  logic        MMU_RUNTIME_ATC_REFILL,
     input  logic [2:0]  MMU_RUNTIME_ATC_FC,
     input  logic [31:0] MMU_RUNTIME_ATC_TAG,
@@ -58,7 +56,6 @@ module WF68K30L_TOP_MMU_STATE #(
     output logic [31:0] MMU_TT1,
     output logic [31:0] MMU_MMUSR,
     output logic        TRAP_MMU_CFG,
-    output logic [31:0] MMU_ATC_FLUSH_COUNT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_V_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_B_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_W_FLAT,
@@ -68,6 +65,9 @@ module WF68K30L_TOP_MMU_STATE #(
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT
 );
+
+// Internal only: nothing outside this module read this.
+logic [31:0] MMU_ATC_FLUSH_COUNT;
 
 `include "wf68k30L_pkg.svh"
 `include "wf68k30L_top_sections/helpers/wf68k30L_top_helpers_mmu_pure.svh"

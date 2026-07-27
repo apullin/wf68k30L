@@ -58,7 +58,6 @@ module WF68K30L_BUS_INTERFACE (
     // subsystem is making, which is what CBREQ is driven from; the beat port
     // hands each streamed long word to the cache fill path.
     input  logic        BURST_REQ,
-    output logic        BURST_ACTIVE,
     output logic        BURST_CBREQ_HOLD,
     output logic        BURST_BEAT_RDY,
     output logic        BURST_BEAT_FIRST,
@@ -81,6 +80,9 @@ module WF68K30L_BUS_INTERFACE (
 
     output logic        BUS_BSY
 );
+
+// Internal only: nothing outside this module read this.
+logic BURST_ACTIVE;
 
 `include "wf68k30L_pkg.svh"
 

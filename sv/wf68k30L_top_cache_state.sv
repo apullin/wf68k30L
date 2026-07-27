@@ -49,10 +49,6 @@ module WF68K30L_TOP_CACHE_STATE (
     output logic [31:0] CAAR,
     output logic        ICACHE_RDY,
     output logic [15:0] ICACHE_OPCODE_WORD,
-    output logic        ICACHE_FILL_PENDING,
-    output logic [31:0] ICACHE_FILL_ADDR,
-    output logic        ICACHE_FILL_CACHEABLE,
-    output logic [2:0]  ICACHE_FILL_FC,
     output logic        ICACHE_BURST_TRACK_VALID,
     output logic [3:0]  ICACHE_BURST_TRACK_LINE,
     output logic [23:0] ICACHE_BURST_TRACK_TAG,
@@ -60,9 +56,6 @@ module WF68K30L_TOP_CACHE_STATE (
     output logic        DATA_VALID_CACHE,
     output logic [31:0] DATA_TO_CORE_CACHE,
     output logic        DATA_LAST_FROM_CACHE,
-    output logic        DCACHE_HIT_PENDING,
-    output logic [1:0]  DCACHE_HIT_SIZE_PENDING,
-    output logic [1:0]  DCACHE_HIT_ADDR10_PENDING,
     output logic        ICACHE_RAM_RD_EN,
     output logic [6:0]  ICACHE_RAM_RD_ADDR,
     output logic        ICACHE_RAM_WR_EN,
@@ -74,20 +67,61 @@ module WF68K30L_TOP_CACHE_STATE (
     output logic        DCACHE_RAM_WR_EN,
     output logic [5:0]  DCACHE_RAM_WR_ADDR,
     output logic [31:0] DCACHE_RAM_WR_DATA,
-    output logic        DCACHE_READ_FILL_PENDING,
-    output logic [31:0] DCACHE_READ_FILL_ADDR,
-    output logic [1:0]  DCACHE_READ_FILL_SIZE,
-    output logic        DCACHE_READ_FILL_CACHEABLE,
-    output logic [2:0]  DCACHE_READ_FILL_FC,
     output logic        DCACHE_BURST_TRACK_VALID,
     output logic [3:0]  DCACHE_BURST_TRACK_LINE,
-    output logic [23:0] DCACHE_BURST_TRACK_TAG,
-    output logic        DCACHE_WRITE_PENDING,
-    output logic [31:0] DCACHE_WRITE_ADDR,
-    output logic [1:0]  DCACHE_WRITE_SIZE,
-    output logic [31:0] DCACHE_WRITE_DATA,
-    output logic        DCACHE_WRITE_CACHEABLE
+    output logic [23:0] DCACHE_BURST_TRACK_TAG
 );
+
+// Internal only: nothing outside this module read this.
+logic DCACHE_WRITE_CACHEABLE;
+
+// Internal only: nothing outside this module read this.
+logic [31:0] DCACHE_WRITE_DATA;
+
+// Internal only: nothing outside this module read this.
+logic [1:0] DCACHE_WRITE_SIZE;
+
+// Internal only: nothing outside this module read this.
+logic [31:0] DCACHE_WRITE_ADDR;
+
+// Internal only: nothing outside this module read this.
+logic DCACHE_WRITE_PENDING;
+
+// Internal only: nothing outside this module read this.
+logic [2:0] DCACHE_READ_FILL_FC;
+
+// Internal only: nothing outside this module read this.
+logic DCACHE_READ_FILL_CACHEABLE;
+
+// Internal only: nothing outside this module read this.
+logic [1:0] DCACHE_READ_FILL_SIZE;
+
+// Internal only: nothing outside this module read this.
+logic [31:0] DCACHE_READ_FILL_ADDR;
+
+// Internal only: nothing outside this module read this.
+logic DCACHE_READ_FILL_PENDING;
+
+// Internal only: nothing outside this module read this.
+logic [1:0] DCACHE_HIT_ADDR10_PENDING;
+
+// Internal only: nothing outside this module read this.
+logic [1:0] DCACHE_HIT_SIZE_PENDING;
+
+// Internal only: nothing outside this module read this.
+logic DCACHE_HIT_PENDING;
+
+// Internal only: nothing outside this module read this.
+logic [2:0] ICACHE_FILL_FC;
+
+// Internal only: nothing outside this module read this.
+logic ICACHE_FILL_CACHEABLE;
+
+// Internal only: nothing outside this module read this.
+logic [31:0] ICACHE_FILL_ADDR;
+
+// Internal only: nothing outside this module read this.
+logic ICACHE_FILL_PENDING;
 
 `include "wf68k30L_pkg.svh"
 `include "wf68k30L_top_sections/helpers/wf68k30L_top_helpers_mmu_pure.svh"

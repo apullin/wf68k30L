@@ -33,19 +33,15 @@ module WF68K30L_CTRL_REGSEL (
     input  logic        ALU_INIT_I,
     input  logic        ALU_BSY,
     input  logic        RD_RDY,
-    input  logic        WR_RDY,
     input  logic        DATA_RDY,
     input  logic        DATA_VALID,
 
     // MOVEM
     input  logic [3:0]  MOVEM_PNTR,
-    input  logic        MOVEM_ADn_I,
     input  logic        MOVEM_ADn_WB,
-    input  logic        MOVEM_COND,
     input  logic        MOVEM_LAST_WR,
 
     // In-use flags
-    input  logic        AR_IN_USE,
     input  logic        DR_IN_USE,
 
     // Address register outputs

@@ -27,7 +27,6 @@ module WF68K30L_CTRL_FETCH_START (
     input  logic        ALU_BSY,
 
     // Internal state
-    input  logic [1:0]  OP_SIZE_I,
 
     // Output
     output logic [4:0]  NEXT_FETCH_STATE

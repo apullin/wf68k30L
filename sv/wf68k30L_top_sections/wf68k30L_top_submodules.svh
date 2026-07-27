@@ -219,7 +219,6 @@
         // same request term CBREQn is driven from, so it can only enter burst
         // mode for a cycle on which the processor really did assert CBREQ.
         .BURST_REQ          (BURST_REQ_BUSIF),
-        .BURST_ACTIVE       (BURST_ACTIVE),
         .BURST_CBREQ_HOLD   (BURST_CBREQ_HOLD),
         .BURST_BEAT_RDY     (BURST_BEAT_RDY),
         .BURST_BEAT_FIRST   (BURST_BEAT_FIRST),

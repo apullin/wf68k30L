@@ -25,7 +25,6 @@ module WF68K30L_CTRL_COMB #(
     input  logic [6:0]  OP_WB_I,
     input  logic [13:0] BIW_0,
     input  logic [15:0] BIW_1,
-    input  logic [15:0] BIW_2,
     input  logic [11:0] BIW_0_WB,
     input  logic [15:0] BIW_1_WB,
     input  logic [15:0] EXT_WORD,
@@ -45,8 +44,6 @@ module WF68K30L_CTRL_COMB #(
 
     // Hazard signals
     input  logic        ADR_IN_USE,
-    input  logic        DR_IN_USE,
-    input  logic        AR_IN_USE,
 
     // ALU
     input  logic        ALU_BSY,
@@ -67,7 +64,6 @@ module WF68K30L_CTRL_COMB #(
     input  logic        BF_HILOn,
 
     // Control
-    input  logic        BRANCH_ATN,
     input  logic        DBcc_COND,
     input  logic [1:0]  TRACE_MODE,
     input  logic        VBIT,

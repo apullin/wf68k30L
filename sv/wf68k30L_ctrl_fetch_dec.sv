@@ -25,7 +25,6 @@ module WF68K30L_CTRL_FETCH_DEC (
     input  logic [6:0]  OP,
     input  logic [13:0] BIW_0,
     input  logic [15:0] BIW_1,
-    input  logic [15:0] BIW_2,
     input  logic [15:0] EXT_WORD,
 
     // Data availability
@@ -64,7 +63,6 @@ module WF68K30L_CTRL_FETCH_DEC (
     input  logic        DBcc_COND,
     input  logic [1:0]  TRACE_MODE,
     input  logic        EXH_REQ,
-    input  logic        BUSY_EXH,
     input  logic        LOOP_BSY,
 
     // Address format
@@ -95,7 +93,6 @@ WF68K30L_CTRL_FETCH_START I_FETCH_START (
     .DR_IN_USE       (DR_IN_USE),
     .AR_IN_USE       (AR_IN_USE),
     .ALU_BSY         (ALU_BSY),
-    .OP_SIZE_I       (OP_SIZE_I),
     .NEXT_FETCH_STATE(NEXT_STATE_START)
 );
 
@@ -116,19 +113,15 @@ WF68K30L_CTRL_FETCH_OTHER I_FETCH_OTHER (
     .DR_IN_USE          (DR_IN_USE),
     .AR_IN_USE          (AR_IN_USE),
     .ALU_BSY            (ALU_BSY),
-    .ALU_COND           (ALU_COND),
     .ADR_MODE_I         (ADR_MODE_I),
     .PHASE2             (PHASE2),
     .MOVEM_COND         (MOVEM_COND),
     .MOVEM_PNTR         (MOVEM_PNTR),
-    .MOVEM_FIRST_RD     (MOVEM_FIRST_RD),
     .MOVEP_PNTR_I       (MOVEP_PNTR_I),
     .BF_BYTES           (BF_BYTES),
     .BRANCH_ATN         (BRANCH_ATN),
-    .DBcc_COND          (DBcc_COND),
     .TRACE_MODE         (TRACE_MODE),
     .EXH_REQ            (EXH_REQ),
-    .LOOP_BSY           (LOOP_BSY),
     .OD_REQ_32          (OD_REQ_32),
     .OD_REQ_16          (OD_REQ_16),
     .MEM_INDIRECT       (MEM_INDIRECT),

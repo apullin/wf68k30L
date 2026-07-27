@@ -40,19 +40,7 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE (
 
     // Retired with the background line-completion cycles below. The ports stay
     // because this module's instantiation is not part of this change.
-    input  logic        ICACHE_BURST_FILL_VALID,
-    input  logic [3:0]  ICACHE_BURST_FILL_LINE,
-    input  logic [23:0] ICACHE_BURST_FILL_TAG,
-    input  logic [7:0]  ICACHE_BURST_FILL_PENDING,
-    input  logic [2:0]  ICACHE_BURST_FILL_FC,
-    input  logic [2:0]  ICACHE_BURST_FILL_NEXT_WORD,
 
-    input  logic        DCACHE_BURST_FILL_VALID,
-    input  logic [3:0]  DCACHE_BURST_FILL_LINE,
-    input  logic [23:0] DCACHE_BURST_FILL_TAG,
-    input  logic [3:0]  DCACHE_BURST_FILL_PENDING,
-    input  logic [2:0]  DCACHE_BURST_FILL_FC,
-    input  logic [1:0]  DCACHE_BURST_FILL_NEXT_ENTRY,
 
     input  logic        MMU_TWALK_START,
 
@@ -138,13 +126,15 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE (
 
 logic [31:0] MMU_DESC_HIST_ADDR;
 logic [31:0] MMU_DESC_HIST_DATA;
+logic [31:0] MMU_TWALK_INDIRECT_SHORT_ADDR;
+logic [31:0] MMU_TWALK_INDIRECT_LONG_ADDR;
+logic        MMU_PTEST_DESC_REQ;
+// Descriptor words latched by the walk's own fetch. Module-local: the top level
+// carried duplicate declarations of these that nothing connected or read.
 logic [31:0] MMU_TWALK_FETCH_LO_WORD;
 logic [31:0] MMU_TWALK_FETCH_HI_WORD;
 logic        MMU_TWALK_FETCH_LO_VALID;
 logic        MMU_TWALK_FETCH_HI_VALID;
-logic [31:0] MMU_TWALK_INDIRECT_SHORT_ADDR;
-logic [31:0] MMU_TWALK_INDIRECT_LONG_ADDR;
-logic        MMU_PTEST_DESC_REQ;
 logic [31:0] MMU_PTEST_DESC_FETCH_ADDR;
 logic        MMU_DESC_SEARCH_BUSY;
 // Declared here rather than in the descriptor-bus block below because the PTEST

@@ -60,7 +60,6 @@ module WF68K30L_OPERAND_MUX (
     input  logic [15:0] EXT_WORD,
 
     // --- Address offset inputs ---
-    input  logic        BUSY_MAIN,
     input  logic [31:0] ADR_OFFSET_EXH,
     input  logic [5:0]  ADR_OFFSET_MAIN,
 

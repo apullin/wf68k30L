@@ -35,7 +35,6 @@ module WF68K30L_CTRL_FETCH_OTHER (
 
     // ALU
     input  logic        ALU_BSY,
-    input  logic        ALU_COND,
 
     // Internal state
     input  logic [2:0]  ADR_MODE_I,
@@ -44,7 +43,6 @@ module WF68K30L_CTRL_FETCH_OTHER (
     // MOVEM/MOVEP
     input  logic        MOVEM_COND,
     input  logic [3:0]  MOVEM_PNTR,
-    input  logic        MOVEM_FIRST_RD,
     input  int          MOVEP_PNTR_I,
 
     // Bitfield
@@ -52,10 +50,8 @@ module WF68K30L_CTRL_FETCH_OTHER (
 
     // Control
     input  logic        BRANCH_ATN,
-    input  logic        DBcc_COND,
     input  logic [1:0]  TRACE_MODE,
     input  logic        EXH_REQ,
-    input  logic        LOOP_BSY,
 
     // Address format
     input  logic        OD_REQ_32,

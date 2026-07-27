@@ -41,7 +41,6 @@
         .STORE_IDATA_B1         (STORE_IDATA_B1),
         .STORE_IDATA_B2         (STORE_IDATA_B2),
         .EXT_WORD               (EXT_WORD),
-        .BUSY_MAIN              (BUSY_MAIN),
         .ADR_OFFSET_EXH         (ADR_OFFSET_EXH),
         .ADR_OFFSET_MAIN        (ADR_OFFSET_MAIN),
         .BUSY_EXH               (BUSY_EXH),
