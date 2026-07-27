@@ -131,6 +131,12 @@ logic               SSW_FROZEN;
 logic               STARTUP = 1'b0;
 logic               STERM_In;
 logic               CIIN_In;
+logic               ARB_THREE_STATE;
+logic               BUS_HIZ;
+logic               BUS_PREEMPT;
+logic               RMC_ARB_LOCK;
+logic               RMC_FIRST_READ;
+logic               RMC_D;
 TIME_SLICES         T_SLICE;
 logic               WAITSTATES;
 logic [31:0]        WP_BUFFER;
@@ -382,6 +388,13 @@ always_ff @(posedge CLK) begin : bus_state_reg
     BUS_CTRL_STATE <= NEXT_BUS_CTRL_STATE;
 end
 
+// A forced release (BGACK asserted with no grant, UM 7.7.4 state 0 -> state 4)
+// pre-empts a cycle that has been committed but has not driven AS yet. The
+// granted path never needs this: arb_dec leaves ARB_IDLE before BGACK can be
+// asserted, and bus_ctrl_dec will not start a cycle from BUS_IDLE while the
+// arbiter is out of ARB_IDLE.
+assign BUS_PREEMPT = !BGACK_In;
+
 // ---- Bus controller next-state logic ----
 always_comb begin : bus_ctrl_dec
     case (BUS_CTRL_STATE)
@@ -404,7 +417,17 @@ always_comb begin : bus_ctrl_dec
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
         end
         START_CYCLE: begin
-            if (RD_REQ)
+            // UM 7.7.4: an alternate master may take the bus once it "must be
+            // observed to be negated (high) on two consecutive clock edges...
+            // Waiting for this condition ensures that any current or pending bus
+            // activity has completed or has been pre-empted." A cycle committed
+            // on the second of those edges has not driven AS yet, so it is the
+            // pending activity, and it is pre-empted rather than run. The access
+            // latches are untouched, so BUS_IDLE restarts it once the bus is
+            // handed back.
+            if (BUS_PREEMPT)
+                NEXT_BUS_CTRL_STATE = BUS_IDLE;
+            else if (RD_REQ)
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
             else if (WR_REQ)
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
@@ -744,9 +767,38 @@ assign ASn  = !SLICE_S0_TO_S4;
 assign DSn  = !(WRITE_ACCESS ? SLICE_S3_TO_S5 : SLICE_S0_TO_S4); // Write: DS late, read: DS early.
 assign DBENn = !(WRITE_ACCESS ? SLICE_S1_TO_S5 : SLICE_S2_TO_S4); // Write: S1-S5, read: S2-S4.
 
-// ---- Bus tri-state controls ----
-assign BUS_EN       = ARB_STATE == ARB_IDLE && !RESET_CPU_I;
-assign DATA_PORT_EN = WRITE_ACCESS && ARB_STATE == ARB_IDLE && !RESET_CPU_I;
+// ---- Bus tri-state controls: UM 7.7.4 signal T ----
+// "The BG output is labeled G, and the internal high-impedance control signal is
+// labeled T. If T is true, the address, data, and control buses are placed in
+// the high-impedance state after the next rising edge following the negation of
+// AS and RMC." Figure 7-61 makes state 0 -- the processor holding the bus -- the
+// only state in which T is negated, so T follows the arbitration state directly
+// and it is the *release* that waits for the bus to fall quiet. That separation
+// is what lets a grant overlap a cycle in progress without pulling the bus out
+// from under it, including a burst, which holds AS asserted for the whole
+// operation and is "a single cycle" for arbitration purposes (UM 7.3.7).
+//
+// AS is the whole condition. Both forced-release paths UM 7.7.4 documents run
+// with RMC still asserted -- relinquish and retry on the first locked read, and
+// single-wire BGACK, which "applies to all bus cycles of a read-modify-write
+// sequence" -- so requiring RMC negated would make neither of them able to
+// release the bus. The granted path cannot be entered while RMC is asserted at
+// all (Figure 7-61 NOTE), so for it the RMC term is already satisfied.
+//
+// "The bus control signals (controlled by T) are driven by the processor,
+// immediately following a state change, when bus mastery is returned to the
+// MC68030": the reacquire side is combinational, not registered.
+assign ARB_THREE_STATE = (ARB_STATE != ARB_IDLE);
+
+always_ff @(posedge CLK) begin : three_state_apply
+    if (RESET_CPU_I || !ARB_THREE_STATE)
+        BUS_HIZ <= 1'b0;
+    else if (ASn)
+        BUS_HIZ <= 1'b1;
+end
+
+assign BUS_EN       = !RESET_CPU_I && !(ARB_THREE_STATE && BUS_HIZ);
+assign DATA_PORT_EN = WRITE_ACCESS && BUS_EN;
 
 // ---- Bus cycle completion detection ----
 assign BUS_CYC_RDY = RETRY ? 1'b0 :
@@ -761,6 +813,44 @@ always_ff @(posedge CLK) begin : arb_reg
         ARB_STATE <= NEXT_ARB_STATE;
 end
 
+// ---- Read-modify-write arbitration lock ----
+// UM 7.7.2: "During a read-modify-write cycle, the processor does not assert BG
+// until the entire operation has completed", and the Figure 7-61 NOTE: "The BG
+// output will not be asserted while RMC is asserted."
+//
+// UM 7.7.4 carves out exactly one hole: "One way for an alternate bus master to
+// force the MC68030 to release the bus applies only to the first read cycle of
+// an read-modify-write sequence. The MC68030 allows normal bus arbitration
+// during this read cycle; a normal relinquish and retry operation (asserting
+// BERR, HALT, and BR at the same time) is used." UM 7.5.2 states the limit from
+// the other side: "The MC68030 does not relinquish the bus during a
+// read-modify-write operation, except during the first read cycle."
+//
+// So the lock lifts only for a relinquish and retry that lands on the first read
+// of the sequence. RETRY alone could never reach the grant, because it also
+// holds BUS_CYC_RDY low and so pins bus_ctrl_dec in DATA_C1C4; a bare BR must
+// still be refused, or the sequence would not be indivisible at all.
+// RMC is asserted a few clocks ahead of the locked read, and queued instruction
+// prefetches run in that window, so the flag has to be retired by the first
+// *data* cycle of the sequence rather than by the first bus cycle of any kind.
+always_ff @(posedge CLK) begin : rmc_first_read_track
+    if (RESET_CPU_I) begin
+        RMC_D <= 1'b0;
+        RMC_FIRST_READ <= 1'b0;
+    end else begin
+        RMC_D <= RMC;
+        if (!RMC)
+            RMC_FIRST_READ <= 1'b0;
+        else if (!RMC_D)
+            RMC_FIRST_READ <= 1'b1;
+        else if ((READ_ACCESS || WRITE_ACCESS) && BUS_CTRL_STATE == DATA_C1C4 &&
+                 BUS_CYC_RDY && LAST_SUB_CYCLE)
+            RMC_FIRST_READ <= 1'b0;
+    end
+end
+
+assign RMC_ARB_LOCK = RMC && !(RETRY && RMC_FIRST_READ);
+
 always_comb begin : arb_dec
     case (ARB_STATE)
         ARB_IDLE: begin
@@ -769,11 +859,20 @@ always_comb begin : arb_dec
             // bus cycles of a read-modify-write sequence". Only BG is held off
             // while RMC is asserted (UM 7.3.3 and the Figure 7-61 NOTE), so
             // the acknowledge path has to be tested ahead of the RMC lock.
-            if (!BGACK_In && BUS_CTRL_STATE == BUS_IDLE)
+            //
+            // Neither transition waits for the bus controller to go idle. UM
+            // 7.7.2 defers BG only "until the bus cycle has begun", and UM 7.7
+            // adds that "this technique allows processing of bus requests during
+            // data transfer cycles"; the requester is the party that waits for
+            // AS, DSACKx and BGACK (UM 7.7.3). What the state change costs the
+            // cycle in flight is nothing: bus_ctrl_dec will not start a further
+            // cycle out of BUS_IDLE while the arbiter is out of ARB_IDLE, and
+            // signal T holds the three-state off until AS negates.
+            if (!BGACK_In)
                 NEXT_ARB_STATE = WAIT_RELEASE_3WIRE;
-            else if (RMC && !RETRY)
+            else if (RMC_ARB_LOCK)
                 NEXT_ARB_STATE = ARB_IDLE;
-            else if (!BR_In && BUS_CTRL_STATE == BUS_IDLE)
+            else if (!BR_In)
                 NEXT_ARB_STATE = GRANT;
             else
                 NEXT_ARB_STATE = ARB_IDLE;
@@ -790,7 +889,7 @@ always_comb begin : arb_dec
             // Figure 7-61 NOTE: BG is never asserted while RMC is asserted, so
             // a request left pending over a single-wire release during a locked
             // sequence has to wait for the sequence to end.
-            if (BGACK_In && !BR_In && !(RMC && !RETRY))
+            if (BGACK_In && !BR_In && !RMC_ARB_LOCK)
                 NEXT_ARB_STATE = GRANT;
             else if (BGACK_In)
                 NEXT_ARB_STATE = ARB_IDLE;
