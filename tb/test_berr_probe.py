@@ -517,3 +517,84 @@ async def test_berr_on_store_stacks_the_storing_instruction(dut):
     assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
         "Execution did not continue correctly after the RTE rerun"
     )
+
+
+@cocotb.test()
+async def test_berr_on_clr_stacks_the_clearing_instruction(dut):
+    """The same rule holds for the other short-store forms, not just MOVE.
+
+    CLR reaches its write through a different arm of the mark-used logic than
+    MOVE does, and a word store is a different bus size, so both are checked
+    here: whichever instruction owns the faulted write is the one the format
+    $A/$B frame must name, and the write must land on the rerun.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrOnceBusModel(dut, h.mem, times=1)
+
+    store_addr = 0x000106
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x4290,                                   # 0x106 CLR.L (A0)  <- BERR
+        0x7421,                                   # 0x108 MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x10A MOVE.L D2,($20018).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x110 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x116 MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x11C STOP #$2700
+    ]
+    # Preloaded so a completed CLR is distinguishable from a discarded one.
+    h.mem.load_long(FAULT_ADDR, 0x5A5AA5A5)
+
+    found = await _boot(dut, h, bus, program, STORE_FAULT_HANDLER)
+
+    counter = h.mem.read(COUNTER_ADDR, 4)
+    pc = h.mem.read(PC_ADDR, 4)
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert counter == 1, f"Bus-error handler ran {counter} times (expected 1)"
+    assert pc == store_addr, (
+        f"Stacked PC = 0x{pc:08X}, expected 0x{store_addr:08X} (the CLR)"
+    )
+    assert found, "Program did not complete after the RTE rerun"
+    assert h.mem.read(FAULT_ADDR, 4) == 0, (
+        f"Faulted CLR was not rerun: 0x{FAULT_ADDR:06X} still holds "
+        f"0x{h.mem.read(FAULT_ADDR, 4):08X}"
+    )
+    assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
+        "Execution did not continue correctly after the RTE rerun"
+    )
+
+
+@cocotb.test()
+async def test_berr_on_word_store_stacks_the_storing_instruction(dut):
+    """A faulted word store must name itself too -- the defect was size-blind."""
+    h = CPUTestHarness(dut)
+    bus = BerrOnceBusModel(dut, h.mem, times=1)
+
+    store_addr = 0x00010A
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x363C, 0x5A5A,                           # 0x106 MOVE.W #$5A5A,D3
+        0x3083,                                   # 0x10A MOVE.W D3,(A0)  <- BERR
+        0x7421,                                   # 0x10C MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x10E MOVE.L D2,($20018).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x114 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x11A MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x120 STOP #$2700
+    ]
+
+    found = await _boot(dut, h, bus, program, STORE_FAULT_HANDLER)
+
+    counter = h.mem.read(COUNTER_ADDR, 4)
+    pc = h.mem.read(PC_ADDR, 4)
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert counter == 1, f"Bus-error handler ran {counter} times (expected 1)"
+    assert pc == store_addr, (
+        f"Stacked PC = 0x{pc:08X}, expected 0x{store_addr:08X} (the MOVE.W)"
+    )
+    assert found, "Program did not complete after the RTE rerun"
+    assert h.mem.read(FAULT_ADDR, 2) == 0x5A5A, (
+        f"Faulted word store was not rerun: 0x{FAULT_ADDR:06X} holds "
+        f"0x{h.mem.read(FAULT_ADDR, 2):04X}"
+    )
+    assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
+        "Execution did not continue correctly after the RTE rerun"
+    )
