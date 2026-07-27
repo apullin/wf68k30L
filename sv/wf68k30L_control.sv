@@ -370,7 +370,6 @@ logic           OW_RDY_NEXT;
 logic           PHASE2;
 logic           RD_RDY;
 logic           READ_CYCLE;
-logic           SBIT_I;
 logic           EW_RDY_NEXT;
 logic           MEMADR_RDY_NEXT;
 logic           BRANCH_ATN_HOLD;
@@ -890,9 +889,14 @@ end
         end else if (DATA_RD && RD_RDY && !DATA_VALID) begin
             FETCH_STATE <= START_OP; // Bus error.
             EXEC_WB_STATE <= IDLE;
-        end else if (DATA_WR && RD_RDY && !DATA_VALID) begin
-            FETCH_STATE <= START_OP; // Bus error.
-            EXEC_WB_STATE <= IDLE;
+        // A third arm here tested (DATA_WR && RD_RDY && !DATA_VALID) and was
+        // unreachable: RD_RDY is READ_CYCLE ? DATA_RDY : 1'b0 and DATA_WR is
+        // forced to 0 whenever READ_CYCLE, so it required READ_CYCLE and its
+        // negation at once. It has been removed rather than repaired. The
+        // apparent intent -- WR_RDY -- is deliberately NOT adopted: write bus
+        // faults are recovered by the RTE data-cycle replay path instead, which
+        // eleven tests in tb/test_berr_probe.py cover, and activating this arm
+        // would reset the control state machine underneath that recovery.
         end else begin
             FETCH_STATE <= NEXT_FETCH_STATE;
             EXEC_WB_STATE <= NEXT_EXEC_WB_STATE;

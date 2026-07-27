@@ -3,26 +3,31 @@
 // WF68K30L IP Core.                                                    //
 //                                                                      //
 // This is the top level structural design unit of the 68K30L           //
-// complex instruction set (CISC) microcontroller. It's program-        //
-// ming model is (hopefully) fully compatible with Motorola's           //
-// MC68030. This core features a pipelined architecture. In com-        //
-// parision to the fully featured 68K30 the core has no full MMU, no    //
-// instruction/data cache arrays, and no external coprocessor           //
-// interface execution engine. This                                      //
-// results in missing burstmodes which are not required due to          //
-// lack of cache. Missing coprocessor operations are:                   //
-// cpBcc, cpDBcc, cpGEN, cpRESTORE, cpSAVE, cpScc, cpTRAPcc.           //
-// MMU support (model scope): decode/privilege handling, PMOVE register   //
-// transfers, ATC/MMUSR model for PTEST/PLOAD/PFLUSH semantics, and       //
-// runtime translation using short/long descriptor walks.                 //
-// Cache support (model scope): direct-mapped I/D cache lookup/fill,      //
-// CACR/CAAR invalidation controls, TT CI integration, burst intent/line  //
-// tracking, and autonomous background line completion.                   //
-// HW-003 phase-4/5 adds an internal coprocessor-CIR model with         //
-// no-response tracking and model-scope pre/mid/post exception-frame    //
-// plumbing (including protocol-violation vector modeling). Full        //
-// external coprocessor execution and CIR bus-cycle sequencing remain    //
-// incomplete.                                                           //
+// complex instruction set (CISC) microcontroller. Its programming      //
+// model is (hopefully) fully compatible with Motorola's MC68030.       //
+// This core features a pipelined architecture.                         //
+//                                                                      //
+// What is implemented, against the MC68030 user's manual:              //
+// - MMU: short and long descriptor table walks over the bus, ATC,      //
+//   PMOVE/PTEST/PLOAD/PFLUSH, U and M history bits written back to      //
+//   memory, and demand paging on both reads and writes.                 //
+// - Caches: direct-mapped instruction and data cache arrays with        //
+//   CACR/CAAR controls and TT cache-inhibit integration.                //
+// - Bursts: the real CBREQ/CBACK protocol per UM 7.3.7 and 6.1.3.2 --   //
+//   address, FC, SIZ and R/W held for the whole burst, one long word    //
+//   per STERM, up to four.                                              //
+// - RTE bus-fault return: format A/B frame validation, long-format      //
+//   version checks, and replay of a faulted data write cycle.           //
+//                                                                      //
+// What is NOT implemented:                                             //
+// - External coprocessor execution and CIR bus-cycle sequencing. An     //
+//   internal CIR model provides pre/mid/post exception-frame plumbing   //
+//   and protocol-violation vectors, but these operations are absent:    //
+//   cpBcc, cpDBcc, cpGEN, cpRESTORE, cpSAVE, cpScc, cpTRAPcc.          //
+// - Cycle accuracy. This is deliberate, not an omission: the pipeline   //
+//   differs from the silicon and the shifter is iterative.              //
+// - Replay of a faulted data *read* cycle; those still re-execute the   //
+//   whole instruction.                                                  //
 // The shifter in the 68K30 is a barrel shifter and in this core        //
 // it is a conventional shift register controlled logic.                //
 // This core features the loop operation mode of the 68010 to           //

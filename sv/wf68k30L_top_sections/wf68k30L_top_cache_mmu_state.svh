@@ -2,18 +2,6 @@
 // MMU/cache constants and sequential state
 // ========================================================================
 
-localparam logic [15:0] MMUSR_B = 16'h8000;
-localparam logic [15:0] MMUSR_L = 16'h4000;
-localparam logic [15:0] MMUSR_S = 16'h2000;
-localparam logic [15:0] MMUSR_W = 16'h0800;
-localparam logic [15:0] MMUSR_I = 16'h0400;
-localparam logic [15:0] MMUSR_M = 16'h0200;
-localparam logic [15:0] MMUSR_T = 16'h0040;
-localparam logic [15:0] MMUSR_N = 16'h0007;
-localparam logic [31:0] CACR_RW_MASK = 32'h0000_3313; // WA,DBE,FD,ED,IBE,FI,EI
-localparam int ICACHE_LINES = 16;
-localparam int DCACHE_LINES = 16;
-
 // PLOAD table-search request/response between the MMU register file and the
 // runtime walk sequencer.
 logic        MMU_PLOAD_START;

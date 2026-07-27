@@ -115,9 +115,11 @@ always_comb begin : mmu_address_translate
     else
         first_index = mmu_index_extract(ADR_P, MMU_TC[19:16], 6'd0, MMU_TC[15:12]);
     // UM 9.5.1.2: with TC.FCL set, the root pointer L/U and LIMIT fields are unused.
+    // The comparison itself goes through the shared helper -- the other eight
+    // limit checks in the design already do, and this was the one hand-written
+    // copy that could drift away from them.
     root_limit_fault = !MMU_TC[24] &&
-                       ((root_limit_lower && first_index[14:0] < root_limit) ||
-                        (!root_limit_lower && first_index[14:0] > root_limit));
+                       mmu_limit_violation(root_limit_lower, root_limit, first_index);
 
     atc_fc = FC_I;
     atc_logical = ADR_P;

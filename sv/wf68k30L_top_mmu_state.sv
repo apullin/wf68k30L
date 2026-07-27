@@ -67,11 +67,6 @@ module WF68K30L_TOP_MMU_STATE #(
 `include "wf68k30L_pkg.svh"
 `include "wf68k30L_top_sections/helpers/wf68k30L_top_helpers_mmu_pure.svh"
 
-localparam logic [15:0] MMUSR_B = 16'h8000;
-localparam logic [15:0] MMUSR_W = 16'h0800;
-localparam logic [15:0] MMUSR_I = 16'h0400;
-localparam logic [15:0] MMUSR_M = 16'h0200;
-localparam logic [15:0] MMUSR_T = 16'h0040;
 
 logic [MMU_ATC_WAYS-1:0] MMU_ATC_V [0:MMU_ATC_SETS-1];
 logic [MMU_ATC_WAYS-1:0] MMU_ATC_B [0:MMU_ATC_SETS-1];

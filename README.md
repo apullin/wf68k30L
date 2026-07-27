@@ -5,8 +5,12 @@ originally written in VHDL by Wolfgang Foerster.
 
 ## Branches
 
-- **main** — Original VHDL with minor fixes for GHDL/Yosys synthesis compatibility
-- **verilog** — Full SystemVerilog port, synthesizable with Yosys
+- **master** — the SystemVerilog core. This is the design.
+- `vhdl/` in-tree holds the original VHDL as a historical reference only. It
+  predates the MMU, caches and coprocessor interface, and its own README records
+  that it was never verified against the manual, which is why VHDL-vs-SV
+  equivalence checking was retired (see *Equivalence Checking* below). Elaborate
+  it with `make synth-vhdl-ref`; `make synth` builds the SystemVerilog.
 
 ## Synthesis Results
 
@@ -15,14 +19,17 @@ synth/synth_check.sh`, which also checks these as a +/-10% regression tripwire):
 
 | Resource   | Count  |
 |------------|--------|
-| LUT4       | 40,544 |
-| TRELLIS_FF |  6,924 |
-| CCU2C      |  2,180 |
-| DP16KD     |     10 |
+| LUT4       | 39,317 |
+| TRELLIS_FF |  6,515 |
+| CCU2C      |  2,166 |
+| DP16KD     |      2 |
 | MULT18X18D |      5 |
 
-At ~40.5k LUT4 this no longer fits an LFE5U-25F; it needs an LFE5U-45F (43,848
-LUT4, so tight at ~92%) or an 85F. The older "19,205 LUT4 / fits a 25F" figure
+`DP16KD` was 10 until the two descriptor-shadow modules were deleted; the MMU no
+longer keeps a RAM-backed copy of memory, so only the cache arrays remain.
+
+At ~39.3k LUT4 this no longer fits an LFE5U-25F; it needs an LFE5U-45F (43,848
+LUT4, so tight at ~90%) or an 85F. The older "19,205 LUT4 / fits a 25F" figure
 that used to appear here predates the MMU, cache and coprocessor subsystems and
 is not comparable -- those were added after it was measured, and they dominate
 the growth.
@@ -30,7 +37,9 @@ the growth.
 Xilinx, for cross-checking portability (Vivado 2025.2.1, xc7a200tfbg484-2,
 `synth_design -flatten_hierarchy none`): 18,899 LUTs (14.0%) and 6,170
 registers (2.3%), with zero latches, zero combinational loops and zero
-multiply-driven nets. LUT counts are not comparable across vendors -- ECP5 LUT4
+multiply-driven nets. Note `synth/vivado/run_vivado.tcl` now defaults to the
+KV260 part, so reproducing these Artix figures needs
+`-tclargs xc7a200tfbg484-2`. LUT counts are not comparable across vendors -- ECP5 LUT4
 versus Xilinx LUT6.
 
 The original VHDL-vs-SV comparison (26,902 -> 19,205 LUT4) applied to the
@@ -285,10 +294,11 @@ Checks:
 - **data-register file and hazard tracking** — bound to the real
   `WF68K30L_DATA_REGISTERS`, writes enabled, proven by temporal induction.
 - **MMU runtime request gating** and **MMU walk-delay state transitions** —
-  these two harnesses re-implement the gating equations rather than
-  instantiating the RTL, so they check the intended contract and would not
-  catch an implementation divergence. Binding them to the real modules is
-  pending; the files say so at the top.
+  both bound to the real RTL (`WF68K30L_TOP_ROUTING_BUS_CACHE`,
+  `WF68K30L_TOP_ROUTING_MMU_TRANSLATE` and `WF68K30L_TOP_MMU_PTEST`, wired to
+  each other exactly as the top level wires them) and needing no `assume`.
+  Mutation-tested: 8/8 caught on the gating harness, 6/9 on the walk harness
+  with the remaining three shown behaviourally equivalent rather than missed.
 
 `formal-smoke` depends on `formal-selftest`, which asserts false and requires
 FAILED. That guard exists because the flow was previously producing vacuous
@@ -296,12 +306,12 @@ passes for everything: as of Yosys 0.62 an immediate `assert` becomes a
 `$check` cell and `write_smt2` emits nothing for it, so the SMT2 files
 contained zero assertions. `clk2fflogic; chformal -lower` fixes it.
 
-    make formal-deep
-
-Opt-in exhaustive register-file property (symbolic register index plus a 32-bit
-shadow). Kept separate because the UNSAT direction did not complete at depth 10
-under yices, boolector or bitwuzla, while counterexamples are still found in
-seconds.
+The exhaustive register-file property (symbolic register index plus a 32-bit
+shadow) runs as part of `formal-smoke` by default -- set `FORMAL_REGFILE=0` to
+skip it. It was once kept out as a separate `formal-deep` target because the
+UNSAT direction would not complete; adding `memory_map` to the lowering pass is
+what made it tractable, and bitwuzla now closes it in about 2 s at depth 10 and
+26 s at depth 24.
 
 ## MMU Random Campaign
 

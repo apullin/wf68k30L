@@ -93,9 +93,6 @@ module WF68K30L_TOP_CACHE_STATE (
 `include "wf68k30L_top_sections/helpers/wf68k30L_top_helpers_mmu_pure.svh"
 `include "wf68k30L_top_sections/helpers/wf68k30L_top_helpers_cache.svh"
 
-localparam logic [31:0] CACR_RW_MASK = 32'h0000_3313;
-localparam int ICACHE_LINES = 16;
-localparam int DCACHE_LINES = 16;
 
 logic [23:0] ICACHE_TAG [0:15];
 logic [7:0]  ICACHE_VALID [0:15];

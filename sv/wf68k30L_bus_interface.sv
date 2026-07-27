@@ -123,7 +123,6 @@ logic [1:0]         DSACK_In;
 logic [1:0]         DSACK_MEM;
 logic               OCS_INH;
 logic               HALT_In;
-logic               HALTED;
 ARB_STATES          NEXT_ARB_STATE;
 BUS_CTRL_STATES     NEXT_BUS_CTRL_STATE;
 logic [15:0]        OBUFFER;

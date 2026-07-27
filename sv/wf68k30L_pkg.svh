@@ -204,6 +204,25 @@ parameter logic [7:0] VEC_SPURIOUS    = 8'h18; // Spurious interrupt
 parameter logic [7:0] VEC_TRAP_BASE   = 8'h20; // TRAP #0..#15 base (vector = base + trap#)
 parameter logic [7:0] VEC_MMU_CFG     = 8'h38; // MMU configuration error
 
+// ---- MMU status register bits (UM 9.7.1) and cache geometry (UM 6.1.2) ----
+// These were declared in three places -- wf68k30L_top_mmu_state.sv,
+// wf68k30L_top_mmu_ptest.sv and wf68k30L_top_cache_mmu_state.svh -- as three
+// divergent subsets of the same encoding, the third of which was entirely dead.
+// The values agreed, so nothing had drifted yet; one definition keeps it that
+// way. Every module includes this file.
+localparam logic [15:0] MMUSR_B = 16'h8000; // Bus error.
+localparam logic [15:0] MMUSR_L = 16'h4000; // Limit violation.
+localparam logic [15:0] MMUSR_S = 16'h2000; // Supervisor-only violation.
+localparam logic [15:0] MMUSR_W = 16'h0800; // Write protected.
+localparam logic [15:0] MMUSR_I = 16'h0400; // Invalid.
+localparam logic [15:0] MMUSR_M = 16'h0200; // Modified.
+localparam logic [15:0] MMUSR_T = 16'h0040; // Transparent translation.
+localparam logic [15:0] MMUSR_N = 16'h0007; // Number-of-levels field.
+
+localparam logic [31:0] CACR_RW_MASK = 32'h0000_3313; // WA,DBE,FD,ED,IBE,FI,EI
+localparam int ICACHE_LINES = 16;
+localparam int DCACHE_LINES = 16;
+
 // ---- SSW SIZE field encoding (UM Figure 8-9, coded per UM Table 7-2) ----
 // The stacked SSW is read and written by external handlers, so its SIZE field
 // carries the SIZ1/SIZ0 bus codes, not this design's OP_SIZETYPE. The two are

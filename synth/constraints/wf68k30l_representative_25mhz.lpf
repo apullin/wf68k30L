@@ -1,6 +1,14 @@
 # Representative ECP5 LPF constraints for end-to-end bring-up.
 # Auto-generated pin LOCATE map for LFE5U-45F CABGA381 using non-special IO pins.
 # This is a representative routing envelope only; replace with board-specific constraints for hardware.
+#
+# Incomplete, deliberately: CBACKn, CBREQn, CIINn and CIOUTn -- the cache and
+# burst pins -- have no LOCATE here, because this map predates them and there is
+# no board to assign them on. run_ecp5_representative.sh passes
+# --lpf-allow-unconstrained, so nextpnr places those four arbitrarily and the
+# representative P&R figure is measured that way. Add real assignments before
+# using this for hardware. Note also that the script defaults to the 85F while
+# this map targets the 45F.
 
 FREQUENCY PORT "CLK" 25 MHz;
 

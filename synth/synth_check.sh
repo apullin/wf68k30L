@@ -4,8 +4,8 @@
 # Usage: ./synth_check.sh [--ecp5]
 #
 # Baseline values (from reference synthesis):
-#   LUT4:       40610
-#   TRELLIS_FF: 6864
+#   LUT4:       39317
+#   TRELLIS_FF: 6515
 
 set -euo pipefail
 
@@ -16,8 +16,8 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # plain `synth_ecp5` defaults on the whole sv/ tree (no ABC9 flags, no
 # -noflatten). They are much larger than the pre-2026 figures because the MMU
 # and cache subsystems did not exist then. Re-measure and update deliberately.
-BASELINE_LUT4=40610
-BASELINE_FF=6864
+BASELINE_LUT4=39317
+BASELINE_FF=6515
 TOLERANCE_PCT=10  # Allow +/- 10% deviation
 
 # Source files

@@ -38,7 +38,10 @@
 
 (* keep_hierarchy = "yes" *)
 module WF68K30L_EXCEPTION_HANDLER #(
-    parameter [15:0] VERSION = 16'h1409
+    // Must match WF68K30L_TOP and WF68K30L_CPU_WRAPPER: VERSION gates format-$B
+    // frame validation below, so a direct instantiation that relies on this
+    // default would reject its own frames. The top level overrides it anyway.
+    parameter [15:0] VERSION = 16'h1904
 )(
     input  logic        CLK,
     input  logic        RESET,

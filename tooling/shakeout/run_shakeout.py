@@ -389,7 +389,10 @@ def main():
             "Set to empty string to skip."
         ),
     )
-    parser.add_argument("--csmith-max-cycles", type=int, default=800000)
+    # 12M, matching the Makefile and tb/test_csmith_smoke.py. A smaller budget
+    # presents as "did not reach sentinel", which looks like a hang rather than
+    # an exhausted cycle count.
+    parser.add_argument("--csmith-max-cycles", type=int, default=12000000)
 
     parser.add_argument("--coremark-opts", default="O0,O1,O2,Os")
     parser.add_argument(

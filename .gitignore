@@ -5,11 +5,8 @@
 
 # cocotb/verilator/ghdl outputs
 /tb/sim_build/
-/tb/sim_build_ghdl/
 /tb/results.xml
 /tb/*.o
-/tb/e~*
-/tb/wf68k30l_top_cfg
 
 # Python caches
 __pycache__/

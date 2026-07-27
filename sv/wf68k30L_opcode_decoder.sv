@@ -1,6 +1,6 @@
 // ------------------------------------------------------------------------
 // --                                                                    --
-// -- WF68K30L IP Core: this is the bus controller module.               --
+// -- WF68K30L IP Core: this is the opcode decoder module.               --
 // --                                                                    --
 // -- Description:                                                       --
 // -- This module is a 68030 compatible instruction word decoder.        --

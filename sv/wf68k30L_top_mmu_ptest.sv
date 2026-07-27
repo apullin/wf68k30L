@@ -49,13 +49,6 @@ module WF68K30L_TOP_MMU_PTEST (
 `include "wf68k30L_pkg.svh"
 `include "wf68k30L_top_sections/helpers/wf68k30L_top_helpers_mmu_pure.svh"
 
-localparam logic [15:0] MMUSR_B = 16'h8000;
-localparam logic [15:0] MMUSR_L = 16'h4000;
-localparam logic [15:0] MMUSR_S = 16'h2000;
-localparam logic [15:0] MMUSR_W = 16'h0800;
-localparam logic [15:0] MMUSR_I = 16'h0400;
-localparam logic [15:0] MMUSR_M = 16'h0200;
-localparam logic [15:0] MMUSR_N = 16'h0007;
 
 localparam logic [3:0] PTEST_ST_IDLE             = 4'd0;
 localparam logic [3:0] PTEST_ST_STEP             = 4'd1;
