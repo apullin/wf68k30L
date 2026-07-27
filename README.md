@@ -59,8 +59,30 @@ Baseline seed sweep command:
 
     ./synth/fpga/run_ecp5_seed_sweep.sh
 
-Current measured place-and-route (`./synth/fpga/run_ecp5_representative.sh`,
-LFE5U-85F CABGA381 speed 8, 25 MHz target, ABC9):
+### Xilinx KV260 (Kria K26, Zynq UltraScale+) — timing closes
+
+Default target of `synth/vivado/run_vivado.tcl`. Full place-and-route,
+`xck26-sfvc784-2LV-c`, 25 MHz constraint:
+
+| Metric | Value |
+|--------|-------|
+| Fmax | **32.57 MHz (passes the 25 MHz target)** |
+| Worst negative slack | +9.300 ns |
+| Failing endpoints | 0 of 15,061 setup, 0 hold |
+| CLB LUTs | 17,322 / 117,120 (14.8%) |
+| CLB Registers | 5,924 / 234,240 (2.5%) |
+| Block RAM | 3 / 144 tiles (2.1%) |
+| Errors / inferred latches / DRC violations | 0 / 0 / 0 |
+
+Caveat: this is an out-of-context build with no pinout, so clock skew is not
+fully modelled (Vivado warns `HD.CLK_SRC` is unset). Treat the figure as
+indicative rather than board-final — a real KV260 design clocks the PL from the
+PS through the Zynq block rather than from a bare port.
+
+### Lattice ECP5 — timing does NOT close
+
+`./synth/fpga/run_ecp5_representative.sh`, LFE5U-85F CABGA381 speed 8, 25 MHz
+target, ABC9:
 
 | Metric | Value |
 |--------|-------|
@@ -68,24 +90,19 @@ LFE5U-85F CABGA381 speed 8, 25 MHz target, ABC9):
 | TRELLIS_FF | 6,922 / 83,640 (8%) |
 | DP16KD | 10 / 208 (4%) |
 | MULT18X18D | 5 / 156 (3%) |
-| Fmax | **11.21 MHz — FAILS the 25 MHz target** |
+| Fmax | **11.21 MHz — fails the 25 MHz target** |
 
-**Timing does not close, and this is a known open item.** The figures that used
-to appear here (21,941 LUT4, 26.69 MHz passing, and a 16.1-16.9 MHz seed sweep)
-predate the MMU, caches and coprocessor surface; the design has roughly doubled
-in logic since, and nothing has been pipelined to pay for it.
+The critical path runs from the decoded-opcode register (`I_OPCODE_DECODER.OP`)
+through the control module's combinational next-state logic to the `CIOUT`
+decision latch: **127 logic stages, about 89 ns**. The cache-inhibit decision
+therefore sits at the end of a deep cone containing the transparent-translation
+match, the ATC lookup and the function-code decode. That cone is what an ECP5
+build would need to pipeline; it is deliberately left alone because the KV260
+target clears its constraint by a third of a period, and pipelining it would be
+invasive for no benefit there.
 
-The critical path is specific and worth knowing before anyone attacks it: it
-runs from the decoded-opcode register (`I_OPCODE_DECODER.OP`) through the
-control module's combinational next-state logic and ends at the `CIOUT` decision
-latch, across **127 logic stages** for about 89 ns. So the cache-inhibit
-decision depends combinationally on a very deep cone rooted at the opcode — the
-transparent-translation match, the ATC lookup and the function-code decode all
-sit in it. That is the cone to break up, not the arithmetic.
-
-This is a performance problem, not a correctness one: every functional gate is
-green at this commit. But the core should not be described as synthesizable *at
-25 MHz* until it closes.
+The figures that used to appear here (21,941 LUT4, 26.69 MHz passing) predate the
+MMU, cache and coprocessor subsystems and are not comparable.
 
 ## Equivalence Checking (SV revision vs SV revision)
 
