@@ -34,7 +34,7 @@ from cocotb.triggers import RisingEdge, ClockCycles
 from cpu_harness import CPUTestHarness
 from bus_model import AlternateBusMaster
 from m68k_encode import (
-    move, movea, moveq, imm_long, abs_long, tas, nop, divu_l, movec_to_cr,
+    move, movea, moveq, imm_long, tas, nop, divu_l, movec_to_cr,
     LONG, DN, AN_IND, SPECIAL, IMMEDIATE,
 )
 
@@ -42,7 +42,6 @@ CR_CACR = 0x002
 # CACR: EI(0) + IBE(4) + ED(8) + DBE(12) -- both caches with burst filling.
 CACR_CACHES_AND_BURST = 0x0000_1111
 
-FC_SUPER_DATA = 5
 FC_SUPER_PROG = 6
 
 
