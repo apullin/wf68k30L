@@ -220,6 +220,9 @@ module mmu_runtime_gate_formal;
         .DATA_RD_MAIN(DATA_RD_MAIN),
         .DATA_WR_EXH(DATA_WR_EXH),
         .DATA_WR_MAIN(DATA_WR_MAIN),
+        // No RTE data read replay in this harness: the hold exists only to keep
+        // a resumed instruction's operand read off the bus (UM 8.2.2).
+        .RTE_DIB_HOLD(1'b0),
         .OPCODE_RD(OPCODE_RD),
         .RMC(RMC),
         .MMU_RUNTIME_REQ(MMU_RUNTIME_REQ),

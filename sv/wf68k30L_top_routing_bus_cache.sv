@@ -9,6 +9,10 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE (
     input  logic        DATA_RD_MAIN,
     input  logic        DATA_WR_EXH,
     input  logic        DATA_WR_MAIN,
+    // The RTE data read replay answers the resumed instruction's operand read
+    // from the frame's data input buffer image, so that read must not reach the
+    // bus, the MMU or the caches (UM 8.2.2).
+    input  logic        RTE_DIB_HOLD,
     input  logic        OPCODE_RD,
     input  logic        RMC,
 
@@ -261,7 +265,7 @@ WF68K30L_TOP_MMU_PTEST I_TOP_MMU_PTEST (
 // Bus request arbitration
 // ========================================================================
 
-assign DATA_RD = DATA_RD_EXH || DATA_RD_MAIN;
+assign DATA_RD = (DATA_RD_EXH || DATA_RD_MAIN) && !RTE_DIB_HOLD;
 assign DATA_WR = DATA_WR_EXH || DATA_WR_MAIN;
 
 // ---- Background line completion: retired ----

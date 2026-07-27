@@ -98,8 +98,11 @@
         .MSP_WR                 (MSP_WR),
         .USP_RD                 (USP_RD),
         .USP_WR                 (USP_WR),
-        .AR_DEC                 (AR_DEC),
-        .AR_INC                 (AR_INC),
+        // The RTE data read replay suppresses one address-register update, the
+        // one the faulted access already applied (UM 8.2.2); see
+        // rte_dib_injection in the datapath helper.
+        .AR_DEC                 (AR_DEC_EFF),
+        .AR_INC                 (AR_INC_EFF),
         .AR_WR_1                (AR_WR_1),
         .AR_WR_2                (AR_WR_2),
         .UNMARK                 (UNMARK),
@@ -252,12 +255,19 @@
     // Data source mux: bus interface or data-cache hit path.
     // An untranslatable access terminates with error (RDY without VALID) so the
     // access aborts and the core takes a bus error exception (UM 8.1.2).
-    assign DATA_RDY = DATA_RDY_BUSIF_CORE || DATA_RDY_CACHE || MMU_FAULT_DATA_ACK;
-    assign DATA_VALID = DATA_RDY_CACHE ? DATA_VALID_CACHE :
+    // RTE_DIB_ACK is the third synthesized response: the operand of a replayed
+    // data read (UM 8.2.2), answered from the frame's data input buffer image
+    // instead of from a bus cycle. See rte_dib_injection in the datapath helper.
+    assign DATA_RDY = DATA_RDY_BUSIF_CORE || DATA_RDY_CACHE || MMU_FAULT_DATA_ACK ||
+                      RTE_DIB_ACK;
+    assign DATA_VALID = RTE_DIB_ACK ? 1'b1 :
+                        DATA_RDY_CACHE ? DATA_VALID_CACHE :
                         MMU_FAULT_DATA_ACK ? 1'b0 : DATA_VALID_BUSIF;
-    assign DATA_TO_CORE = DATA_RDY_CACHE ? DATA_TO_CORE_CACHE :
+    assign DATA_TO_CORE = RTE_DIB_ACK ? RTE_DIB_VALUE :
+                          DATA_RDY_CACHE ? DATA_TO_CORE_CACHE :
                           MMU_FAULT_DATA_ACK ? 32'h00000000 :
                           DATA_RDY_BUSIF_CORE ? DATA_TO_CORE_BUSIF :
+                          RTE_DIB_LAST ? RTE_DIB_VALUE :
                           DATA_LAST_FROM_CACHE ? DATA_TO_CORE_CACHE : DATA_TO_CORE_BUSIF;
 
     // Opcode source mux: bus interface or instruction-cache hit path.
@@ -489,6 +499,9 @@
         .RTE_RERUN_WR           (RTE_RERUN_WR),
         .RTE_RERUN_DATA         (RTE_RERUN_DATA),
         .RTE_RERUN_FC           (RTE_RERUN_FC),
+        .RTE_RERUN_RD           (RTE_RERUN_RD),
+        .RTE_RERUN_RD_DATA      (RTE_RERUN_RD_DATA),
+        .RTE_RERUN_RD_AN        (RTE_RERUN_RD_AN),
         .REFILLn                (REFILLn_EXH),
         .RESTORE_ISP_PC         (RESTORE_ISP_PC),
 

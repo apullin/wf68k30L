@@ -17,7 +17,10 @@
 //   address, FC, SIZ and R/W held for the whole burst, one long word    //
 //   per STERM, up to four.                                              //
 // - RTE bus-fault return: format A/B frame validation, long-format      //
-//   version checks, and replay of a faulted data write cycle.           //
+//   version checks, replay of a faulted data write cycle, and replay    //
+//   of a faulted data read -- the frame's data input buffer image at    //
+//   $2C becomes the suspended instruction's operand (UM 8.2.2), or the  //
+//   read is rerun when the handler left DF set (UM 8.2.1/8.2.3).        //
 //                                                                      //
 // What is NOT implemented:                                             //
 // - External coprocessor execution and CIR bus-cycle sequencing. An     //
@@ -25,17 +28,11 @@
 //   and protocol-violation vectors, but these operations are absent:    //
 //   cpBcc, cpDBcc, cpGEN, cpRESTORE, cpSAVE, cpScc, cpTRAPcc.          //
 // - Cycle accuracy. This is deliberate, not an omission: the pipeline   //
-//   differs from the silicon and the shifter is iterative.              //
-// - Replay of a faulted data *read* cycle; those still re-execute the   //
-//   whole instruction.                                                  //
-// The shifter in the 68K30 is a barrel shifter and in this core        //
-// it is a conventional shift register controlled logic.                //
-// This core features the loop operation mode of the 68010 to           //
-// deal with DBcc loops. This feature is a predecessor to the           //
-// MC68020/30/40 caches.                                                //
-// RTE bus-fault return support includes format-A/B frame validation,   //
-// version checks for long format, and model-scope SSW/pipeline restore //
-// behavior for restart-vs-resume handling.                             //
+//   differs from the silicon and the shifter is iterative. The shifter  //
+//   is a shift register where the 68030's is a barrel shifter.          //
+//                                                                      //
+// This core also features the 68010 loop operation mode for DBcc loops, //
+// a predecessor to the MC68020/30/40 caches.                           //
 //                                                                      //
 // Enjoy.                                                               //
 //                                                                      //

@@ -919,3 +919,337 @@ async def test_rte_replay_uses_the_ssw_function_code(dut):
         "execution did not continue after the RTE replay"
     )
     h.cleanup()
+
+# ----------------------------------------------------------------------------
+# RTE replay of a faulted data READ (UM 8.2.2)
+# ----------------------------------------------------------------------------
+
+
+class BerrTracedBusModel(BerrOnceBusModel):
+    """BerrOnceBusModel plus an uncapped (address, R/W, FC) trace.
+
+    BerrOnceBusModel.log stops after 60 entries, which the 24-long-word format $B
+    push and the handler already exhaust, so it cannot answer "did the resumed
+    instruction read the fault address again". This can.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.trace = []
+
+    def _should_fault(self, addr, fc):
+        try:
+            rw = int(self.dut.RWn.value)
+        except ValueError:
+            rw = -1
+        self.trace.append((addr, rw, fc))
+        return super()._should_fault(addr, fc)
+
+    def reads_of(self, addr, after_fault=True):
+        """Data-space reads of addr's long word, counted after the fault."""
+        seen = 0
+        found = 0
+        for a, rw, fc in self.trace:
+            if not seen and (a & ~3) == (self.fault_addr & ~3) and rw == 1:
+                seen = 1          # the faulted cycle itself
+                continue
+            if after_fault and not seen:
+                continue
+            if (a & ~3) == (addr & ~3) and rw == 1 and fc == 5:
+                found += 1
+        return found
+
+
+# The DIB image the handler writes to frame offset $2C. UM 8.2.2: "Byte, word,
+# and 3-byte operands are right-justified in the 4-byte data buffers", so a byte
+# read must take 0x11, a word read 0xEE11 and a long read the whole word.
+DIB_VALUE = 0xC0FFEE11
+
+# Poison the memory the faulted read addressed, so a value that reaches the
+# register can only have come from the DIB image and not from a re-read.
+READ_POISON_LO = 0x77778888
+READ_POISON_HI = 0x99990000
+
+
+def _dib_repair_handler(value, clear_df=True):
+    """vec 2 handler: counter++, write the DIB image at SP+$2C, clear SSW DF, RTE.
+
+    Touches only D0/D1, so D3 -- the faulted read's destination -- survives.
+    """
+    return [
+        0x2039, 0x0002, 0x0000,          # MOVE.L ($20000).L,D0
+        0x5280,                          # ADDQ.L #1,D0
+        0x23C0, 0x0002, 0x0000,          # MOVE.L D0,($20000).L
+        0x2F7C, (value >> 16) & 0xFFFF,  # MOVE.L #value,$2C(A7)
+        value & 0xFFFF, 0x002C,          #   -- the DIB image (UM 8.2.2)
+        0x322F, 0x000A,                  # MOVE.W $0A(A7),D1     (the SSW)
+        0x0241, 0xFEFF if clear_df else 0xFFFF,
+        #                                  ANDI.W #$FEFF,D1      (clear DF)
+        0x3F41, 0x000A,                  # MOVE.W D1,$0A(A7)
+        0x23C1, 0x0002, 0x0010,          # MOVE.L D1,($20010).L  (record the SSW)
+        0x4E73,                          # RTE
+    ]
+
+
+# MOVE.<sz> (A0)+,D3 -- the operand read faults, and (A0)+ is what distinguishes
+# replaying the access from re-executing the instruction.
+_DIB_SIZES = [
+    # name,  opword, UM SIZE code, An step, expected D3 over the 0x11223344 seed
+    ("byte", 0x1618, 0b01, 1, 0x11223311),
+    ("word", 0x3618, 0b10, 2, 0x1122EE11),
+    ("long", 0x2618, 0b00, 4, 0xC0FFEE11),
+]
+
+
+def _read_fault_program(load_op):
+    return [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x263C, 0x1122, 0x3344,                   # 0x106 MOVE.L #$11223344,D3
+        load_op,                                  # 0x10C load (A0)+ -> D3 <- BERR
+        0x23C3, 0x0002, 0x0018,                   # 0x10E MOVE.L D3,($20018).L
+        0x23C8, 0x0002, 0x001C,                   # 0x114 MOVE.L A0,($2001C).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x11A MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x120 MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x126 STOP #$2700
+    ]
+
+
+@cocotb.test()
+async def test_berr_read_replay_takes_the_stacked_dib(dut):
+    """UM 8.2.2: a repaired DIB image at SP+$2C becomes the instruction's operand.
+
+    "Data read faults only generate the long bus fault frame and the handler must
+    transfer properly sized data from the location indicated by the fault address
+    and address space to the image of the data input buffer (DIB) at location
+    SP + $2C of the long format stack frame. ... In addition, the software handler
+    must clear the DF bit of the SSW to indicate that the faulted bus cycle has
+    been corrected."
+
+    and UM 8.2.1 says what RTE then does with it: "If the DF bit is set when the
+    processor reads the stack frame, it reruns the faulted data access; otherwise,
+    it assumes that the data input buffer value on the stack is valid for a read".
+
+    Re-executing the instruction satisfies neither half. It issues the read again,
+    which the handler may have repaired precisely because it cannot be repeated,
+    and it applies the postincrement a second time: MOVE.L (A0)+,D3 faulting at
+    $E0000 used to come back with the long word from $E0004 and A0 at $E0008.
+
+    All three sizes are checked with one DIB constant, which is what proves the
+    right-justification rule -- "Byte, word, and 3-byte operands are
+    right-justified in the 4-byte data buffers": 0xC0FFEE11 has to be read as 0x11
+    for a byte, 0xEE11 for a word and 0xC0FFEE11 for a long word. Taking it from
+    the wrong end of the buffer would give 0xC0 and 0xC0FF instead.
+
+    The memory the faulted read addressed is poisoned, and the trace is checked
+    for any read of it after the fault, so the operand can only have come from the
+    DIB image.
+    """
+    for name, load_op, um_size, an_step, expect_d3 in _DIB_SIZES:
+        h = CPUTestHarness(dut)
+        bus = BerrTracedBusModel(dut, h.mem, times=1)
+
+        h.mem.load_long(FAULT_ADDR, READ_POISON_LO)
+        h.mem.load_long(FAULT_ADDR + 4, READ_POISON_HI)
+        h.mem.load_long(SSW_ADDR, 0)
+
+        found = await _boot(dut, h, bus, _read_fault_program(load_op),
+                            _dib_repair_handler(DIB_VALUE))
+
+        frame_base = h.SSP_INIT - 0x5C
+        fmt = h.mem.read(frame_base + 0x06, 2)
+        dib = h.mem.read(frame_base + 0x2C, 4)
+        counter = h.mem.read(COUNTER_ADDR, 4)
+        d3 = h.mem.read(STORE_WITNESS, 4)
+        a0 = h.mem.read(AN_WITNESS, 4)
+        # The SSW the handler wrote back, i.e. after it cleared DF.
+        ssw = h.mem.read(SSW_ADDR + 2, 2)
+
+        assert bus.fault_count == 1, (
+            f"{name}: BERRn asserted {bus.fault_count} times"
+        )
+        assert counter == 1, (
+            f"{name}: bus-error handler ran {counter} times (expected 1)"
+        )
+        # UM 8.2.2: read faults only generate the long frame, which is the only
+        # one that has a $2C field at all.
+        assert (fmt >> 12) == 0xB, (
+            f"{name}: frame format = 0x{fmt >> 12:X}, expected 0xB. A faulted "
+            f"data read must build the long frame, which is the only format with "
+            f"a data input buffer image at $2C"
+        )
+        assert dib == DIB_VALUE, (
+            f"{name}: the handler's DIB image at $2C reads back as 0x{dib:08X}; "
+            f"the test's own repair did not land, so nothing below means anything"
+        )
+        assert ssw & 0x0008, (
+            f"{name}: SSW = 0x{ssw:04X} has the replay-eligible bit 3 clear, so "
+            f"this frame was not offered to the read replay at all"
+        )
+        assert ssw & 0x0200, (
+            f"{name}: SSW = 0x{ssw:04X} has bit 9 clear, but the faulted (A0)+ "
+            f"read had already applied its postincrement; without it the replay "
+            f"cannot know to skip the repeat"
+        )
+        assert ssw & 0x0040, f"{name}: SSW = 0x{ssw:04X}: RW clear on a read"
+        assert not (ssw & 0x0100), (
+            f"{name}: SSW = 0x{ssw:04X}: the handler failed to clear DF, so this "
+            f"is the rerun case and not the DIB case"
+        )
+        assert ((ssw >> 4) & 0b11) == um_size, (
+            f"{name}: SSW = 0x{ssw:04X} has SIZE = {(ssw >> 4) & 0b11:02b}, "
+            f"expected UM Table 7-2 code {um_size:02b}"
+        )
+        assert found, f"{name}: program did not complete after the RTE replay"
+        assert d3 == expect_d3, (
+            f"{name}: D3 = 0x{d3:08X} after the return, expected 0x{expect_d3:08X}. "
+            f"0x{READ_POISON_LO:08X} or 0x{READ_POISON_HI:08X} in it means the "
+            f"operand was re-read from memory instead of taken from the stacked "
+            f"DIB image; a byte or word landing anywhere but the low end means the "
+            f"buffer was not read right-justified"
+        )
+        assert a0 == FAULT_ADDR + an_step, (
+            f"{name}: A0 = 0x{a0:08X} after the return, expected "
+            f"0x{FAULT_ADDR + an_step:08X}. UM 8.1 has the processor continue the "
+            f"suspended instruction rather than restart it, so the postincrement "
+            f"the faulted access already applied must stand and must not be "
+            f"applied a second time"
+        )
+        assert bus.reads_of(FAULT_ADDR) == 0, (
+            f"{name}: the fault address was read again after the fault "
+            f"({bus.reads_of(FAULT_ADDR)} times). With DF cleared and the DIB "
+            f"repaired, UM 8.2.1 has RTE take the buffer value as valid; a re-read "
+            f"defeats the whole point of the handler repairing an unrepeatable "
+            f"access"
+        )
+
+
+@cocotb.test()
+async def test_berr_read_replay_reruns_the_cycle_when_df_is_left_set(dut):
+    """UM 8.2.1/8.2.3: with DF still set the RTE reruns the faulted read itself.
+
+    "If the DF bit is set when the processor reads the stack frame, it reruns the
+    faulted data access" -- and UM 8.2.3: "If the DF bit is still set at the time
+    of the RTE execution, the faulted data cycle is rerun by the RTE instruction."
+
+    The rerun has to be of the *cycle*, at the fault address the frame carries at
+    $10, not of the instruction: A0 has already been incremented, so re-executing
+    MOVE.L (A0)+,D3 reads $E0004 and increments A0 again. The handler here writes a
+    poison DIB image and deliberately leaves DF set, so the value that reaches D3
+    must be the one at $E0000 and not the poison.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrTracedBusModel(dut, h.mem, times=1)
+
+    h.mem.load_long(FAULT_ADDR, 0x11112222)
+    h.mem.load_long(FAULT_ADDR + 4, READ_POISON_HI)
+
+    found = await _boot(dut, h, bus, _read_fault_program(0x2618),
+                        _dib_repair_handler(DIB_VALUE, clear_df=False))
+
+    frame_base = h.SSP_INIT - 0x5C
+    fault_adr = h.mem.read(frame_base + 0x10, 4)
+    counter = h.mem.read(COUNTER_ADDR, 4)
+    d3 = h.mem.read(STORE_WITNESS, 4)
+    a0 = h.mem.read(AN_WITNESS, 4)
+    ssw = h.mem.read(SSW_ADDR + 2, 2)
+
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert counter == 1, f"Bus-error handler ran {counter} times (expected 1)"
+    assert ssw & 0x0100, (
+        f"SSW = 0x{ssw:04X}: DF clear, so this is the DIB case, not the rerun case"
+    )
+    assert fault_adr == FAULT_ADDR, (
+        f"Frame fault address = 0x{fault_adr:08X}, expected 0x{FAULT_ADDR:08X}: "
+        f"the address the faulted read cycle drove, which is what the rerun uses"
+    )
+    assert found, "Program did not complete after the RTE rerun"
+    assert d3 == 0x11112222, (
+        f"D3 = 0x{d3:08X}, expected 0x11112222 (the long word at the fault "
+        f"address). 0x{READ_POISON_HI:08X} means the instruction was re-executed "
+        f"with A0 already incremented; 0x{DIB_VALUE:08X} means the stacked DIB was "
+        f"used even though the handler left DF set"
+    )
+    assert a0 == FAULT_ADDR + 4, (
+        f"A0 = 0x{a0:08X}, expected 0x{FAULT_ADDR + 4:08X}: the postincrement "
+        f"belongs to the instruction, which is not restarted, so it must have "
+        f"happened exactly once"
+    )
+    assert bus.reads_of(FAULT_ADDR) == 1, (
+        f"The fault address was read {bus.reads_of(FAULT_ADDR)} times after the "
+        f"fault, expected exactly 1 (the rerun cycle)"
+    )
+    assert bus.reads_of(FAULT_ADDR + 4) == 0, (
+        "The long word past the fault address was read, so the instruction was "
+        "re-executed from the already-incremented A0 instead of the cycle being "
+        "rerun"
+    )
+
+
+@cocotb.test()
+async def test_berr_read_replay_skips_a_multi_transfer_instruction(dut):
+    """A multi-transfer read keeps the whole-instruction rerun, DIB and all.
+
+    UM 8.2.2's contract is written for one faulted access. MOVEM moves a register
+    list through one address, so handing it a single buffer value would satisfy
+    only the transfer that faulted and silently drop the rest; the same reasoning
+    excludes MOVEP, the bitfield reads and the read-modify-write instructions.
+    Those keep re-executing the whole instruction, which is correct for them.
+
+    Asserted here: SSW bit 3 -- the replay-eligible flag -- is clear for a faulted
+    MOVEM read, and the poison DIB image the handler writes never reaches a
+    register.
+
+    NOT asserted, because it is a pre-existing defect this change neither causes
+    nor fixes: the re-executed MOVEM drops its *first* transfer. Measured on the
+    baseline RTL with this same program, D3 comes back as 0 and only D4 is loaded,
+    so MOVEM's register-list position is not reset when the instruction restarts.
+    That is a MOVEM rerun bug, orthogonal to which frames the read replay accepts.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrTracedBusModel(dut, h.mem, times=1)
+
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x4CD0, 0x0018,                           # 0x106 MOVEM.L (A0),D3-D4 <- BERR
+        0x23C3, 0x0002, 0x0018,                   # 0x10A MOVE.L D3,($20018).L
+        0x23C4, 0x0002, 0x001C,                   # 0x110 MOVE.L D4,($2001C).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x116 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x11C MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x122 STOP #$2700
+    ]
+    h.mem.load_long(FAULT_ADDR, 0x11112222)
+    h.mem.load_long(FAULT_ADDR + 4, 0x33334444)
+
+    # DF is left set: with bit 3 clear this is the ordinary whole-instruction
+    # rerun, which is the behaviour being asserted.
+    found = await _boot(dut, h, bus, program,
+                        _dib_repair_handler(DIB_VALUE, clear_df=False))
+
+    counter = h.mem.read(COUNTER_ADDR, 4)
+    d3 = h.mem.read(STORE_WITNESS, 4)
+    d4 = h.mem.read(AN_WITNESS, 4)
+    ssw = h.mem.read(SSW_ADDR + 2, 2)
+
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert counter == 1, f"Bus-error handler ran {counter} times (expected 1)"
+    assert ssw & 0x0100, f"SSW = 0x{ssw:04X}: DF clear, expected it left set"
+    assert ssw & 0x0040, f"SSW = 0x{ssw:04X}: RW clear on a read"
+    assert not (ssw & 0x0008), (
+        f"SSW = 0x{ssw:04X} has the replay-eligible bit 3 set for a faulted MOVEM "
+        f"read. MOVEM transfers a register list through one address, so a single "
+        f"data input buffer value cannot stand in for the faulted transfer"
+    )
+    assert found, "Program did not complete after the whole-instruction rerun"
+    assert DIB_VALUE not in (d3, d4), (
+        f"MOVEM loaded D3=0x{d3:08X} D4=0x{d4:08X}; 0x{DIB_VALUE:08X} is the "
+        f"poison the handler wrote into the frame's data input buffer image, so an "
+        f"ineligible instruction was handed it anyway"
+    )
+    assert d4 == 0x33334444, (
+        f"MOVEM loaded D4=0x{d4:08X}, expected 0x33334444 from memory: the "
+        f"whole-instruction rerun did not run"
+    )
+    assert bus.reads_of(FAULT_ADDR) >= 1, (
+        "The re-executed MOVEM never re-read the fault address, so it was not "
+        "rerun as a whole instruction at all"
+    )
