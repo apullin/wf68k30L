@@ -45,6 +45,8 @@ module mmu_runtime_gate_formal;
     logic [31:0] DATA_OUT;
     logic [31:0] DATA_TO_CORE_BUSIF;
     logic        DATA_RDY_BUSIF_CORE;
+    logic        DATA_RDY_BUSIF;
+    logic        DATA_VALID_BUSIF;
     logic        ICACHE_HIT_NOW;
     logic        DCACHE_HIT_NOW;
     logic [2:0]  MMU_PTEST_FC;
@@ -94,6 +96,8 @@ module mmu_runtime_gate_formal;
         DATA_OUT = $anyseq;
         DATA_TO_CORE_BUSIF = $anyseq;
         DATA_RDY_BUSIF_CORE = $anyseq;
+        DATA_RDY_BUSIF = $anyseq;
+        DATA_VALID_BUSIF = $anyseq;
         ICACHE_HIT_NOW = $anyseq;
         DCACHE_HIT_NOW = $anyseq;
         MMU_PTEST_FC = $anyseq;
@@ -173,6 +177,14 @@ module mmu_runtime_gate_formal;
     logic        MMU_FAULT_OPCODE_ACK;
     logic        BUS_CYCLE_BURST;
     logic        BUS_CYCLE_BURST_IS_OP;
+    // MMU table-search bus master (UM 9.5.2).
+    logic        MMU_TWALK_BUS_RD;
+    logic        MMU_TWALK_BUS_WR;
+    logic        MMU_TWALK_BUS_ACTIVE;
+    logic [31:0] MMU_TWALK_BUS_ADDR;
+    logic [31:0] MMU_TWALK_BUS_DATA;
+    logic        MMU_TWALK_RMC;
+    logic        BUS_CYCLE_MMU_WALK;
     logic        MMU_PLOAD_DONE;
     logic [35:0] MMU_PLOAD_RESULT;
     logic        MMU_TWALK_BUSY;
@@ -235,6 +247,8 @@ module mmu_runtime_gate_formal;
         .DATA_OUT(DATA_OUT),
         .DATA_TO_CORE_BUSIF(DATA_TO_CORE_BUSIF),
         .DATA_RDY_BUSIF_CORE(DATA_RDY_BUSIF_CORE),
+        .DATA_RDY_BUSIF(DATA_RDY_BUSIF),
+        .DATA_VALID_BUSIF(DATA_VALID_BUSIF),
         .ICACHE_HIT_NOW(ICACHE_HIT_NOW),
         .DCACHE_HIT_NOW(DCACHE_HIT_NOW),
         .MMU_PTEST_FC(MMU_PTEST_FC),
@@ -282,6 +296,13 @@ module mmu_runtime_gate_formal;
         .MMU_FAULT_OPCODE_ACK(MMU_FAULT_OPCODE_ACK),
         .BUS_CYCLE_BURST(BUS_CYCLE_BURST),
         .BUS_CYCLE_BURST_IS_OP(BUS_CYCLE_BURST_IS_OP),
+        .MMU_TWALK_BUS_RD(MMU_TWALK_BUS_RD),
+        .MMU_TWALK_BUS_WR(MMU_TWALK_BUS_WR),
+        .MMU_TWALK_BUS_ACTIVE(MMU_TWALK_BUS_ACTIVE),
+        .MMU_TWALK_BUS_ADDR(MMU_TWALK_BUS_ADDR),
+        .MMU_TWALK_BUS_DATA(MMU_TWALK_BUS_DATA),
+        .MMU_TWALK_RMC(MMU_TWALK_RMC),
+        .BUS_CYCLE_MMU_WALK(BUS_CYCLE_MMU_WALK),
         .MMU_TWALK_BUSY(MMU_TWALK_BUSY),
         .MMU_TWALK_VALID(MMU_TWALK_VALID),
         .MMU_TWALK_FC(MMU_TWALK_FC),
@@ -363,13 +384,16 @@ module mmu_runtime_gate_formal;
 
     always_ff @(posedge CLK) begin
         // Core-originated requests must be suppressed whenever the MMU reports
-        // a fault or a table-search stall window; only background burst-fill
-        // traffic may still ask for a bus cycle. RD_REQ and OPCODE_REQ carry
-        // both sources, so equality with the burst request is the port-visible
-        // statement that the core term contributes nothing.
+        // a fault or a table-search stall window; only traffic that is not the
+        // core's own access may still ask for a bus cycle. Since the walk
+        // started mastering the bus (UM 9.5.2) there are two such sources: a
+        // background burst fill and the search's own descriptor cycle. RD_REQ,
+        // WR_REQ and OPCODE_REQ each carry the core term plus those, so
+        // equality with the non-core terms is the port-visible statement that
+        // the core term contributes nothing.
         if (MMU_RUNTIME_FAULT || MMU_RUNTIME_STALL) begin
-            assert(RD_REQ == BURST_PREFETCH_DATA_REQ);
-            assert(WR_REQ == 1'b0);
+            assert(RD_REQ == (BURST_PREFETCH_DATA_REQ || MMU_TWALK_BUS_RD));
+            assert(WR_REQ == MMU_TWALK_BUS_WR);
             assert(OPCODE_REQ == BURST_PREFETCH_OP_REQ);
         end
 
@@ -379,8 +403,8 @@ module mmu_runtime_gate_formal;
         // latch sampled instead.
         if (f_past_valid && !$past(RESET_CPU) &&
             $past(MMU_RUNTIME_FAULT || MMU_RUNTIME_STALL)) begin
-            assert(RD_REQ_I == $past(BURST_PREFETCH_DATA_REQ));
-            assert(WR_REQ_I == 1'b0);
+            assert(RD_REQ_I == $past(BURST_PREFETCH_DATA_REQ || MMU_TWALK_BUS_RD));
+            assert(WR_REQ_I == $past(MMU_TWALK_BUS_WR));
             assert(OPCODE_REQ_I == $past(BURST_PREFETCH_OP_REQ));
         end
     end

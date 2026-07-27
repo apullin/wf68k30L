@@ -137,19 +137,28 @@
         .TRAP_DIVZERO           (TRAP_DIVZERO)
     );
 
+    // A descriptor cycle raised by the MMU table search overrides the bus
+    // request context for the whole cycle. UM 9.5.2 and the UM 7.3.7 list:
+    // table search accesses are read-modify-write cycles to the supervisor data
+    // space at physical addresses, longword sized, RMC asserted from the first
+    // cycle of the search to the last. Only the bus-interface ports are
+    // overridden -- the cache and snoop paths keep the core's own context, which
+    // they gate off for the duration of the search anyway.
+    assign MMU_TWALK_BUS_FC = FC_SUPER_DATA;
+
     // External bus protocol controller and physical bus drive/read path.
     WF68K30L_BUS_INTERFACE I_BUS_IF (
         .CLK                (CLK),
 
-        .ADR_IN_P           (ADR_BUS_REQ_PHYS),
+        .ADR_IN_P           (MMU_TWALK_BUS_ACTIVE ? MMU_TWALK_BUS_ADDR : ADR_BUS_REQ_PHYS),
         .ADR_OUT_P          (ADR_OUT),
 
-        .FC_IN              (FC_BUS_REQ),
+        .FC_IN              (MMU_TWALK_BUS_ACTIVE ? MMU_TWALK_BUS_FC : FC_BUS_REQ),
         .FC_OUT             (FC_OUT),
 
         .DATA_PORT_IN       (DATA_IN),
         .DATA_PORT_OUT      (DATA_OUT),
-        .DATA_FROM_CORE     (DATA_FROM_CORE),
+        .DATA_FROM_CORE     (MMU_TWALK_BUS_ACTIVE ? MMU_TWALK_BUS_DATA : DATA_FROM_CORE),
         .DATA_TO_CORE       (DATA_TO_CORE_BUSIF),
         .OPCODE_TO_CORE     (OPCODE_TO_CORE_BUSIF),
 
@@ -157,7 +166,7 @@
         .BUS_EN             (BUS_EN),
 
         .SIZE               (SIZE),
-        .OP_SIZE            (OP_SIZE_BUS),
+        .OP_SIZE            (MMU_TWALK_BUS_ACTIVE ? LONG : OP_SIZE_BUS),
 
         .RD_REQ             (RD_REQ),
         .WR_REQ             (WR_REQ),
@@ -166,7 +175,7 @@
         .OPCODE_REQ         (OPCODE_REQ),
         .OPCODE_RDY         (OPCODE_RDY_BUSIF),
         .OPCODE_VALID       (OPCODE_VALID_BUSIF),
-        .RMC                (RMC),
+        .RMC                (RMC || MMU_TWALK_RMC),
         .BUSY_EXH           (BUSY_EXH),
         .SSW_80             (SSW_80),
         .INBUFFER           (INBUFFER),
@@ -203,8 +212,11 @@
     );
 
     // Core-facing return muxes: bus data/opcodes vs cache/fault synthesized responses.
+    // A descriptor cycle raised by the table search is not the core's access, so
+    // its acknowledge is hidden exactly as a background burst fill's is.
     assign DATA_RDY_BUSIF_CORE = DATA_RDY_BUSIF &&
-                                 !(BUS_CYCLE_BURST && !BUS_CYCLE_BURST_IS_OP);
+                                 !(BUS_CYCLE_BURST && !BUS_CYCLE_BURST_IS_OP) &&
+                                 !BUS_CYCLE_MMU_WALK;
     assign OPCODE_RDY_BUSIF_CORE = OPCODE_RDY_BUSIF &&
                                    !(BUS_CYCLE_BURST && BUS_CYCLE_BURST_IS_OP);
 

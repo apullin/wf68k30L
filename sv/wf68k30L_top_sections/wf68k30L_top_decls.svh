@@ -410,6 +410,15 @@ logic [31:0] MMU_TWALK_FETCH_LO_WORD;
 logic [31:0] MMU_TWALK_FETCH_HI_WORD;
 logic        MMU_TWALK_FETCH_LO_VALID;
 logic        MMU_TWALK_FETCH_HI_VALID;
+// MMU table-search bus master (UM 9.5.2).
+logic        MMU_TWALK_BUS_RD;
+logic        MMU_TWALK_BUS_WR;
+logic        MMU_TWALK_BUS_ACTIVE;
+logic [31:0] MMU_TWALK_BUS_ADDR;
+logic [31:0] MMU_TWALK_BUS_DATA;
+logic        MMU_TWALK_RMC;
+logic [2:0]  MMU_TWALK_BUS_FC;
+logic        BUS_CYCLE_MMU_WALK;
 logic        UNMARK;
 logic        USE_APAIR;
 logic        USE_DFC;
