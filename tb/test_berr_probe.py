@@ -750,3 +750,90 @@ async def test_berr_double_fault_on_the_replay_reenters_the_handler(dut):
     # First entry records the storing instruction; the second overwrites it with
     # whatever the second frame named. Only the first value is well defined.
     assert pc != 0, "Handler never read a stacked PC"
+
+
+# Same as STORE_FAULT_HANDLER but also records the SSW from frame offset $0A.
+# Uses D1 -- already clobbered above -- so the faulted store's source register
+# still survives the rerun.
+STORE_FAULT_SSW_HANDLER = [
+    0x2039, 0x0002, 0x0000,          # MOVE.L ($20000).L,D0
+    0x5280,                          # ADDQ.L #1,D0
+    0x23C0, 0x0002, 0x0000,          # MOVE.L D0,($20000).L
+    0x222F, 0x0002,                  # MOVE.L 2(A7),D1
+    0x23C1, 0x0002, 0x000C,          # MOVE.L D1,($2000C).L
+    0x322F, 0x000A,                  # MOVE.W 10(A7),D1
+    0x33C1, 0x0002, 0x0010,          # MOVE.W D1,($20010).L
+    0x4E73,                          # RTE
+]
+
+# UM Table 7-2: the SIZ1/SIZ0 codes that Figure 8-9's SSW SIZE field reports.
+# Deliberately not this design's internal OP_SIZE codes -- an external handler
+# decodes the stacked SSW, so a byte fault must read as 01 and a long as 00.
+_UM_SIZE_CODES = [
+    ("byte", 0x1083, 0b01, 1, 0xA5223344),   # MOVE.B D3,(A0)
+    ("word", 0x3083, 0b10, 2, 0xA5A53344),   # MOVE.W D3,(A0)
+    ("long", 0x2083, 0b00, 4, 0x5A5AA5A5),   # MOVE.L D3,(A0)
+]
+
+
+@cocotb.test()
+async def test_ssw_size_field_uses_the_um_encoding(dut):
+    """The stacked SSW SIZE field must be UM Table 7-2, not internal OP_SIZE.
+
+    The two capture paths (bus_interface.sv:data_fault_info and the MMU's
+    mmu_fault_ssw_capture) used to write this design's OP_SIZE codes -- long=10,
+    word=01, byte=00 -- which collide with the manual's meanings: 00 is a long
+    word in UM Table 7-2 but was a byte here, so any handler that decoded the
+    field per the manual read a faulted byte store as a long word.
+
+    Each size is checked two ways. The stacked SIZE field must carry the UM code,
+    and the RTE replay must then write exactly that many bytes: FAULT_ADDR is
+    preloaded with a witness pattern, so a size decoded too wide overwrites the
+    neighbouring bytes and a size decoded too narrow leaves the operand short.
+    That second assertion is what keeps the encoding and the replay decode from
+    drifting apart again by being changed in step but both wrong.
+    """
+    for name, store_op, um_code, nbytes, expect_mem in _UM_SIZE_CODES:
+        h = CPUTestHarness(dut)
+        bus = BerrOnceBusModel(dut, h.mem, times=1)
+
+        program = [
+            0x207C, 0x000E, 0x0000,               # 0x100 MOVEA.L #$E0000,A0
+            0x263C, 0x5A5A, 0xA5A5,               # 0x106 MOVE.L #$5A5AA5A5,D3
+            store_op,                             # 0x10C store to (A0) <- BERR
+            0x7421,                               # 0x10E MOVEQ #$21,D2
+            0x23C2, 0x0002, 0x0018,               # 0x110 MOVE.L D2,($20018).L
+            0x2E3C, 0xDEAD, 0xCAFE,               # 0x116 MOVE.L #$DEADCAFE,D7
+            0x23C7, 0x0003, 0x0000,               # 0x11C MOVE.L D7,($30000).L
+            0x4E72, 0x2700,                       # 0x122 STOP #$2700
+        ]
+        # Witness pattern: only the operand's own bytes may change.
+        h.mem.load_long(FAULT_ADDR, 0x11223344)
+        h.mem.load_long(SSW_ADDR, 0)
+
+        found = await _boot(dut, h, bus, program, STORE_FAULT_SSW_HANDLER)
+
+        ssw = h.mem.read(SSW_ADDR, 2)
+        size = (ssw >> 4) & 0b11
+        assert bus.fault_count == 1, (
+            f"{name}: BERRn asserted {bus.fault_count} times"
+        )
+        assert ssw & 0x0100, (
+            f"{name}: SSW = 0x{ssw:04X}: DF clear, so this frame was not a "
+            f"replayable data fault and its SIZE field means nothing"
+        )
+        assert not (ssw & 0x0040), (
+            f"{name}: SSW = 0x{ssw:04X}: RW set, but a store is a write"
+        )
+        assert size == um_code, (
+            f"{name} store ({nbytes} byte(s)): SSW = 0x{ssw:04X} has "
+            f"SIZE = {size:02b}, expected UM Table 7-2 code {um_code:02b}. "
+            f"{'This is the old internal OP_SIZE encoding.' if size == {1: 0, 2: 1, 4: 2}[nbytes] else ''}"
+        )
+        assert found, f"{name}: program did not complete after the RTE rerun"
+        got = h.mem.read(FAULT_ADDR, 4)
+        assert got == expect_mem, (
+            f"{name} store replayed at the wrong width: 0x{FAULT_ADDR:06X} "
+            f"holds 0x{got:08X}, expected 0x{expect_mem:08X} over the "
+            f"0x11223344 witness"
+        )

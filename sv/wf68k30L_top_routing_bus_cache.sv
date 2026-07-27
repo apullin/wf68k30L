@@ -352,12 +352,12 @@ always_ff @(posedge CLK) begin : mmu_fault_ssw_capture
             MMU_FAULT_SSW_VALID <= 1'b0;
 
         if (!BUS_BSY && MMU_RUNTIME_FAULT && (DATA_RD_BUS || DATA_WR)) begin
-            // UM Table 8-9 SIZE encoding; matches the bus controller's own
-            // capture for a real fault.
+            // UM Table 7-2 size encoding, as Figure 8-9's SIZE field reports it;
+            // matches the bus controller's own capture for a real fault.
             case (OP_SIZE_BUS)
-                LONG:    ssw_size = 2'b10;
-                WORD:    ssw_size = 2'b01;
-                default: ssw_size = 2'b00; // BYTE
+                LONG:    ssw_size = 2'b00;
+                WORD:    ssw_size = 2'b10;
+                default: ssw_size = 2'b01; // BYTE
             endcase
             MMU_FAULT_SSW_VALID <= 1'b1;
             MMU_FAULT_SSW <= {1'b1,                 // DF: rerun the data cycle.

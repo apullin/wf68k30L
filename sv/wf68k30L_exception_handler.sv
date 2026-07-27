@@ -793,14 +793,16 @@ assign rte_bf_replay_write = (EXCEPTION == EX_RTE) &&
                              (STACK_FORMAT_I == 4'hA || STACK_FORMAT_I == 4'hB) &&
                              rte_bf_ssw[8] && !rte_bf_ssw[7] && !rte_bf_ssw[6] && rte_bf_ssw[3];
 
-// SIZE field of the SSW, in the encoding this design's two fault-info capture
-// paths both produce (bus_interface.sv:data_fault_info and the MMU's
-// mmu_fault_ssw_capture).
+// SIZE field of the SSW, in UM Table 7-2's encoding, which both fault-info
+// capture paths produce (bus_interface.sv:data_fault_info and the MMU's
+// mmu_fault_ssw_capture) and which an external handler may also have written.
+// 2'b11 is UM's 3-byte code: no OP_SIZE expresses it, so a frame asking for it
+// gets the narrowest replay rather than one that would overrun the operand.
 always_comb begin : rte_replay_size_decode
     case (rte_bf_ssw[5:4])
-        2'b10:   rte_bf_replay_size = LONG;
-        2'b01:   rte_bf_replay_size = WORD;
-        default: rte_bf_replay_size = BYTE;
+        2'b00:   rte_bf_replay_size = LONG;
+        2'b10:   rte_bf_replay_size = WORD;
+        default: rte_bf_replay_size = BYTE; // 2'b01 byte, 2'b11 three bytes
     endcase
 end
 

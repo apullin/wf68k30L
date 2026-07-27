@@ -270,11 +270,16 @@ end
 always_ff @(posedge CLK) begin : data_fault_info
     logic [1:0] SIZEVAR;
     if (!BUSY_EXH && !SSW_FROZEN) begin // Do not alter during exception processing.
+        // UM Table 7-2 size encoding, which is what Figure 8-9's SIZE field
+        // reports: an external handler decodes this, so it must match the SIZ1
+        // and SIZ0 pins rather than this design's internal OP_SIZE codes. These
+        // values are SIZE_N[1:0] for the same operand, so the SSW agrees with
+        // what the bus actually drove.
         case (OP_SIZE)
-            LONG:    SIZEVAR = 2'b10;
-            WORD:    SIZEVAR = 2'b01;
-            BYTE:    SIZEVAR = 2'b00;
-            default: SIZEVAR = 2'b00;
+            LONG:    SIZEVAR = 2'b00;
+            WORD:    SIZEVAR = 2'b10;
+            BYTE:    SIZEVAR = 2'b01;
+            default: SIZEVAR = 2'b01;
         endcase
 
         if (BUS_CTRL_STATE == START_CYCLE && NEXT_BUS_CTRL_STATE == DATA_C1C4) begin
