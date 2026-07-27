@@ -195,9 +195,7 @@ test-shakeout:
 # whole cone they depend on has to be read in.
 FORMAL_MMU_RTL := $(SV_DIR)/wf68k30L_top_routing_bus_cache.sv \
                   $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv \
-                  $(SV_DIR)/wf68k30L_top_desc_shadow_port.sv \
-                  $(SV_DIR)/wf68k30L_top_mmu_ptest.sv \
-                  $(SV_DIR)/wf68k30L_sync_ram_1r1w.sv
+                  $(SV_DIR)/wf68k30L_top_mmu_ptest.sv
 FORMAL_LOWER := memory_map; clk2fflogic; chformal -lower
 SMT_SOLVER ?= bitwuzla
 FORMAL_CYCLES ?= 12
