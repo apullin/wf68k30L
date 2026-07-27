@@ -50,6 +50,10 @@ class BusModel:
         self.wait_states = wait_states
         self.port_width = port_width
         self.sync_term = sync_term
+        # One (addr, size_code, is_write) record per sub-cycle served, in order.
+        # Lets a test assert what the bus actually did rather than only what
+        # ended up in a register.
+        self.sub_cycles = []
         self._running = False
         self._trace = os.environ.get("BUS_TRACE", "0") not in ("", "0", "false", "False")
         self._trace_min = int(os.environ.get("BUS_TRACE_MIN", "0"), 0)
@@ -158,6 +162,7 @@ class BusModel:
                 )
                 width = self._port_width_for(addr)
                 dsack = self.DSACK_FOR_WIDTH[width]
+                self.sub_cycles.append((addr, size_code, rw_n == 0))
 
                 # Insert wait states
                 for _ in range(self.wait_states):

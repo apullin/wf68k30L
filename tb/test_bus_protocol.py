@@ -31,8 +31,8 @@ from bus_model import BusModel
 from m68k_encode import (
     BYTE, WORD, LONG,
     DN, AN, AN_IND, AN_DISP, SPECIAL, ABS_L, IMMEDIATE,
-    moveq, move, movea, move_to_abs_long, nop, addq, add, imm_long, abs_long,
-    trap, rte,
+    moveq, move, movea, move_from_abs_long, move_to_abs_long, nop, addq, add,
+    imm_long, abs_long, trap, rte,
 )
 
 
@@ -1257,4 +1257,283 @@ async def test_reset_instruction_does_not_reset_core(dut):
     assert found, "core reset itself from its own RESET instruction output"
     runs = h.read_result_long(0)
     assert runs == 1, f"program ran {runs} times; RESET restarted the core"
+    h.cleanup()
+
+
+# ===================================================================
+# 8. Synchronous (STERM) transfers -- UM 6.1.3 / 7.3.2
+# ===================================================================
+#
+# A synchronous cycle is acknowledged with STERM instead of DSACKx and
+# completes two clocks after the address goes out, so the edge that recognises
+# the termination is also the edge that advances the transfer's remaining-byte
+# count. Wherever that count is consulted on the same edge, the model has to
+# look at the post-decrement value. Getting it wrong is invisible on aligned
+# transfers -- one sub-cycle, the count reaches zero either way -- and corrupts
+# the operand on every split one.
+
+SYNC_RD_WINDOW = 0x018100
+SYNC_WR_WINDOW = 0x018400
+
+# SIZE[1:0] is the count of bytes still to transfer (UM 7.2.1), so the code for
+# a whole long word is 00 and a single trailing byte is 01.
+SZ_LONG, SZ_BYTE, SZ_WORD, SZ_3BYTE = 0b00, 0b01, 0b10, 0b11
+
+SYNC_SIZES = ((LONG, 4), (WORD, 2), (BYTE, 1))
+
+# One payload per (size, alignment) case; every byte differs so a misplaced
+# lane is always visible.
+SYNC_WR_PATTERNS = [
+    0x8191A1B1, 0x8292A2B2, 0x8393A3B3, 0x8494A4B4,
+    0x8595A5B5, 0x8696A6B6, 0x8797A7B7, 0x8898A8B8,
+    0x8999A9B9, 0x8A9AAABA, 0x8B9BABBB, 0x8C9CACBC,
+]
+
+
+class SyncTermBusModel(BusModel):
+    """32-bit port that acknowledges every cycle with STERMn (UM 7.3.2).
+
+    STERMn is driven per cycle and released when the cycle ends rather than
+    tied low for the whole run, so each sub-cycle of a split transfer sees it
+    presented afresh -- which is what a real synchronous device does, and what
+    makes a two-sub-cycle synchronous transfer distinguishable from one.
+    """
+
+    def __init__(self, dut, memory, **kwargs):
+        super().__init__(dut, memory, sync_term=True, **kwargs)
+
+
+def _sync_case_addr(window, idx, align):
+    """Distinct, non-overlapping address whose A1:A0 equals align."""
+    return window + 0x20 * idx + align
+
+
+def _sync_fill(mem):
+    """Byte value = low 8 address bits, over both synchronous windows."""
+    for a in range(0x018000, 0x018600):
+        mem.write(a, 1, a & 0xFF)
+
+
+async def _run_sterm(dut, program_fn, max_cycles=40000):
+    """Bring the CPU up against an all-synchronous bus and run to the sentinel."""
+    h = CPUTestHarness(dut)
+    bus = SyncTermBusModel(dut, h.mem)
+
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    h._init_idle_inputs()
+    h._install_trap_stubs()
+    h._load_memory(program_fn(h))
+    _sync_fill(h.mem)
+    await RisingEdge(dut.CLK)
+    await RisingEdge(dut.CLK)
+    dut.RESET_INn.value = 0
+    dut.HALT_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+    h.bus = bus
+    await bus.start()
+    dut.RESET_INn.value = 1
+    dut.HALT_INn.value = 1
+    await ClockCycles(dut.CLK, 4)
+
+    found = False
+    for _ in range(max_cycles):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+    h.check_no_unexpected_exception()
+    return h, bus, found
+
+
+def _sync_read_program(h):
+    """MOVE.<size> (sync).L,D0 -> MOVE.L D0,(RESULT).L for every case."""
+    program = []
+    for idx in range(len(SYNC_SIZES) * 4):
+        size = SYNC_SIZES[idx // 4][0]
+        align = idx % 4
+        src = _sync_case_addr(SYNC_RD_WINDOW, idx, align)
+        program += moveq(0, 0)  # zero-extend sub-long results
+        program += move_from_abs_long(size, src, DN, 0)
+        program += move_to_abs_long(LONG, DN, 0, h.RESULT_BASE + 4 * idx)
+    program += h.sentinel_program()
+    return program
+
+
+def _sync_write_program(h):
+    """MOVE.L #pat,D0 -> MOVE.<size> D0,(sync).L for every case."""
+    program = []
+    for idx in range(len(SYNC_SIZES) * 4):
+        size = SYNC_SIZES[idx // 4][0]
+        align = idx % 4
+        dst = _sync_case_addr(SYNC_WR_WINDOW, idx, align)
+        program += move(LONG, SPECIAL, IMMEDIATE, DN, 0)
+        program += imm_long(SYNC_WR_PATTERNS[idx])
+        program += move_to_abs_long(size, DN, 0, dst)
+    program += h.sentinel_program()
+    return program
+
+
+@cocotb.test()
+async def test_sterm_reads_all_sizes_and_alignments(dut):
+    """Long/word/byte reads at every alignment from a synchronous 32-bit port.
+
+    The operand value is checked, not just the address sequence: a split
+    synchronous transfer whose remaining-byte count overshoots runs its second
+    sub-cycle with SIZE = 00 and latches a whole long word over the operand.
+    """
+    h, _bus, found = await _run_sterm(dut, _sync_read_program)
+    assert found, "program did not complete"
+
+    errs = []
+    for idx in range(len(SYNC_SIZES) * 4):
+        _size, nbytes = SYNC_SIZES[idx // 4]
+        align = idx % 4
+        src = _sync_case_addr(SYNC_RD_WINDOW, idx, align)
+        want = 0
+        for i in range(nbytes):
+            want = (want << 8) | (h.mem.read(src + i, 1) & 0xFF)
+        got = h.read_result_long(4 * idx)
+        if got != want:
+            errs.append(
+                f"STERM read size={nbytes} a={align} addr=0x{src:08X}: "
+                f"got 0x{got:08X} want 0x{want:08X}"
+            )
+    assert not errs, "synchronous read errors: " + "; ".join(errs)
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_sterm_writes_all_sizes_and_alignments(dut):
+    """Long/word/byte writes at every alignment to a synchronous 32-bit port."""
+    h, _bus, found = await _run_sterm(dut, _sync_write_program)
+    assert found, "program did not complete"
+
+    errs = []
+    for idx in range(len(SYNC_SIZES) * 4):
+        _size, nbytes = SYNC_SIZES[idx // 4]
+        align = idx % 4
+        dst = _sync_case_addr(SYNC_WR_WINDOW, idx, align)
+        want = SYNC_WR_PATTERNS[idx] & ((1 << (8 * nbytes)) - 1)
+        got = h.mem.read(dst, nbytes)
+        if got != want:
+            errs.append(
+                f"STERM write size={nbytes} a={align} addr=0x{dst:08X}: "
+                f"got 0x{got:0{2 * nbytes}X} want 0x{want:0{2 * nbytes}X}"
+            )
+    assert not errs, "synchronous write errors: " + "; ".join(errs)
+    h.cleanup()
+
+
+# Sub-cycle shape a 32-bit port must see for each case, as (address offset from
+# the operand, SIZE code). UM 7.2.1 and Table 7-4: a sub-cycle moves the bytes
+# between the lane A1:A0 selects and the end of the port, and SIZE always
+# states how many bytes of the operand are still outstanding.
+STERM_SHAPES = {
+    (LONG, 0): [(0, SZ_LONG)],
+    (LONG, 1): [(0, SZ_LONG), (3, SZ_BYTE)],
+    (LONG, 2): [(0, SZ_LONG), (2, SZ_WORD)],
+    (LONG, 3): [(0, SZ_LONG), (1, SZ_3BYTE)],
+    (WORD, 0): [(0, SZ_WORD)],
+    (WORD, 1): [(0, SZ_WORD)],
+    (WORD, 2): [(0, SZ_WORD)],
+    (WORD, 3): [(0, SZ_WORD), (1, SZ_BYTE)],
+    (BYTE, 0): [(0, SZ_BYTE)],
+    (BYTE, 1): [(0, SZ_BYTE)],
+    (BYTE, 2): [(0, SZ_BYTE)],
+    (BYTE, 3): [(0, SZ_BYTE)],
+}
+
+
+def _check_sterm_shapes(bus, window, is_write):
+    """Compare recorded sub-cycles against STERM_SHAPES for one direction."""
+    errs = []
+    for idx in range(len(SYNC_SIZES) * 4):
+        size, nbytes = SYNC_SIZES[idx // 4]
+        align = idx % 4
+        base = _sync_case_addr(window, idx, align)
+        want = [(base + off, code) for off, code in STERM_SHAPES[(size, align)]]
+        got = [
+            (addr, code)
+            for addr, code, wr in bus.sub_cycles
+            if wr == is_write and base <= addr < base + 8
+        ]
+        if got != want:
+            errs.append(
+                f"size={nbytes} a={align} addr=0x{base:08X}: sub-cycles "
+                f"{[(hex(a), format(c, '02b')) for a, c in got]} != "
+                f"{[(hex(a), format(c, '02b')) for a, c in want]}"
+            )
+    return errs
+
+
+@cocotb.test()
+async def test_sterm_read_sub_cycle_shape(dut):
+    """Every synchronous read splits at the address and SIZE the UM requires.
+
+    Includes the three-byte sub-cycle (SIZE = 11), which a 32-bit port only
+    ever sees as the second half of a long word starting at A1:A0 = 11.
+    """
+    h, bus, found = await _run_sterm(dut, _sync_read_program)
+    assert found, "program did not complete"
+    errs = _check_sterm_shapes(bus, SYNC_RD_WINDOW, is_write=False)
+    assert not errs, "synchronous read sub-cycle errors: " + "; ".join(errs)
+    assert any(
+        code == SZ_3BYTE for _a, code, wr in bus.sub_cycles if not wr
+    ), "no three-byte read sub-cycle was exercised"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_sterm_write_sub_cycle_shape(dut):
+    """Every synchronous write splits at the address and SIZE the UM requires."""
+    h, bus, found = await _run_sterm(dut, _sync_write_program)
+    assert found, "program did not complete"
+    errs = _check_sterm_shapes(bus, SYNC_WR_WINDOW, is_write=True)
+    assert not errs, "synchronous write sub-cycle errors: " + "; ".join(errs)
+    assert any(
+        code == SZ_3BYTE for _a, code, wr in bus.sub_cycles if wr
+    ), "no three-byte write sub-cycle was exercised"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_sterm_misaligned_long_does_not_overrun(dut):
+    """Regression: the second sub-cycle must move one byte, not a long word.
+
+    A long read from A1:A0 = 01 splits 3 + 1. When the remaining-byte count is
+    advanced twice for one synchronous cycle it reaches zero after the first
+    sub-cycle, so the second runs with SIZE = 00 and latches the long word at
+    base + 3 over the whole operand: a read from 0x18121 returned the bytes at
+    0x18124..0x18127 instead of 0x18121..0x18124.
+    """
+    target = 0x018121  # A1:A0 = 01
+
+    def program(h):
+        return [
+            *move_from_abs_long(LONG, target, DN, 0),
+            *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),
+            *h.sentinel_program(),
+        ]
+
+    h, bus, found = await _run_sterm(dut, program)
+    assert found, "program did not complete"
+
+    want = 0
+    for i in range(4):
+        want = (want << 8) | (h.mem.read(target + i, 1) & 0xFF)
+    got = h.read_result_long(0)
+    assert got == want, (
+        f"misaligned synchronous long read returned 0x{got:08X}, expected "
+        f"0x{want:08X} (bytes at 0x{target:08X}..0x{target + 3:08X})"
+    )
+
+    seen = [
+        (a, c) for a, c, wr in bus.sub_cycles
+        if not wr and target <= a < target + 8
+    ]
+    assert seen == [(target, SZ_LONG), (target + 3, SZ_BYTE)], (
+        f"sub-cycles {[(hex(a), format(c, '02b')) for a, c in seen]} != "
+        f"[(0x{target:X}, 00), (0x{target + 3:X}, 01)]"
+    )
     h.cleanup()
