@@ -204,6 +204,38 @@ parameter logic [7:0] VEC_SPURIOUS    = 8'h18; // Spurious interrupt
 parameter logic [7:0] VEC_TRAP_BASE   = 8'h20; // TRAP #0..#15 base (vector = base + trap#)
 parameter logic [7:0] VEC_MMU_CFG     = 8'h38; // MMU configuration error
 
+// ---- SSW SIZE field encoding (UM Figure 8-9, coded per UM Table 7-2) ----
+// The stacked SSW is read and written by external handlers, so its SIZE field
+// carries the SIZ1/SIZ0 bus codes, not this design's OP_SIZETYPE. The two are
+// not merely different but colliding -- 2'b00 is a long word to the manual and
+// was a byte to OP_SIZETYPE -- so both fault-capture paths encode through
+// um_size_code and the RTE replay decodes through um_size_to_op_size. Keeping
+// one definition of each direction is deliberate: the field was wrong because
+// the mapping was written out by hand in two places, and one of the two copies
+// carried a comment claiming it was already the manual's encoding.
+//
+// Arguments and results are plain logic [1:0] rather than OP_SIZETYPE because
+// Vivado and Verilator both reject the implicit logic-to-enum conversion that
+// callers would otherwise need. Both assign the function name instead of using
+// return, which Yosys's frontend does not accept inside a function.
+function automatic logic [1:0] um_size_code(logic [1:0] op_size);
+    case (op_size)
+        LONG:    um_size_code = 2'b00;
+        WORD:    um_size_code = 2'b10;
+        default: um_size_code = 2'b01; // BYTE
+    endcase
+endfunction
+
+// 2'b11 is UM's 3-byte code. No OP_SIZETYPE expresses it, so a frame asking for
+// it gets the narrowest replay rather than one that would overrun the operand.
+function automatic logic [1:0] um_size_to_op_size(logic [1:0] um_code);
+    case (um_code)
+        2'b00:   um_size_to_op_size = LONG;
+        2'b10:   um_size_to_op_size = WORD;
+        default: um_size_to_op_size = BYTE; // 2'b01 byte, 2'b11 three bytes
+    endcase
+endfunction
+
 // ---- Condition code flags struct ----
 typedef struct packed {
     logic x; // Extend
