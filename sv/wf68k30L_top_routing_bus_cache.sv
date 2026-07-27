@@ -87,6 +87,8 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     output logic        OPCODE_REQ_I,
     output logic        MMU_FAULT_DATA_ACK,
     output logic        MMU_FAULT_OPCODE_ACK,
+    output logic        MMU_FAULT_SSW_VALID,
+    output logic [8:0]  MMU_FAULT_SSW,
     output logic        BUS_CYCLE_BURST,
     output logic        BUS_CYCLE_BURST_IS_OP,
 
@@ -462,6 +464,59 @@ always_ff @(posedge CLK) begin : bus_req_latch
         OPCODE_REQ_I <= 1'b0;
         MMU_FAULT_DATA_ACK <= 1'b0;
         MMU_FAULT_OPCODE_ACK <= 1'b0;
+    end
+end
+
+// ========================================================================
+// Special status word for an MMU translation fault
+//
+// A translation fault runs no bus cycle, so the bus controller never captures
+// fault information for it and the stacked SSW described whichever cycle ran
+// last -- with DF clear. UM 8.1.6 makes DF the bit that tells RTE to rerun the
+// faulted data cycle, so with it clear RTE restored the pipeline image instead
+// and execution resumed past the access that never happened. On the silicon the
+// fault is reported on the retried access (UM 8.1.2: "a bus error exception
+// occurs when the aborted bus cycle is retried"), which is a real data cycle,
+// so DF is set. This builds the equivalent word from the access the MMU
+// refused: DF set, RM from RMC, RW from the direction, SIZE as UM Table 8-9
+// encodes it, and the access's own function code.
+//
+// Instruction-fetch faults are left alone: those are reported through the
+// stage B/C fault bits, not DF.
+// ========================================================================
+
+logic MMU_FAULT_BUSY_EXH_D;
+
+always_ff @(posedge CLK) begin : mmu_fault_ssw_capture
+    logic [1:0] ssw_size;
+    if (RESET_CPU) begin
+        MMU_FAULT_SSW_VALID <= 1'b0;
+        MMU_FAULT_SSW <= 9'h000;
+        MMU_FAULT_BUSY_EXH_D <= 1'b0;
+    end else begin
+        MMU_FAULT_BUSY_EXH_D <= BUSY_EXH;
+        // A real bus fault carries its own captured status; and once the
+        // handler that consumed this word has finished, retire it.
+        if ((DATA_RDY_BUSIF && !DATA_VALID_BUSIF) ||
+            (MMU_FAULT_BUSY_EXH_D && !BUSY_EXH))
+            MMU_FAULT_SSW_VALID <= 1'b0;
+
+        if (!BUS_BSY && MMU_RUNTIME_FAULT && (DATA_RD_BUS || DATA_WR)) begin
+            // UM Table 8-9 SIZE encoding; matches the bus controller's own
+            // capture for a real fault.
+            case (OP_SIZE_BUS)
+                LONG:    ssw_size = 2'b10;
+                WORD:    ssw_size = 2'b01;
+                default: ssw_size = 2'b00; // BYTE
+            endcase
+            MMU_FAULT_SSW_VALID <= 1'b1;
+            MMU_FAULT_SSW <= {1'b1,                 // DF: rerun the data cycle.
+                              RMC,                  // RM
+                              !DATA_WR,             // RW: 1 = read
+                              ssw_size,
+                              1'b0,
+                              MMU_RUNTIME_ATC_FC};
+        end
     end
 end
 

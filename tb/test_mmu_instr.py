@@ -3457,3 +3457,160 @@ async def test_mmu_berr_on_descriptor_update_faults_the_access(dut):
         f"0xFEEDFACE means the faulted descriptor update was ignored"
     )
     h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_demand_paging_read_fault_completes_after_rte(dut):
+    """Demand paging on a read: invalid page, handler maps it, RTE, access lands.
+
+    UM 8.1.2: a table search that meets an invalid descriptor takes a bus error
+    on the retried access. The handler writes a valid page descriptor into the
+    table in memory, flushes the B-marked ATC entry, and returns; the access
+    then has to complete with the mapped page's data.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xE00)
+    handler_addr = 0x000B80
+    counter_addr = h.DATA_BASE + 0xE80
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x9A6E1400
+
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    valid_desc = (page_base & 0xFFFFFF00) | 0x00000001
+
+    handler_code = [
+        # Count the entries so a livelock or a silent second fault is visible.
+        *move(LONG, SPECIAL, ABS_L, DN, 0),
+        *imm_long(counter_addr),
+        *addq(LONG, 1, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, counter_addr),
+
+        # Page the descriptor in.
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 1),
+        *imm_long(valid_desc),
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_c_addr),
+        *move(LONG, DN, 1, AN_IND, 2),
+
+        0xF000, 0x2400,                       # PFLUSHA: drop the B-marked entry.
+        *rte(),
+    ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 3),        # Faults, then reruns after RTE.
+        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(2 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(desc_c_addr, 0x00000000)   # DT=0: page not resident.
+    h.mem.load_long(counter_addr, 0)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+
+    found = await h.run_until_sentinel(max_cycles=120000)
+    entries = h.mem.read(counter_addr, 4)
+    assert found, (
+        f"Demand-paged read did not complete after RTE (handler entries={entries}, "
+        f"descriptor now 0x{h.mem.read(desc_c_addr, 4):08X})"
+    )
+    assert entries == 1, (
+        f"Bus-error handler ran {entries} times, expected exactly 1"
+    )
+    assert (h.mem.read(desc_c_addr, 4) & 0x3) == 0x1, (
+        "Handler did not leave a valid page descriptor in memory"
+    )
+    got = h.read_result_long(0)
+    assert got == expected_value, (
+        f"Reran access returned 0x{got:08X}, expected 0x{expected_value:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test(skip=True)
+async def test_mmu_demand_paging_write_fault_completes_after_rte(dut):
+    """Demand paging on a write: invalid page, handler maps it, RTE, store lands.
+
+    KNOWN DEFECT ELSEWHERE, deliberately left failing-but-skipped.
+
+    Same shape as the read case, but the faulting access is a store. Everything
+    the MMU owes is done: the search reports the invalid page, the handler is
+    entered exactly once, it writes a valid page descriptor into the table in
+    memory, PFLUSHA drops the B-marked entry and RTE returns. The program then
+    runs to completion. What never happens is the store: the paged-in page still
+    reads 0x00000000.
+
+    That is the open defect recorded in notes/AUDIT_2026-07.md under "Known open
+    defects" and reproduced by
+    tb/test_berr_probe.py::test_berr_on_store_stacks_the_storing_instruction --
+    a store whose acknowledge arrives after the next instruction is dispatched
+    stacks the following instruction's address, so RTE resumes past the store and
+    its write is discarded. It needs a PC carried alongside the writeback stage,
+    which nothing in the design tracks; it is not reachable from the table-search
+    path. Unskip once that is fixed.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xF00)
+    handler_addr = 0x000B80
+    counter_addr = h.DATA_BASE + 0xF80
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    stored_value = 0x5100EDA7
+
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    valid_desc = (page_base & 0xFFFFFF00) | 0x00000001
+
+    handler_code = [
+        *move(LONG, SPECIAL, ABS_L, DN, 0),
+        *imm_long(counter_addr),
+        *addq(LONG, 1, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, counter_addr),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 1),
+        *imm_long(valid_desc),
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_c_addr),
+        *move(LONG, DN, 1, AN_IND, 2),
+        0xF000, 0x2400,                       # PFLUSHA
+        *rte(),
+    ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 3),
+        *imm_long(stored_value),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, DN, 3, AN_IND, 0),        # Faults, then reruns after RTE.
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(2 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(desc_c_addr, 0x00000000)   # DT=0: page not resident.
+    h.mem.load_long(counter_addr, 0)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0)
+
+    found = await h.run_until_sentinel(max_cycles=120000)
+    entries = h.mem.read(counter_addr, 4)
+    assert found, (
+        f"Demand-paged write did not complete after RTE (handler entries={entries})"
+    )
+    assert entries == 1, f"Bus-error handler ran {entries} times, expected exactly 1"
+    got = h.mem.read(expected_phys_addr & 0xFFFFF, 4)
+    assert got == stored_value, (
+        f"Reran store wrote 0x{got:08X} to the paged-in page, expected "
+        f"0x{stored_value:08X}"
+    )
+    h.cleanup()

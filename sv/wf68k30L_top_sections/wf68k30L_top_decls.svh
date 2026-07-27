@@ -148,6 +148,8 @@ logic        DATA_RDY_BUSIF;
 logic        DATA_RDY_CACHE;
 logic        MMU_FAULT_DATA_ACK;
 logic        MMU_FAULT_OPCODE_ACK;
+logic        MMU_FAULT_SSW_VALID;
+logic [8:0]  MMU_FAULT_SSW;
 logic [31:0] DATA_TO_CORE;
 logic [31:0] DATA_TO_CORE_BUSIF;
 logic [31:0] DATA_TO_CORE_CACHE;
