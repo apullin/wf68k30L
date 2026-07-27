@@ -97,6 +97,7 @@ test-full: test-fast
 	$(MAKE) -C tb TEST_MODULE=test_instr_shift TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_cache_instr TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_cache_ram TOPLEVEL=WF68K30L_SYNC_RAM_1R1W
+	$(MAKE) -C tb TEST_MODULE=test_mmu_ptest_abort TOPLEVEL=WF68K30L_TOP_MMU_PTEST
 	$(MAKE) -C tb TEST_MODULE=test_coprocessor_instr TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_interrupt_probe TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_trace_addrerr_probe TOPLEVEL=WF68K30L_TOP

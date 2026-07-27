@@ -52,6 +52,18 @@ module mmu_runtime_gate_formal;
     logic [2:0]  MMU_PTEST_LEVEL;
     logic        MMU_PTEST_START;
     logic        MMU_PTEST_CONSUME;
+    // MMU_PTEST_ABORT is not free either, and for the same reason START is not.
+    // The real driver is
+    //   assign MMU_PTEST_ABORT = (OP_WB != PTEST) && (MMU_PTEST_BUSY || MMU_PTEST_READY);
+    // while MMU_PTEST_START requires OP_WB == PTEST, so the two are structurally
+    // mutually exclusive: a free abort would let the solver abort the very search
+    // it just started, which cannot happen in the design and does falsify the
+    // PTEST non-starvation property. Modelled with one free bit standing in for
+    // "OP_WB still names this PTEST", which keeps the harness assume-free.
+    logic        MMU_PTEST_ABORT;
+    logic        F_OP_WB_IS_PTEST;
+    always_comb F_OP_WB_IS_PTEST = $anyseq;
+    assign MMU_PTEST_ABORT = !F_OP_WB_IS_PTEST && (MMU_PTEST_BUSY || MMU_PTEST_READY);
     logic        ICACHE_BURST_FILL_VALID;
     logic [3:0]  ICACHE_BURST_FILL_LINE;
     logic [23:0] ICACHE_BURST_FILL_TAG;
@@ -244,6 +256,7 @@ module mmu_runtime_gate_formal;
         .MMU_PTEST_LEVEL(MMU_PTEST_LEVEL),
         .MMU_PTEST_START(MMU_PTEST_START),
         .MMU_PTEST_CONSUME(MMU_PTEST_CONSUME),
+        .MMU_PTEST_ABORT(MMU_PTEST_ABORT),
         .ICACHE_BURST_FILL_VALID(ICACHE_BURST_FILL_VALID),
         .ICACHE_BURST_FILL_LINE(ICACHE_BURST_FILL_LINE),
         .ICACHE_BURST_FILL_TAG(ICACHE_BURST_FILL_TAG),

@@ -59,6 +59,18 @@ module mmu_walk_delay_state_formal;
     logic [31:0] MMU_PTEST_LOGICAL;
     logic [2:0]  MMU_PTEST_LEVEL;
     logic        MMU_PTEST_CONSUME;
+    // MMU_PTEST_ABORT is not free either, and for the same reason START is not.
+    // The real driver is
+    //   assign MMU_PTEST_ABORT = (OP_WB != PTEST) && (MMU_PTEST_BUSY || MMU_PTEST_READY);
+    // while MMU_PTEST_START requires OP_WB == PTEST, so the two are structurally
+    // mutually exclusive: a free abort would let the solver abort the very search
+    // it just started, which cannot happen in the design and does falsify the
+    // PTEST non-starvation property. Modelled with one free bit standing in for
+    // "OP_WB still names this PTEST", which keeps the harness assume-free.
+    logic        MMU_PTEST_ABORT;
+    logic        F_OP_WB_IS_PTEST;
+    always_comb F_OP_WB_IS_PTEST = $anyseq;
+    assign MMU_PTEST_ABORT = !F_OP_WB_IS_PTEST && (MMU_PTEST_BUSY || MMU_PTEST_READY);
     logic        ICACHE_BURST_FILL_VALID;
     logic [3:0]  ICACHE_BURST_FILL_LINE;
     logic [23:0] ICACHE_BURST_FILL_TAG;
@@ -139,7 +151,18 @@ module mmu_walk_delay_state_formal;
     logic        MMU_PTEST_START;
     logic        MMU_PTEST_START_FREE;
     always_comb MMU_PTEST_START_FREE = $anyseq;
-    assign MMU_PTEST_START = MMU_PTEST_START_FREE && !MMU_TWALK_BUSY;
+    // Gated to match the real driver in wf68k30L_top_cache_mmu_state.svh:
+    //   (OP_WB == PTEST) && level != 0 && ALU_BSY && ALU_REQ
+    //   && !MMU_TWALK_BUSY && !MMU_PTEST_BUSY && !MMU_PTEST_READY
+    // F_OP_WB_IS_PTEST stands in for the OP_WB term, which is also why START and
+    // ABORT cannot coexist. The !BUSY && !READY terms were previously absent here,
+    // making the harness's START strictly more permissive than the design's: the
+    // solver could request a new search while the previous one was still retiring.
+    // That is not reachable in the RTL, and modelling it faithfully is a
+    // tightening of the harness, not a weakening of the proof.
+    assign MMU_PTEST_START = MMU_PTEST_START_FREE && !MMU_TWALK_BUSY &&
+                             F_OP_WB_IS_PTEST &&
+                             !MMU_PTEST_BUSY && !MMU_PTEST_READY;
 
     logic        MMU_PLOAD_START;
     logic [2:0]  MMU_PLOAD_FC;
@@ -262,6 +285,7 @@ module mmu_walk_delay_state_formal;
         .MMU_PTEST_LEVEL(MMU_PTEST_LEVEL),
         .MMU_PTEST_START(MMU_PTEST_START),
         .MMU_PTEST_CONSUME(MMU_PTEST_CONSUME),
+        .MMU_PTEST_ABORT(MMU_PTEST_ABORT),
         .ICACHE_BURST_FILL_VALID(ICACHE_BURST_FILL_VALID),
         .ICACHE_BURST_FILL_LINE(ICACHE_BURST_FILL_LINE),
         .ICACHE_BURST_FILL_TAG(ICACHE_BURST_FILL_TAG),
@@ -516,9 +540,18 @@ module mmu_walk_delay_state_formal;
 
             // A requested PTEST search is always taken up: either the sequencer
             // goes busy on it or it answers from the root pointer alone. So
-            // neither client can be dropped by the arbitration -- the walk side
+            // neither client can be dropped by the ARBITRATION -- the walk side
             // above waits for PTEST, and PTEST never waits for itself.
-            if (!$past(RESET_CPU) && $past(MMU_PTEST_START))
+            //
+            // Qualified on the requesting instruction still being in the writeback
+            // stage. A search whose PTEST was abandoned (bus error on a core access
+            // resets EXEC_WB_STATE) is *supposed* to end with neither BUSY nor
+            // READY: that is the abort path doing its job, not the arbitration
+            // dropping a client. Without this term the property reads "a search is
+            // never abandoned", which is a different and false claim -- the
+            // root-only answer publishes READY in the same cycle it starts, and the
+            // abort then retires it.
+            if (!$past(RESET_CPU) && $past(MMU_PTEST_START) && F_OP_WB_IS_PTEST)
                 assert(MMU_PTEST_BUSY || MMU_PTEST_READY);
 
             // An idle cycle retires the published result, so the next access

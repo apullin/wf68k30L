@@ -39,6 +39,11 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic [35:0] MMU_PLOAD_RESULT,
     input  logic        MMU_PLOAD_REQ,
     input  logic        MMU_PLOAD_CONSUME,
+    // The PLOAD that asked for this search left the writeback stage (a bus error
+    // on a core access resets EXEC_WB_STATE). Clear BUSY/READY so a later PLOAD,
+    // whose request is gated on !MMU_PLOAD_READY, is not blocked by a result
+    // nothing will ever consume.
+    input  logic        MMU_PLOAD_ABORT,
 
     output logic        MMU_PLOAD_BUSY,
     output logic        MMU_PLOAD_READY,
@@ -400,6 +405,13 @@ always_ff @(posedge CLK) begin : mmu_registers
         if (MMU_PLOAD_DONE) begin
             MMU_PLOAD_BUSY <= 1'b0;
             MMU_PLOAD_READY <= 1'b1;
+        end
+
+        // Last-assignment-wins: an abort in the same cycle the search completes
+        // must leave READY clear, not set.
+        if (MMU_PLOAD_ABORT) begin
+            MMU_PLOAD_BUSY <= 1'b0;
+            MMU_PLOAD_READY <= 1'b0;
         end
 
         // A write to a page whose entry has M clear no longer sets M in the

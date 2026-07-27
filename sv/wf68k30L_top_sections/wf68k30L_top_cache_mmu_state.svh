@@ -360,6 +360,21 @@ assign MMU_PTEST_CONSUME = (OP_WB == PTEST) &&
                            (MMU_PTEST_LEVEL != 3'b000) &&
                            ALU_ACK;
 
+// A bus error on a core access resets EXEC_WB_STATE, abandoning the instruction
+// that asked for this search. MMU_PTEST_CONSUME needs OP_WB == PTEST, so it can
+// never fire for an abandoned one, and MMU_PTEST_START needs !MMU_PTEST_READY --
+// so a search that completed into a result nobody collects does not merely leak,
+// it blocks every later PTEST and hands it this stale MMUSR. Abort on the
+// instruction leaving the writeback stage while a search is live or its result is
+// still pending.
+assign MMU_PTEST_ABORT = (OP_WB != PTEST) && (MMU_PTEST_BUSY || MMU_PTEST_READY);
+
+// PLOAD's handshake has the same shape and the same exposure: MMU_PLOAD_CONSUME
+// needs OP_WB == PLOAD and MMU_PLOAD_REQ needs !MMU_PLOAD_READY. A PLOAD is not
+// architecturally visible the way PTEST's MMUSR is, so a stale READY here costs a
+// blocked later PLOAD rather than a wrong answer -- still worth clearing.
+assign MMU_PLOAD_ABORT = (OP_WB != PLOAD) && (MMU_PLOAD_BUSY || MMU_PLOAD_READY);
+
 // PLOAD gets the same request/ready handshake PTEST has, so its table search
 // completes before the instruction retires (UM 9.8).
 assign MMU_PLOAD_REQ = (OP_WB == PLOAD) &&
@@ -409,6 +424,7 @@ WF68K30L_TOP_MMU_STATE #(
     .MMU_PLOAD_RESULT(MMU_PLOAD_RESULT),
     .MMU_PLOAD_REQ(MMU_PLOAD_REQ),
     .MMU_PLOAD_CONSUME(MMU_PLOAD_CONSUME),
+    .MMU_PLOAD_ABORT(MMU_PLOAD_ABORT),
     .MMU_PLOAD_BUSY(MMU_PLOAD_BUSY),
     .MMU_PLOAD_READY(MMU_PLOAD_READY),
     .MMU_PLOAD_START(MMU_PLOAD_START),

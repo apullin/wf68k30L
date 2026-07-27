@@ -40,6 +40,13 @@ module WF68K30L_TOP_MMU_PTEST (
     output logic [31:0] DESC_ADDR,
     input  logic        DESC_DONE,
     input  logic [32:0] DESC_LOOKUP,
+    // Asserted when the PTEST instruction that requested this search is no
+    // longer in the writeback stage. A bus error on a core access resets
+    // EXEC_WB_STATE, which abandons the instruction mid-search; without this the
+    // search would finish into PTEST_READY that nothing ever consumes, and
+    // because PTEST_START requires !PTEST_READY the NEXT PTEST would never start
+    // and would consume this stale result instead.
+    input  logic        PTEST_ABORT,
     output logic        PTEST_BUSY,
     output logic        PTEST_READY,
     output logic [15:0] PTEST_WALK_MMUSR,
@@ -63,6 +70,9 @@ localparam logic [3:0] PTEST_ST_INDIRECT_HI_REQ  = 4'd9;
 localparam logic [3:0] PTEST_ST_INDIRECT_HI_RESP = 4'd10;
 
 logic [3:0]  ptest_state_r;
+// Set by PTEST_ABORT, cleared when the abandoned search finishes. While set, the
+// search completes normally on the bus but publishes nothing.
+logic        ptest_aborted_r;
 logic [31:0] ptest_tc_r;
 logic [2:0]  ptest_fc_r;
 logic [31:0] ptest_logical_r;
@@ -201,6 +211,7 @@ always_ff @(posedge CLK) begin : ptest_fsm
         PTEST_WALK_MMUSR <= 16'h0000;
         PTEST_DESC_ADDR <= 32'h0000_0000;
         ptest_state_r <= PTEST_ST_IDLE;
+        ptest_aborted_r <= 1'b0;
         ptest_tc_r <= 32'h0000_0000;
         ptest_fc_r <= 3'b000;
         ptest_logical_r <= 32'h0000_0000;
@@ -235,10 +246,30 @@ always_ff @(posedge CLK) begin : ptest_fsm
         if (PTEST_CONSUME)
             PTEST_READY <= 1'b0;
 
+        // ---- Abandoned search (PTEST_ABORT) ----
+        // The search is NOT torn down here. MMU_DESC_BUS_STATE is a registered
+        // FSM that may already have armed a descriptor cycle for this search, and
+        // dropping PTEST_BUSY underneath it would leave that bus access with no
+        // owner -- which the formal property "every descriptor access belongs to a
+        // search in flight" rejects. So the abort only records itself and retires
+        // the published result; the search runs to its natural end and the
+        // completion arms below turn it into an idle return instead of a READY.
+        if (PTEST_ABORT) begin
+            ptest_aborted_r <= 1'b1;
+            PTEST_READY <= 1'b0;
+        end
+
         case (ptest_state_r)
             PTEST_ST_IDLE: begin
                 PTEST_BUSY <= 1'b0;
                 if (PTEST_START) begin
+                    // A new search owns its own result. Without this the abort
+                    // flag leaks across searches: an abandoned search that
+                    // returned to idle without reaching a completion arm would
+                    // leave it set, and the NEXT search would publish nothing.
+                    // The formal PTEST non-starvation property catches exactly
+                    // that, which is how this was found.
+                    ptest_aborted_r <= 1'b0;
                     root_ptr = (MMU_TC[25] && PTEST_FC[2]) ? MMU_SRP : MMU_CRP;
                     root_dt = root_ptr[33:32];
                     search_limit = (PTEST_LEVEL == 3'b000) ? 3'd7 : PTEST_LEVEL;
@@ -355,7 +386,10 @@ always_ff @(posedge CLK) begin : ptest_fsm
                         walk_levels_r
                     );
                     PTEST_BUSY <= 1'b0;
-                    PTEST_READY <= 1'b1;
+                    // An abandoned search publishes nothing: PTEST_READY must stay
+                    // clear or the next PTEST is blocked by it and reads this result.
+                    PTEST_READY <= !ptest_aborted_r;
+                    ptest_aborted_r <= 1'b0;
                     ptest_state_r <= PTEST_ST_IDLE;
                     walk_fault_r <= walk_fault;
                     walk_limit_fault_r <= walk_limit_fault;
@@ -502,7 +536,10 @@ always_ff @(posedge CLK) begin : ptest_fsm
                         level_after
                     );
                     PTEST_BUSY <= 1'b0;
-                    PTEST_READY <= 1'b1;
+                    // An abandoned search publishes nothing: PTEST_READY must stay
+                    // clear or the next PTEST is blocked by it and reads this result.
+                    PTEST_READY <= !ptest_aborted_r;
+                    ptest_aborted_r <= 1'b0;
                     ptest_state_r <= PTEST_ST_IDLE;
                     walk_done_r <= walk_done;
                     walk_fault_r <= walk_fault;
@@ -595,7 +632,10 @@ always_ff @(posedge CLK) begin : ptest_fsm
                     walk_levels_r
                 );
                 PTEST_BUSY <= 1'b0;
-                PTEST_READY <= 1'b1;
+                // An abandoned search publishes nothing: PTEST_READY must stay
+                // clear or the next PTEST is blocked by it and reads this result.
+                PTEST_READY <= !ptest_aborted_r;
+                ptest_aborted_r <= 1'b0;
                 ptest_state_r <= PTEST_ST_IDLE;
                 walk_done_r <= walk_done;
                 walk_fault_r <= walk_fault;

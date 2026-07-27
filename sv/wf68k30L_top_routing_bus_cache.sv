@@ -36,6 +36,7 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE (
     input  logic [2:0]  MMU_PTEST_LEVEL,
     input  logic        MMU_PTEST_START,
     input  logic        MMU_PTEST_CONSUME,
+    input  logic        MMU_PTEST_ABORT,
 
     // Retired with the background line-completion cycles below. The ports stay
     // because this module's instantiation is not part of this change.
@@ -245,6 +246,7 @@ WF68K30L_TOP_MMU_PTEST I_TOP_MMU_PTEST (
     .RESET_CPU(RESET_CPU),
     .PTEST_START(MMU_PTEST_START),
     .PTEST_CONSUME(MMU_PTEST_CONSUME),
+    .PTEST_ABORT(MMU_PTEST_ABORT),
     .MMU_SRP(MMU_SRP),
     .MMU_CRP(MMU_CRP),
     .MMU_TC(MMU_TC),

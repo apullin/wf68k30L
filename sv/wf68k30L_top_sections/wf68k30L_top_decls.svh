@@ -417,6 +417,8 @@ logic [2:0]  MMU_PTEST_LEVEL;
 logic [31:0] MMU_PTEST_LOGICAL;
 logic        MMU_PTEST_START;
 logic        MMU_PTEST_CONSUME;
+logic        MMU_PTEST_ABORT;
+logic        MMU_PLOAD_ABORT;
 logic        MMU_PTEST_BUSY;
 logic        MMU_PTEST_READY;
 logic [15:0] MMU_PTEST_WALK_MMUSR;
