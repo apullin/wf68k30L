@@ -460,38 +460,28 @@ async def test_berr_on_speculative_prefetch_does_not_trap(dut):
     )
 
 
-@cocotb.test(skip=True)
+@cocotb.test()
 async def test_berr_on_store_stacks_the_storing_instruction(dut):
-    """A store that bus-faults must stack its own address; today it does not.
-
-    KNOWN DEFECT, deliberately left failing-but-skipped.
+    """UM 8.1.2: a faulted store stacks its own address, and RTE reruns the write.
 
     A short store (MOVE.L D3,(A0), CLR.L (A0), MOVE.L D0,(A0)+, any size) has the
-    following instruction dispatched before its write is acknowledged, so PC has
-    already advanced when the fault lands: the frame stacks 0x10E for a store at
-    0x10C. This is not cosmetic. RTE suppresses the pipe reload whenever the SSW
-    asks for a rerun, so the core reruns by re-executing from the restored PC --
-    which is past the store. The faulting write is therefore silently discarded.
-    Verified: handler runs once, RTE resumes at 0x10E, and the target is never
-    written.
+    following instruction dispatched before its write is acknowledged -- PC_INC
+    fires one cycle before ASn falls -- so the live PC already names the next
+    instruction when the fault arrives. Stacking that PC is not merely cosmetic:
+    RTE suppresses the pipe reload whenever the SSW asks for a rerun, so the core
+    reruns by re-executing from the restored PC. A frame carrying 0x10E for a
+    store at 0x10C therefore resumes *past* the store and discards the write
+    outright.
 
-    Two candidate local fixes were built and measured, and both fail:
+    Fixed by carrying a writeback-stage PC (PC_WB in the top-level datapath
+    helper) captured on ADR_MARK_USED, the same event that loads the
+    writeback-stage effective address ADR_EFF_WB, and selecting it for the
+    format $A/$B stacked PC when the faulted access was a core data write. PC
+    itself still advances at dispatch, because PC_EW_BASE needs it there.
 
-    - Freezing PC while a data cycle is outstanding does not help: the write
-      request asserts *after* the next instruction is dispatched, so PC is
-      already 0x10E at the first cycle of the data access.
-    - Gating OW_REQ on EXEC_WB_STATE == WRITE_DEST does fix all ten store cases
-      at no measured cycle cost, but breaks the MMU write-protect fault frame:
-      ADR_CPY snapshots the live ADR_EFF at exception entry, and removing the
-      overlapping dispatch changes what address_registers leaves there, so the
-      frame's fault address comes out 0.
-
-    The real fix is a design change rather than a patch: carry a PC value
-    alongside the writeback stage so a bus-fault frame can report the
-    instruction that owned the faulted access, and freeze the fault address the
-    same way (the bus interface already does this for the SSW via SSW_FROZEN).
-    Nothing in the current design tracks a writeback-stage PC -- PC_VAR_MEM is a
-    stack-writeback offset, not an instruction address.
+    This test therefore asserts the whole loop, not just the frame: the handler
+    runs exactly once, the stacked PC is the storing instruction, and the target
+    memory holds the stored value after the rerun.
     """
     h = CPUTestHarness(dut)
     bus = BerrOnceBusModel(dut, h.mem, times=1)
@@ -526,4 +516,136 @@ async def test_berr_on_store_stacks_the_storing_instruction(dut):
     )
     assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
         "Execution did not continue correctly after the RTE rerun"
+    )
+
+
+@cocotb.test()
+async def test_berr_on_clr_stacks_the_clearing_instruction(dut):
+    """The same rule holds for the other short-store forms, not just MOVE.
+
+    CLR reaches its write through a different arm of the mark-used logic than
+    MOVE does, and a word store is a different bus size, so both are checked
+    here: whichever instruction owns the faulted write is the one the format
+    $A/$B frame must name, and the write must land on the rerun.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrOnceBusModel(dut, h.mem, times=1)
+
+    store_addr = 0x000106
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x4290,                                   # 0x106 CLR.L (A0)  <- BERR
+        0x7421,                                   # 0x108 MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x10A MOVE.L D2,($20018).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x110 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x116 MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x11C STOP #$2700
+    ]
+    # Preloaded so a completed CLR is distinguishable from a discarded one.
+    h.mem.load_long(FAULT_ADDR, 0x5A5AA5A5)
+
+    found = await _boot(dut, h, bus, program, STORE_FAULT_HANDLER)
+
+    counter = h.mem.read(COUNTER_ADDR, 4)
+    pc = h.mem.read(PC_ADDR, 4)
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert counter == 1, f"Bus-error handler ran {counter} times (expected 1)"
+    assert pc == store_addr, (
+        f"Stacked PC = 0x{pc:08X}, expected 0x{store_addr:08X} (the CLR)"
+    )
+    assert found, "Program did not complete after the RTE rerun"
+    assert h.mem.read(FAULT_ADDR, 4) == 0, (
+        f"Faulted CLR was not rerun: 0x{FAULT_ADDR:06X} still holds "
+        f"0x{h.mem.read(FAULT_ADDR, 4):08X}"
+    )
+    assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
+        "Execution did not continue correctly after the RTE rerun"
+    )
+
+
+@cocotb.test()
+async def test_berr_on_word_store_stacks_the_storing_instruction(dut):
+    """A faulted word store must name itself too -- the defect was size-blind."""
+    h = CPUTestHarness(dut)
+    bus = BerrOnceBusModel(dut, h.mem, times=1)
+
+    store_addr = 0x00010A
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x363C, 0x5A5A,                           # 0x106 MOVE.W #$5A5A,D3
+        0x3083,                                   # 0x10A MOVE.W D3,(A0)  <- BERR
+        0x7421,                                   # 0x10C MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x10E MOVE.L D2,($20018).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x114 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x11A MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x120 STOP #$2700
+    ]
+
+    found = await _boot(dut, h, bus, program, STORE_FAULT_HANDLER)
+
+    counter = h.mem.read(COUNTER_ADDR, 4)
+    pc = h.mem.read(PC_ADDR, 4)
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert counter == 1, f"Bus-error handler ran {counter} times (expected 1)"
+    assert pc == store_addr, (
+        f"Stacked PC = 0x{pc:08X}, expected 0x{store_addr:08X} (the MOVE.W)"
+    )
+    assert found, "Program did not complete after the RTE rerun"
+    assert h.mem.read(FAULT_ADDR, 2) == 0x5A5A, (
+        f"Faulted word store was not rerun: 0x{FAULT_ADDR:06X} holds "
+        f"0x{h.mem.read(FAULT_ADDR, 2):04X}"
+    )
+    assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
+        "Execution did not continue correctly after the RTE rerun"
+    )
+
+
+@cocotb.test()
+async def test_berr_frame_reports_the_address_the_write_cycle_drove(dut):
+    """UM 8.1.2/Table 8-6: the fault address is the address of the faulted cycle.
+
+    A postincrement store makes the distinction observable. By the time the
+    exception is entered the address register has already advanced, so a fault
+    address snapshotted from the live effective address reports one operand past
+    the cycle that actually faulted -- $E0004 for a write to $E0000.
+
+    Only the frame is checked here. Recovering the write itself would need the
+    faulted bus cycle to be rerun rather than the instruction re-executed: this
+    core reruns by re-execution, and MOVE.L D3,(A0)+ re-executed with A0 already
+    incremented targets the following longword, so the original write cannot be
+    recovered from a format $A/$B frame alone.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrOnceBusModel(dut, h.mem, times=1)
+
+    store_addr = 0x00010C
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x263C, 0x5A5A, 0xA5A5,                   # 0x106 MOVE.L #$5A5AA5A5,D3
+        0x20C3,                                   # 0x10C MOVE.L D3,(A0)+  <- BERR
+        0x7421,                                   # 0x10E MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x110 MOVE.L D2,($20018).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x116 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x11C MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x122 STOP #$2700
+    ]
+
+    found = await _boot(dut, h, bus, program, STORE_FAULT_HANDLER)
+
+    # SSP_INIT 0x1000 less the 0x5C-byte format $B frame.
+    frame_base = h.SSP_INIT - 0x5C
+    fmt = h.mem.read(frame_base + 0x06, 2)
+    fault_adr = h.mem.read(frame_base + 0x10, 4)
+    pc = h.mem.read(PC_ADDR, 4)
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert found, "Bus-error handler never completed"
+    assert (fmt >> 12) == 0xB, f"Frame format = 0x{fmt >> 12:X}, expected 0xB"
+    assert pc == store_addr, (
+        f"Stacked PC = 0x{pc:08X}, expected 0x{store_addr:08X} (the store)"
+    )
+    assert fault_adr == FAULT_ADDR, (
+        f"Frame fault address = 0x{fault_adr:08X}, expected 0x{FAULT_ADDR:08X}. "
+        f"0x{FAULT_ADDR + 4:08X} means the field was taken from the live "
+        f"effective address after the postincrement rather than from the "
+        f"address the faulted write cycle drove"
     )

@@ -239,10 +239,18 @@ logic        PC_ADD_DISPL;
 logic [7:0]  PC_ADR_OFFSET;
 logic [3:0]  PC_EW_OFFSET;
 logic [3:0]  PC_EW_BASE;
-logic [31:0] PC_INSTR_EXH;
-logic        CYCLE_STERM_32;   // Burst eligibility: 32-bit synchronous cycle.
+logic [31:0] PC_INSTR_EXH;   // PC frozen at exception entry (format $2 IA field).
+logic [31:0] PC_WB;          // PC of the instruction owning the writeback stage.
+logic        DATA_WR_PENDING; // Core data write outstanding in the previous cycle.
+logic [31:0] PC_BF;          // Instruction PC for a format $A/$B bus-fault frame.
+logic [31:0] ADR_BF;         // Address the faulted write cycle drove.
+logic        BF_IS_WRITE;    // The faulted access was a core data write.
+logic        PC_BF_FROZEN;   // PC_BF/ADR_BF hold the faulted access's owner.
+logic [31:0] PC_STACKED;     // PC written to the frame at offset $2.
+logic [31:0] ADR_STACKED;    // Fault address written to the frame at offset $10.
+logic        CYCLE_STERM_32; // Burst eligibility: 32-bit synchronous cycle.
 logic        STERM_NOW;
-logic        CBACK_HONOURED;   // UM 6.1.3.2: CBACK only counts on a STERM cycle.   // PC frozen at exception entry (format $2 IA field).
+logic        CBACK_HONOURED; // UM 6.1.3.2: CBACK only counts on a STERM cycle.
 logic        PC_INC;
 logic        PC_INC_EXH;
 logic        PC_INC_EXH_I;
