@@ -39,6 +39,7 @@ module WF68K30L_CTRL_COMB #(
     input  logic        DATA_RDY,
     input  logic        DATA_VALID,
     input  logic        MEMADR_RDY,
+    input  logic        MEMADR_ADR_RDY,
     input  logic        READ_CYCLE,
     input  logic        WRITE_CYCLE,
 
@@ -323,7 +324,13 @@ assign DATA_RD_I = (DATA_WR_I && !READ_CYCLE && !WRITE_CYCLE) ? 1'b0 : // Write 
                    (WRITE_CYCLE) ? 1'b0 : // Do not read during a write cycle.
                    (ADR_IN_USE) ? 1'b0 : // Avoid data hazards.
                    (DATA_RDY || MEMADR_RDY) ? 1'b0 :
-                   (FETCH_STATE == FETCH_MEMADR) ? 1'b1 :
+                   // The intermediate address only reaches ADR_EFF_I one cycle
+                   // after FETCH_MEM_ADR is asserted (PRM 2.2 / Table 2-4: the
+                   // intermediate address is bd + An + Xn.SIZE*SCALE, a sum the
+                   // address section selects only while FETCH_MEM_ADR is high).
+                   // Issuing the read on the entry cycle sends it to whatever
+                   // ADR_EFF_I held before, so wait for MEMADR_ADR_RDY.
+                   (FETCH_STATE == FETCH_MEMADR) ? MEMADR_ADR_RDY :
                    (FETCH_STATE == FETCH_OPERAND) ? 1'b1 : 1'b0;
 
 assign DATA_WR = DATA_WR_I;
@@ -369,7 +376,16 @@ assign STORE_IDATA_B1 = (FETCH_STATE == FETCH_IDATA_B1 && EW_ACK) ? 1'b1 : 1'b0;
 // LOAD_OP1 / LOAD_OP2 / LOAD_OP3
 // ====================================================================
 
-assign LOAD_OP1 = (OP == BFINS && INIT_ENTRY) ? 1'b1 : // Load insertion pattern.
+// Load the BFINS insertion pattern while read port 2 selects it; see the BFINS
+// arms of DR_SEL_RD_2 in wf68k30L_ctrl_regsel.sv.  A register destination is
+// decided in START_OP, so INIT_ENTRY is inside the insert window there.  A
+// memory destination reads its operand in FETCH_OPERAND, whose acknowledge
+// cycle needs port 2 back on the width register to restore BF_BYTES, so the
+// pattern is loaded during the read instead -- OP1_BUFFER holds it until
+// ALU_INIT.  RD_RDY cannot be asserted on the first FETCH_OPERAND cycle
+// (READ_CYCLE is registered from DATA_RD), so the window is never empty.
+assign LOAD_OP1 = (OP == BFINS && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 : // Load insertion pattern.
+                  (OP == BFINS && FETCH_STATE == FETCH_OPERAND && !RD_RDY) ? 1'b1 : // Load insertion pattern.
                   ((OP == CHK2 || OP == CMP2) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && !PHASE2) ? 1'b1 :
                   (OP == CMPM && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && PHASE2) ? 1'b1 :
                   (OP == MOVE && BIW_0[8:6] == 3'b100 && BIW_0[5:3] == 3'b001 && BIW_0[11:9] == BIW_0[2:0] && INIT_ENTRY) ? 1'b1 : // Load early to write the undecremented Register for Ax, -(Ax).

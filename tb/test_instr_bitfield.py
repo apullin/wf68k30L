@@ -29,47 +29,34 @@ for BFTST before performing the specified operation."
 Every expected value in this module was cross-checked against
 `qemu-system-m68k -cpu m68030`.
 
-Two RTL defects are left failing here on purpose, both in files owned by other
-agents.  Each affected test carries the defect tag in its name.
+Two RTL defects this module was written to expose have since been fixed and are
+recorded here because the shapes they broke are what several of the tests below
+are for.
 
-BF-2 - sub-long bit-field memory operands are misaligned.
-  `sv/wf68k30L_ctrl_comb.sv:456-457` sizes a bit-field memory access as LONG
-  only when `BF_BYTES > 2`, so a field that fits in one byte uses a BYTE cycle
-  and one that fits in two uses a WORD cycle.  Those cycles deliver the data
-  right-justified in `DATA_TO_CORE`, while the ALU's 40-bit window
-  `BF_DATA_IN = {OP3, OP2[7:0]}` (`sv/wf68k30L_alu.sv:329`) requires the byte at
-  the effective address to be at `OP3[31:24]`.  Measured for
-  `BFEXTU (A1){0:8},D2` over 12 34 56 78: bus read is `SIZE=1` at 0x010000,
-  `OP3 = 0x00000012`, `BF_DATA_IN = 0x0000001200`, and with `BF_UPPER_BND = 39`
-  / `BF_LOWER_BND = 32` the ALU extracts bits 39:32 = 0x00.  Result 0, Z=1;
-  required 0x12, Z=0.  For `BFCLR (A1){0:16}` the same misalignment makes
-  `BF_DATA_IN & ~bf_mask` equal to `BF_DATA_IN`, so the word write puts the
-  original 0x1234 back and memory never changes.  Three-, four- and five-byte
-  accesses already promote to a LONG read and are correct, which is why only
-  fields of width <= 16 at small offsets fail.
-  Verified fix (applied temporarily in this worktree, then reverted): change
-  both `BF_BYTES > 2` terms at ctrl_comb.sv:456-457 to
-  `BF_BYTES > 0 && BF_HILOn`.  The `BF_HILOn` term keeps the five-byte tail
-  access a BYTE read.  That alone turns 12 of the failures here green.
+BF-2 - sub-long bit-field memory operands were misaligned.  `ctrl_comb.sv` sized
+  a bit-field memory access as LONG only when `BF_BYTES > 2`, so a field fitting
+  in one or two bytes used a BYTE/WORD cycle, which delivers the data
+  right-justified in `DATA_TO_CORE` while the ALU's 40-bit window
+  `BF_DATA_IN = {OP3, OP2[7:0]}` needs the byte at the effective address at
+  `OP3[31:24]`.  Fields of width <= 16 at small offsets read as zero, and the
+  read-modify-write forms wrote the operand back unchanged.  Now sized
+  `BF_BYTES > 0 && BF_HILOn`, the `BF_HILOn` term keeping the five-byte tail
+  access a BYTE read.
 
-BF-3 - the field offset, the field width and the BFINS insert value share one
-  register-file read port.
-  `sv/wf68k30L_operand_mux.sv:452-453` sources `BF_OFFSET` (when Do=1) and
-  `BF_WIDTH` (when Dw=1) from the same `DR_OUT_1`, and
-  `sv/wf68k30L_ctrl_regsel.sv:257-258` drives that port's selector from the
-  offset-register field `BIW_1[8:6]`.  Consequences measured on the RTL:
-    - `BFEXTU D1{D4:D5},D2` with D1=0x12345678, D4=4, D5=8 gives D2=0x00000002.
-      The offset is right (4) but the width comes from D4, so the field
-      evaluated is {4:4} = 0x2 rather than {4:8} = 0x23.
-    - a memory-destination `BFINS` reads its insert value from
-      `D[BIW_1[8:6]]`, which for an immediate offset is the low three bits of
-      that offset.  `BFINS D3,(A1){0:8}` with D3=0xA5 selects D0 (=0) and
-      writes 0x00 over the byte; `BFINS D3,(A1){4:16}` selects D4 (=0).
-      The register-destination BFINS forms are unaffected because an earlier
-      arm of the same selector picks `BIW_0[2:0]` while FETCH_STATE=START_OP.
-  Fixing this needs a second read port (or a two-phase load) for the width and
-  insert operands, in `operand_mux.sv` and `ctrl_regsel.sv`.  Faithfully ported
-  from `vhdl/wf68k30L_top.vhd:685-686`, so not a port regression.
+BF-3 - the field offset, the field width and the BFINS insert value shared one
+  register-file read port.  A register width was taken from `DR_OUT_1`, whose
+  selector for bit-field operations is the *offset* register field `BIW_1[8:6]`.
+  Seven of the eight operations now take a register width from read port 2,
+  whose selector is the width field `BIW_1[2:0]`.  BFINS needs a third value at
+  the same time -- its insert operand, `BIW_1[14:12]` -- so port 2 is
+  time-shared: `ctrl_regsel.sv` selects the insert register only in the cycles
+  in which `LOAD_OP1` captures it into the ALU's `OP1_BUFFER` (START_OP for a
+  register destination, the destination read in FETCH_OPERAND for a memory one)
+  and the width register in every cycle in which `BF_WIDTH` is consumed.  The
+  tests whose names mention a register written by the previous instruction bound
+  the hazard slack that time-sharing leaves.
+  Faithfully ported from `vhdl/wf68k30L_top.vhd:685-686`, so not a port
+  regression.
 """
 
 import cocotb
@@ -504,12 +491,7 @@ async def test_bfins_reg_uses_only_low_bits_of_source(dut):
 @cocotb.test()
 async def test_bfextu_reg_offset_and_width_from_registers(dut):
     """BFEXTU D1{D4:D5},D2 with D4=4, D5=8 matches the immediate form.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     vals, ccr = await _run_reg(
         dut,
         _load_long(1, 0x12345678) + _load_long(4, 4) + _load_long(5, 8),
@@ -523,12 +505,7 @@ async def test_bfextu_reg_offset_modulo_32(dut):
     """A register offset of 36 selects the same field as 4 on a Dn operand.
 
     PRM: for a data register operand the offset is taken modulo 32.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     vals, _ = await _run_reg(
         dut,
         _load_long(1, 0x12345678) + _load_long(4, 36) + _load_long(5, 8),
@@ -565,12 +542,7 @@ async def test_bfextu_reg_width_from_register_modulo_32(dut):
 @cocotb.test()
 async def test_bfextu_reg_negative_offset_wraps(dut):
     """A register offset of -4 on a Dn operand selects bits 3:0 (offset 28).
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     vals, ccr = await _run_reg(
         dut,
         _load_long(1, 0x12345678) + _load_long(4, 0xFFFFFFFC) + _load_long(5, 4),
@@ -581,7 +553,12 @@ async def test_bfextu_reg_negative_offset_wraps(dut):
 
 @cocotb.test()
 async def test_bfins_reg_offset_and_width_from_registers(dut):
-    """BFINS D3,D1{D4:D5} with a register-supplied offset and width."""
+    """BFINS D3,D1{D4:D5} with a register-supplied offset and width.
+
+    D4 and D5 deliberately hold the same value here; the cases below use
+    different ones, which is what distinguishes the width register from the
+    offset register.
+    """
     vals, ccr = await _run_reg(
         dut,
         _load_long(1, 0x00000000) + _load_long(3, 0xABC) +
@@ -589,6 +566,168 @@ async def test_bfins_reg_offset_and_width_from_registers(dut):
         bfins(3, DN, 1, 4, 5, do=1, dw=1), [1])
     assert vals[0] == 0x000ABC00, f"expected 0x000ABC00, got 0x{vals[0]:08X}"
     assert_nzvc("BFINS D1{D4:D5}", ccr, n=1, z=0)
+
+
+@cocotb.test()
+async def test_bfins_reg_width_from_register_immediate_offset(dut):
+    """BFINS D3,D1{4:D5} - register width, immediate offset.
+
+    PRM BFINS: "If Dw = 1, the width field specifies a data register that
+    contains the width."  BFINS is the one bit-field instruction that also needs
+    a third register value at the same time (the insert operand, extension word
+    bits 14-12), so a register width here has to come from a different read than
+    either the offset or the insert value.
+
+    D0 is seeded with 0x11 so that reading the width from the wrong register
+    cannot accidentally produce 8: with an immediate offset of 4 the offset
+    register field of the extension word is 0b100, and its low three bits are
+    also what a width taken from the offset selector would name.
+    """
+    vals, ccr = await _run_reg(
+        dut,
+        _load_long(0, 0x11) + _load_long(4, 0x11) +
+        _load_long(1, 0xFFFFFFFF) + _load_long(3, 0x5A) + _load_long(5, 8),
+        bfins(3, DN, 1, 4, 5, dw=1), [1])
+    assert vals[0] == 0xF5AFFFFF, (
+        f"BFINS D3,D1{{4:D5}} with D5=8 expected 0xF5AFFFFF, got 0x{vals[0]:08X}")
+    assert_nzvc("BFINS D1{4:D5}", ccr, n=0, z=0)
+
+
+@cocotb.test()
+async def test_bfins_reg_width_and_offset_from_different_registers(dut):
+    """BFINS D3,D1{D4:D5} with D4=4 and D5=8 - offset and width differ.
+
+    Same field as BFINS D3,D1{4:8}.  Taking the width from the offset register
+    would evaluate {4:4} and insert only the low four bits of D3.
+    """
+    vals, ccr = await _run_reg(
+        dut,
+        _load_long(1, 0xFFFFFFFF) + _load_long(3, 0x5A) +
+        _load_long(4, 4) + _load_long(5, 8),
+        bfins(3, DN, 1, 4, 5, do=1, dw=1), [1])
+    assert vals[0] == 0xF5AFFFFF, (
+        f"BFINS D3,D1{{D4:D5}} with D4=4 D5=8 expected 0xF5AFFFFF, "
+        f"got 0x{vals[0]:08X}")
+    assert_nzvc("BFINS D1{D4=4:D5=8}", ccr, n=0, z=0)
+
+
+@cocotb.test()
+async def test_bfins_reg_width_from_register_zero_is_32(dut):
+    """A register width of 0 means 32 for BFINS as well.
+
+    PRM: "a value of zero specifies a width of 32."  D0 holds 8 so that a width
+    read through the offset-register selector (which an immediate offset of 0
+    makes 0b000) would give 8 and replace only the top byte.
+    """
+    vals, _ = await _run_reg(
+        dut,
+        _load_long(0, 8) +
+        _load_long(1, 0x00000000) + _load_long(3, 0xDEADBEEF) +
+        _load_long(5, 0),
+        bfins(3, DN, 1, 0, 5, dw=1), [1])
+    assert vals[0] == 0xDEADBEEF, (
+        f"BFINS D3,D1{{0:D5}} with D5=0 (width 32) expected 0xDEADBEEF, "
+        f"got 0x{vals[0]:08X}")
+
+
+@cocotb.test()
+async def test_bfins_reg_width_register_written_by_previous_instruction(dut):
+    """The width register is written by the instruction immediately before BFINS.
+
+    The width is read a cycle later than the insert operand now, so the pending
+    write to it has to be seen by the fetch interlock rather than by luck.
+    """
+    vals, ccr = await _run_reg(
+        dut,
+        _load_long(1, 0xFFFFFFFF) + _load_long(3, 0x5A) + _load_long(4, 4) +
+        moveq(8, 5),                               # D5 = 8, immediately before
+        bfins(3, DN, 1, 4, 5, do=1, dw=1), [1])
+    assert vals[0] == 0xF5AFFFFF, (
+        f"BFINS D3,D1{{D4:D5}} with D5 written by the previous instruction "
+        f"expected 0xF5AFFFFF, got 0x{vals[0]:08X}")
+    assert_nzvc("BFINS D1{D4:D5} tight", ccr, n=0, z=0)
+
+
+@cocotb.test()
+async def test_bfins_reg_insert_register_written_by_previous_instruction(dut):
+    """The insert register is written by the instruction immediately before BFINS."""
+    vals, ccr = await _run_reg(
+        dut,
+        _load_long(1, 0xFFFFFFFF) + _load_long(4, 4) + _load_long(5, 8) +
+        moveq(0x5A, 3),                            # D3 = 0x5A, immediately before
+        bfins(3, DN, 1, 4, 5, do=1, dw=1), [1])
+    assert vals[0] == 0xF5AFFFFF, (
+        f"BFINS D3,D1{{D4:D5}} with D3 written by the previous instruction "
+        f"expected 0xF5AFFFFF, got 0x{vals[0]:08X}")
+    assert_nzvc("BFINS D1{D4:D5} tight insert", ccr, n=0, z=0)
+
+
+@cocotb.test()
+async def test_bfins_mem_width_from_register(dut):
+    """BFINS D3,(A1){D4:D5} with D4=4, D5=16 - register width, memory destination.
+
+    A memory destination reaches the insert operand in a different fetch state
+    than the register-direct forms, so it exercises the other half of the
+    port-sharing problem.  Same field as BFINS D3,(A1){4:16}.
+    """
+    _, ccr, mem = await _run_mem(
+        dut, FILL,
+        _load_long(3, 0xBEEF) + _load_long(4, 4) + _load_long(5, 16) +
+        bfins(3, AN_IND, 1, 4, 5, do=1, dw=1), [3], readback=4)
+    assert mem == [0x1B, 0xEE, 0xF6, 0x78], (
+        f"BFINS D3,(A1){{D4:D5}} with D4=4 D5=16 expected [1B,EE,F6,78], "
+        f"got {[f'{b:02X}' for b in mem]}")
+    assert_nzvc("BFINS (A1){D4:D5} 0xBEEF", ccr, n=1, z=0)
+
+
+@cocotb.test()
+async def test_bfins_mem_insert_register_written_by_previous_instruction(dut):
+    """A memory BFINS whose insert register is written immediately before it.
+
+    The memory form loads the insert operand while the destination read is in
+    flight, one cycle earlier than it used to, so the shorter slack is worth
+    pinning down.
+    """
+    _, ccr, mem = await _run_mem(
+        dut, FILL,
+        _load_long(4, 4) + _load_long(5, 16) +
+        _load_long(3, 0xBEEF) +
+        bfins(3, AN_IND, 1, 4, 5, do=1, dw=1), [3], readback=4)
+    assert mem == [0x1B, 0xEE, 0xF6, 0x78], (
+        f"BFINS D3,(A1){{D4:D5}} with D3 written by the previous instruction "
+        f"expected [1B,EE,F6,78], got {[f'{b:02X}' for b in mem]}")
+    assert_nzvc("BFINS (A1){D4:D5} tight insert", ccr, n=1, z=0)
+
+
+@cocotb.test()
+async def test_bfins_mem_width_register_written_by_previous_instruction(dut):
+    """A memory BFINS whose width register is written immediately before it."""
+    _, ccr, mem = await _run_mem(
+        dut, FILL,
+        _load_long(3, 0xBEEF) + _load_long(4, 4) + _load_long(5, 16) +
+        bfins(3, AN_IND, 1, 4, 5, do=1, dw=1), [3], readback=4)
+    assert mem == [0x1B, 0xEE, 0xF6, 0x78], (
+        f"BFINS D3,(A1){{D4:D5}} with D5 written by the previous instruction "
+        f"expected [1B,EE,F6,78], got {[f'{b:02X}' for b in mem]}")
+    assert_nzvc("BFINS (A1){D4:D5} tight width", ccr, n=1, z=0)
+
+
+@cocotb.test()
+async def test_bfins_mem_width_from_register_immediate_offset(dut):
+    """BFINS D3,(A1){4:D5} with D5=16 - register width, immediate offset, memory.
+
+    D4 is seeded with 0x11 because an immediate offset of 4 puts 0b100 in the
+    offset-register field, so a width read from that selector would name D4.
+    """
+    _, ccr, mem = await _run_mem(
+        dut, FILL,
+        _load_long(4, 0x11) +
+        _load_long(3, 0xBEEF) + _load_long(5, 16) +
+        bfins(3, AN_IND, 1, 4, 5, dw=1), [3], readback=4)
+    assert mem == [0x1B, 0xEE, 0xF6, 0x78], (
+        f"BFINS D3,(A1){{4:D5}} with D5=16 expected [1B,EE,F6,78], "
+        f"got {[f'{b:02X}' for b in mem]}")
+    assert_nzvc("BFINS (A1){4:D5} 0xBEEF", ccr, n=1, z=0)
 
 
 # =========================================================================
@@ -628,14 +767,7 @@ FILL = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]
 @cocotb.test()
 async def test_bftst_mem_byte_at_ea(dut):
     """BFTST (A1){0:8}: the field is the byte at the effective address.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     _, ccr, _ = await _run_mem(dut, FILL, bftst(AN_IND, 1, 0, 8), [])
     assert_nzvc("BFTST (A1){0:8} 0x12", ccr, n=0, z=0)
 
@@ -651,14 +783,7 @@ async def test_bftst_mem_zero_field(dut):
 @cocotb.test()
 async def test_bfextu_mem_byte_at_ea(dut):
     """BFEXTU (A1){0:8},D2 -> 0x12, the byte at the effective address.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     vals, ccr, _ = await _run_mem(dut, FILL, bfextu(AN_IND, 1, 0, 8, 2), [2])
     assert vals[0] == 0x00000012, f"expected 0x12, got 0x{vals[0]:08X}"
     assert_nzvc("BFEXTU (A1){0:8}", ccr, n=0, z=0)
@@ -669,14 +794,7 @@ async def test_bfextu_mem_straddles_byte_boundary(dut):
     """BFEXTU (A1){4:8},D2 spans the low nibble of byte 0 and the high of byte 1.
 
     Memory is 0x12 0x34, so the field is 0x23.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     vals, ccr, _ = await _run_mem(dut, FILL, bfextu(AN_IND, 1, 4, 8, 2), [2])
     assert vals[0] == 0x00000023, f"expected 0x23, got 0x{vals[0]:08X}"
     assert_nzvc("BFEXTU (A1){4:8}", ccr, n=0, z=0)
@@ -685,14 +803,7 @@ async def test_bfextu_mem_straddles_byte_boundary(dut):
 @cocotb.test()
 async def test_bfextu_mem_twelve_bits_straddling(dut):
     """BFEXTU (A1){12:12},D2 over 0x12 0x34 0x56 -> 0x456.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     vals, _, _ = await _run_mem(dut, FILL, bfextu(AN_IND, 1, 12, 12, 2), [2])
     assert vals[0] == 0x00000456, f"expected 0x456, got 0x{vals[0]:08X}"
 
@@ -728,14 +839,7 @@ async def test_bfextu_mem_single_bit(dut):
 @cocotb.test()
 async def test_bfexts_mem_straddling(dut):
     """BFEXTS (A1){4:8},D2 -> 0x23 (positive field, no sign extension).
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     vals, ccr, _ = await _run_mem(dut, FILL, bfexts(AN_IND, 1, 4, 8, 2), [2])
     assert vals[0] == 0x00000023, f"expected 0x23, got 0x{vals[0]:08X}"
     assert_nzvc("BFEXTS (A1){4:8}", ccr, n=0, z=0)
@@ -748,14 +852,7 @@ async def test_bfexts_mem_field_spanning_long_boundary(dut):
     0x78 = 0111 1000, so offset 31 is 0; 0x9A = 1001 1010 supplies the next
     seven bits, giving the field 0100 1101 = 0x4D.  This is a two-byte access
     that crosses the aligned long-word boundary at the effective address.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     vals, ccr, _ = await _run_mem(dut, FILL, bfexts(AN_IND, 1, 31, 8, 2), [2])
     assert vals[0] == 0x0000004D, f"expected 0x4D, got 0x{vals[0]:08X}"
     assert_nzvc("BFEXTS (A1){31:8}", ccr, n=0, z=0)
@@ -788,14 +885,7 @@ async def test_bfffo_mem_empty_field(dut):
 @cocotb.test()
 async def test_bfchg_mem_byte_at_ea(dut):
     """BFCHG (A1){0:8}: 0x12 becomes 0xED, rest of memory untouched.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     _, ccr, mem = await _run_mem(dut, FILL, bfchg(AN_IND, 1, 0, 8), [], readback=4)
     assert mem == [0xED, 0x34, 0x56, 0x78], (
         f"expected [ED,34,56,78], got {[f'{b:02X}' for b in mem]}")
@@ -805,14 +895,7 @@ async def test_bfchg_mem_byte_at_ea(dut):
 @cocotb.test()
 async def test_bfchg_mem_straddling(dut):
     """BFCHG (A1){4:8} over 0x12 0x34 -> 0x1D 0xC4: only the field flips.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     _, ccr, mem = await _run_mem(dut, FILL, bfchg(AN_IND, 1, 4, 8), [], readback=4)
     assert mem == [0x1D, 0xC4, 0x56, 0x78], (
         f"expected [1D,C4,56,78], got {[f'{b:02X}' for b in mem]}")
@@ -822,14 +905,7 @@ async def test_bfchg_mem_straddling(dut):
 @cocotb.test()
 async def test_bfclr_mem_word_field(dut):
     """BFCLR (A1){0:16} zeroes the first two bytes only.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     _, ccr, mem = await _run_mem(dut, FILL, bfclr(AN_IND, 1, 0, 16), [], readback=4)
     assert mem == [0x00, 0x00, 0x56, 0x78], (
         f"expected [00,00,56,78], got {[f'{b:02X}' for b in mem]}")
@@ -839,14 +915,7 @@ async def test_bfclr_mem_word_field(dut):
 @cocotb.test()
 async def test_bfclr_mem_straddling(dut):
     """BFCLR (A1){4:8} over 0x12 0x34 -> 0x10 0x04.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     _, _, mem = await _run_mem(dut, FILL, bfclr(AN_IND, 1, 4, 8), [], readback=4)
     assert mem == [0x10, 0x04, 0x56, 0x78], (
         f"expected [10,04,56,78], got {[f'{b:02X}' for b in mem]}")
@@ -855,14 +924,7 @@ async def test_bfclr_mem_straddling(dut):
 @cocotb.test()
 async def test_bfset_mem_straddling(dut):
     """BFSET (A1){4:8} over 0x12 0x34 -> 0x1F 0xF4.
-
-    KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
-    that spans only one or two bytes is read and written with a BYTE/WORD-sized
-    bus cycle, and the data arrives right-justified in DATA_TO_CORE, but the
-    ALU's 40-bit bit-field window BF_DATA_IN = {OP3, OP2[7:0]} requires the byte
-    at the effective address to sit at OP3[31:24].  The field therefore reads as
-    zero and a read-modify-write form writes the operand back unchanged.
-"""
+    """
     _, _, mem = await _run_mem(dut, FILL, bfset(AN_IND, 1, 4, 8), [], readback=4)
     assert mem == [0x1F, 0xF4, 0x56, 0x78], (
         f"expected [1F,F4,56,78], got {[f'{b:02X}' for b in mem]}")
@@ -887,12 +949,7 @@ async def test_bfset_mem_five_byte_access(dut):
 @cocotb.test()
 async def test_bfins_mem_byte_at_ea(dut):
     """BFINS D3,(A1){0:8} with D3=0xA5 writes one byte; N=1 from the insert.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     vals, ccr, mem = await _run_mem(dut, FILL,
                                     _load_long(3, 0xA5) + bfins(3, AN_IND, 1, 0, 8),
                                     [3], readback=4)
@@ -904,12 +961,7 @@ async def test_bfins_mem_byte_at_ea(dut):
 @cocotb.test()
 async def test_bfins_mem_straddling(dut):
     """BFINS D3,(A1){4:8} with D3=0x5A -> 0x15 0xA4.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     _, ccr, mem = await _run_mem(dut, FILL,
                                  _load_long(3, 0x5A) + bfins(3, AN_IND, 1, 4, 8),
                                  [3], readback=4)
@@ -921,12 +973,7 @@ async def test_bfins_mem_straddling(dut):
 @cocotb.test()
 async def test_bfins_mem_sixteen_bits_straddling(dut):
     """BFINS D3,(A1){4:16} with D3=0xBEEF -> 0x1B 0xEE 0xF6.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     _, ccr, mem = await _run_mem(dut, FILL,
                                  _load_long(3, 0xBEEF) + bfins(3, AN_IND, 1, 4, 16),
                                  [3], readback=4)
@@ -938,12 +985,7 @@ async def test_bfins_mem_sixteen_bits_straddling(dut):
 @cocotb.test()
 async def test_bfins_mem_full_long(dut):
     """BFINS D3,(A1){0:32} replaces the aligned long.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     _, _, mem = await _run_mem(dut, FILL,
                                _load_long(3, 0xDEADBEEF) + bfins(3, AN_IND, 1, 0, 0),
                                [3], readback=5)
@@ -954,12 +996,7 @@ async def test_bfins_mem_full_long(dut):
 @cocotb.test()
 async def test_bfins_mem_five_byte_access(dut):
     """BFINS D3,(A1){4:32} writes across five bytes: 0x1D EA DB EE Fx.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     _, _, mem = await _run_mem(dut, FILL,
                                _load_long(3, 0xDEADBEEF) + bfins(3, AN_IND, 1, 4, 0),
                                [3], readback=6)
@@ -975,12 +1012,7 @@ async def test_bfextu_mem_offset_past_bit31_is_not_modulo(dut):
     the offset.  The value is in the range of -2^31 to 2^31-1."  Offset 32 on a
     memory operand selects the byte one past the effective address (0x9A here);
     only Dn operands wrap.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     vals, ccr, _ = await _run_mem(
         dut, FILL,
         _load_long(4, 32) + _load_long(5, 8) +
@@ -992,12 +1024,7 @@ async def test_bfextu_mem_offset_past_bit31_is_not_modulo(dut):
 @cocotb.test()
 async def test_bfextu_mem_offset_36_straddles(dut):
     """BFEXTU (A1){D4:D5},D2 with D4=36 -> 0xAB from 0x9A 0xBC.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     vals, _, _ = await _run_mem(
         dut, FILL,
         _load_long(4, 36) + _load_long(5, 8) +
@@ -1011,12 +1038,7 @@ async def test_bfextu_mem_negative_offset_reads_below_ea(dut):
 
     A1 points at DATA_BASE+8 and D4 = -8, so the field is the byte at
     DATA_BASE+7 (0xF0).
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     vals, ccr, _ = await _run_mem(
         dut, FILL,
         _load_long(4, 0xFFFFFFF8) + _load_long(5, 8) +
@@ -1028,12 +1050,7 @@ async def test_bfextu_mem_negative_offset_reads_below_ea(dut):
 @cocotb.test()
 async def test_bfclr_mem_offset_and_width_from_registers(dut):
     """BFCLR (A1){D4:D5} with a register offset and width clears 0x12 0x34.
-
-    KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
-    width, the register-supplied field offset and the BFINS insert value all
-    read the same register file port, whose selector for bit-field operations is
-    the offset-register field of the extension word.
-"""
+    """
     _, _, mem = await _run_mem(
         dut, FILL,
         _load_long(4, 4) + _load_long(5, 8) +
