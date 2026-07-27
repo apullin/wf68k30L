@@ -119,14 +119,9 @@ logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_CI_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*3-1:0] MMU_ATC_FC_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT;
-// Descriptor-shadow store backing MMU walk helpers. Keep 64 sets so existing
-// address hashing remains stable, but add a second way to avoid false
-// evictions between root/leaf descriptors that alias the same set.
-localparam int MMU_DESC_SHADOW_LINES = 128;
-localparam int MMU_DESC_SHADOW_WAYS = 2;
-localparam int MMU_DESC_SHADOW_SETS = MMU_DESC_SHADOW_LINES / MMU_DESC_SHADOW_WAYS;
-localparam int MMU_DESC_SHADOW_SET_BITS = $clog2(MMU_DESC_SHADOW_SETS);
-localparam int MMU_DESC_SHADOW_WAY_BITS = (MMU_DESC_SHADOW_WAYS > 1) ? $clog2(MMU_DESC_SHADOW_WAYS) : 1;
+// The descriptor-shadow store that used to back the MMU walk helpers is gone:
+// every table search -- runtime, PLOAD and PTEST -- reads its descriptors from
+// memory over the bus (UM 9.5.2), so there is no internal copy to size.
 
 // Remaining datapath, handshake, trap, and runtime-translation signals.
 logic        DR_WR_1;

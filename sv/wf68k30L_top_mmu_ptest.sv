@@ -1,3 +1,26 @@
+//--------------------------------------------------------------------//
+//                                                                    //
+// PTEST table-search sequencer (UM 9.8).                             //
+//                                                                    //
+// "PTEST ... performs a search of the address translation tables"     //
+// (UM 9.8), and UM 9.5.2 defines that search as reading descriptors   //
+// from memory at physical addresses. This sequencer therefore drives  //
+// the same descriptor-bus port the runtime and PLOAD search use, via  //
+// DESC_REQ/DESC_DONE, rather than any internal copy of memory: a      //
+// table that is resident and valid can no longer be reported as       //
+// MMUSR.B, and MMUSR.B now means a real BERR on a descriptor cycle.   //
+//                                                                    //
+// The search leaves the ATC untouched (UM 9.8: PTEST does not load    //
+// the ATC) and never writes a descriptor -- the U/M history update is //
+// the runtime search's business, since it is what is about to allow   //
+// an access to the page. PTEST allows nothing, so it has nothing to   //
+// record.                                                            //
+//                                                                    //
+// Ownership of the shared port is arbitrated outside this module; see //
+// the descriptor-bus banner in wf68k30L_top_routing_bus_cache.sv.     //
+//                                                                    //
+//--------------------------------------------------------------------//
+
 (* keep_hierarchy = "yes" *)
 module WF68K30L_TOP_MMU_PTEST (
     input  logic        CLK,
@@ -10,9 +33,13 @@ module WF68K30L_TOP_MMU_PTEST (
     input  logic [2:0]  PTEST_FC,
     input  logic [31:0] PTEST_LOGICAL,
     input  logic [2:0]  PTEST_LEVEL,
-    output logic        SHADOW_RD_EN,
-    output logic [31:0] SHADOW_RD_ADDR,
-    input  logic [32:0] SHADOW_LOOKUP,
+    // Descriptor-bus port shared with the runtime/PLOAD table search. DESC_REQ
+    // names the descriptor this search wants; DESC_DONE reports the bus cycle
+    // the port ran for it and DESC_LOOKUP carries {no bus error, data}.
+    output logic        DESC_REQ,
+    output logic [31:0] DESC_ADDR,
+    input  logic        DESC_DONE,
+    input  logic [32:0] DESC_LOOKUP,
     output logic        PTEST_BUSY,
     output logic        PTEST_READY,
     output logic [15:0] PTEST_WALK_MMUSR,
@@ -73,8 +100,8 @@ logic [31:0] walk_fetch_lo_word_r;
 logic [31:0] walk_fetch_hi_word_r;
 logic        walk_fetch_lo_valid_r;
 logic        walk_fetch_hi_valid_r;
-// The indirect descriptor address exists only as the shadow request, so it has
-// to be held until the fetch is known to have succeeded.
+// The indirect descriptor address exists only as the bus request, so it has to
+// be held until the fetch is known to have succeeded.
 logic [31:0] walk_indirect_addr_r;
 
 function automatic logic [15:0] ptest_root_mmusr(
@@ -124,27 +151,30 @@ begin
 end
 endfunction
 
-always_comb begin : ptest_shadow_req
-    SHADOW_RD_EN = 1'b0;
-    SHADOW_RD_ADDR = 32'h0000_0000;
+// The requesting state names the descriptor access, exactly as the runtime
+// walk's does. The request is a level: it stays asserted until the shared
+// descriptor-bus port answers with DESC_DONE.
+always_comb begin : ptest_desc_req
+    DESC_REQ = 1'b0;
+    DESC_ADDR = 32'h0000_0000;
     case (ptest_state_r)
         PTEST_ST_FETCH_LO_REQ: begin
-            SHADOW_RD_EN = 1'b1;
-            SHADOW_RD_ADDR = walk_desc_addr_r;
+            DESC_REQ = 1'b1;
+            DESC_ADDR = walk_desc_addr_r;
         end
         PTEST_ST_FETCH_HI_REQ: begin
-            SHADOW_RD_EN = 1'b1;
-            SHADOW_RD_ADDR = walk_desc_addr_r + 32'd4;
+            DESC_REQ = 1'b1;
+            DESC_ADDR = walk_desc_addr_r + 32'd4;
         end
         PTEST_ST_INDIRECT_LO_REQ: begin
-            SHADOW_RD_EN = 1'b1;
-            SHADOW_RD_ADDR = (walk_desc_dt_r == 2'b10) ?
-                             {walk_desc_ptr_r[31:2], 2'b00} :
-                             {walk_desc_ptr_r[31:3], 3'b000};
+            DESC_REQ = 1'b1;
+            DESC_ADDR = (walk_desc_dt_r == 2'b10) ?
+                        {walk_desc_ptr_r[31:2], 2'b00} :
+                        {walk_desc_ptr_r[31:3], 3'b000};
         end
         PTEST_ST_INDIRECT_HI_REQ: begin
-            SHADOW_RD_EN = 1'b1;
-            SHADOW_RD_ADDR = {walk_desc_ptr_r[31:3], 3'b000} + 32'd4;
+            DESC_REQ = 1'b1;
+            DESC_ADDR = {walk_desc_ptr_r[31:3], 3'b000} + 32'd4;
         end
         default: begin end
     endcase
@@ -345,13 +375,17 @@ always_ff @(posedge CLK) begin : ptest_fsm
                 end
             end
 
+            // The RESP states double as the one-cycle gap that lets the shared
+            // port retire its DONE before the next request is raised, so a
+            // stale DONE can never be mistaken for the next fetch's.
             PTEST_ST_FETCH_LO_REQ: begin
-                ptest_state_r <= PTEST_ST_FETCH_LO_RESP;
+                if (DESC_DONE)
+                    ptest_state_r <= PTEST_ST_FETCH_LO_RESP;
             end
 
             PTEST_ST_FETCH_LO_RESP: begin
-                walk_fetch_lo_word_r <= SHADOW_LOOKUP[31:0];
-                walk_fetch_lo_valid_r <= SHADOW_LOOKUP[32];
+                walk_fetch_lo_word_r <= DESC_LOOKUP[31:0];
+                walk_fetch_lo_valid_r <= DESC_LOOKUP[32];
                 if (walk_desc_size_r == 4'd8) begin
                     ptest_state_r <= PTEST_ST_FETCH_HI_REQ;
                 end else begin
@@ -362,12 +396,13 @@ always_ff @(posedge CLK) begin : ptest_fsm
             end
 
             PTEST_ST_FETCH_HI_REQ: begin
-                ptest_state_r <= PTEST_ST_FETCH_HI_RESP;
+                if (DESC_DONE)
+                    ptest_state_r <= PTEST_ST_FETCH_HI_RESP;
             end
 
             PTEST_ST_FETCH_HI_RESP: begin
-                walk_fetch_hi_word_r <= SHADOW_LOOKUP[31:0];
-                walk_fetch_hi_valid_r <= SHADOW_LOOKUP[32];
+                walk_fetch_hi_word_r <= DESC_LOOKUP[31:0];
+                walk_fetch_hi_valid_r <= DESC_LOOKUP[32];
                 ptest_state_r <= PTEST_ST_EVAL;
             end
 
@@ -488,13 +523,15 @@ always_ff @(posedge CLK) begin : ptest_fsm
             end
 
             PTEST_ST_INDIRECT_LO_REQ: begin
-                walk_indirect_addr_r <= SHADOW_RD_ADDR;
-                ptest_state_r <= PTEST_ST_INDIRECT_LO_RESP;
+                if (DESC_DONE) begin
+                    walk_indirect_addr_r <= DESC_ADDR;
+                    walk_fetch_lo_word_r <= DESC_LOOKUP[31:0];
+                    walk_fetch_lo_valid_r <= DESC_LOOKUP[32];
+                    ptest_state_r <= PTEST_ST_INDIRECT_LO_RESP;
+                end
             end
 
             PTEST_ST_INDIRECT_LO_RESP: begin
-                walk_fetch_lo_word_r <= SHADOW_LOOKUP[31:0];
-                walk_fetch_lo_valid_r <= SHADOW_LOOKUP[32];
                 if (walk_desc_dt_r == 2'b10)
                     ptest_state_r <= PTEST_ST_INDIRECT_HI_RESP;
                 else
@@ -502,7 +539,8 @@ always_ff @(posedge CLK) begin : ptest_fsm
             end
 
             PTEST_ST_INDIRECT_HI_REQ: begin
-                ptest_state_r <= PTEST_ST_INDIRECT_HI_RESP;
+                if (DESC_DONE)
+                    ptest_state_r <= PTEST_ST_INDIRECT_HI_RESP;
             end
 
             PTEST_ST_INDIRECT_HI_RESP: begin
@@ -528,7 +566,10 @@ always_ff @(posedge CLK) begin : ptest_fsm
                         walk_done = 1'b1;
                     end
                 end else begin
-                    if (!walk_fetch_lo_valid_r || !SHADOW_LOOKUP[32]) begin
+                    // The high longword of a long indirect descriptor is only
+                    // checked for a bus error; PTEST reports status, not a
+                    // physical address, so its data is never needed.
+                    if (!walk_fetch_lo_valid_r || !DESC_LOOKUP[32]) begin
                         walk_fault = 1'b1;
                         walk_bus_fault = 1'b1;
                     end else if (walk_fetch_lo_word_r[1:0] != 2'b01) begin

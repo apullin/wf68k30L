@@ -596,19 +596,9 @@ async def test_mmu_ptest_level7_short_walk_reports_n_w_m(dut):
     tc_val = 0x80C08840
 
     program = [
-        # The PTEST search still reads the snooped descriptor shadow, so its
-        # tree has to be walked into the shadow first. The runtime/PLOAD
-        # search reads descriptors from the bus and needs no priming.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 3),
-        *imm_long(desc_b_addr),
-        *move(LONG, AN_IND, 3, DN, 3),
-        *movea(LONG, SPECIAL, IMMEDIATE, 4),
-        *imm_long(desc_c_addr),
-        *move(LONG, AN_IND, 4, DN, 4),
-
+        # Nothing primes the tree: the PTEST search reads every descriptor from
+        # memory over the bus (UM 9.5.2/9.8), so the descriptors below exist
+        # only because the testbench placed them there.
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
         0xF016, 0x0800,                       # PMOVE (A6),TT0
@@ -743,16 +733,9 @@ async def test_mmu_ptest_level7_long_supervisor_violation_sets_s_i(dut):
     tc_val = 0x80C08840
 
     program = [
-        # The PTEST search still reads the snooped descriptor shadow, so its
-        # tree has to be walked into the shadow first. The runtime/PLOAD
-        # search reads descriptors from the bus and needs no priming.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr + 0),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr + 4),
-        *move(LONG, AN_IND, 2, DN, 2),
-
+        # Nothing primes the tree: the PTEST search reads every descriptor from
+        # memory over the bus (UM 9.5.2/9.8), so the descriptors below exist
+        # only because the testbench placed them there.
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
         0xF016, 0x0800,                       # PMOVE (A6),TT0
@@ -820,13 +803,9 @@ async def test_mmu_ptest_level7_invalid_descriptor_sets_i(dut):
     tc_val = 0x80C08840
 
     program = [
-        # The PTEST search still reads the snooped descriptor shadow, so its
-        # tree has to be walked into the shadow first. The runtime/PLOAD
-        # search reads descriptors from the bus and needs no priming.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-
+        # Nothing primes the tree: the PTEST search reads every descriptor from
+        # memory over the bus (UM 9.5.2/9.8), so the descriptors below exist
+        # only because the testbench placed them there.
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
         0xF016, 0x0800,                       # PMOVE (A6),TT0
@@ -1281,7 +1260,7 @@ async def test_mmu_runtime_short_descriptor_table_walk(dut):
             f"MMU_REQ={int(dut.MMU_RUNTIME_REQ.value)} "
             f"MMU_FAULT={int(dut.MMU_RUNTIME_FAULT.value)} "
             f"PC=0x{int(dut.PC.value):08X} "
-            f"DESCV_POP={int(dut.MMU_DESC_SHADOW_V.value).bit_count()} "
+            f"TWALK_STATE={int(dut.MMU_TWALK_STATE.value)} "
             f"RESULT0=0x{h.read_result_long(0):08X} "
             f"SENT=0x{h.mem.read(h.SENTINEL_ADDR, 4):08X}"
         )
@@ -1316,11 +1295,12 @@ def _short_walk_setup(h, base_offset):
 async def test_mmu_desc_shadow_survives_subword_traffic(dut):
     """Byte traffic in the neighbouring longword must not disturb a translation.
 
-    The search now reads descriptors from memory over the bus, so the priming
+    Every search reads descriptors from memory over the bus, so the priming
     reads this test used to need are gone and the byte traffic is the only thing
-    left that could disturb it. The snooped shadow the PTEST search reads is
-    still updated by that traffic, so this remains a live regression on the
-    snoop's size handling.
+    left that could disturb it. This is the regression for the whole class of
+    defect the snooped descriptor shadow used to introduce: core traffic near a
+    descriptor changing what a search sees. Nothing between the CPU and the
+    table can now do that, and this holds the property so.
     """
     h = CPUTestHarness(dut)
 
@@ -1715,11 +1695,12 @@ async def test_mmu_opcode_fetch_never_requested_at_data_address(dut):
 async def test_mmu_desc_shadow_subword_touch_does_not_fabricate_translation(dut):
     """A byte write inside a descriptor longword must not synthesize a descriptor.
 
-    `DATA_OUT` carries lane-replicated data for a byte write, so capturing it as
-    a longword used to leave a plausible-looking page descriptor behind and the
-    access silently translated to the wrong physical page.
+    `DATA_OUT` carries lane-replicated data for a byte write, so a snooped
+    shadow capturing it as a longword used to leave a plausible-looking page
+    descriptor behind and the access silently translated to the wrong physical
+    page. That snoop is gone, and this holds the property that made it a defect.
 
-    The search now reads the descriptor from memory over the bus, so the byte
+    Every search reads the descriptor from memory over the bus, so the byte
     write is simply visible: the low byte of the page descriptor becomes 0x11
     (DT=1, M set), the page base is unchanged, and the access translates through
     it. What must never happen is the fabricated translation to page zero.
@@ -2673,11 +2654,11 @@ async def test_mmu_page_without_ci_is_cached_and_leaves_ciout_negated(dut):
 PTEST_AN_MARKER = 0x1111_2222
 
 
-def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst, prime_leaf=True):
+def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst):
     """Three-level short walk followed by `ptest_words`; stores A3 and the MMUSR.
 
-    With prime_leaf clear the leaf descriptor is kept out of the descriptor
-    shadow, which this model reports as a bus fault on that fetch.
+    Nothing is primed: the PTEST search fetches every descriptor from memory
+    over the bus, so the tree below is only ever reachable by reading it.
     """
     logical_addr = 0x12345008
     root_tbl = 0x00000400
@@ -2697,24 +2678,7 @@ def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst, prime_leaf=True):
     crp_src = h.DATA_BASE + 0xC40
     tc_src = h.DATA_BASE + 0xC60
 
-    prime_c = [
-        *movea(LONG, SPECIAL, IMMEDIATE, 5),
-        *imm_long(desc_c_addr),
-        *move(LONG, AN_IND, 5, DN, 5),
-    ] if prime_leaf else []
-
     program = [
-        # The PTEST search still reads the snooped descriptor shadow, so its
-        # tree has to be walked into the shadow first. The runtime/PLOAD
-        # search reads descriptors from the bus and needs no priming.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 4),
-        *imm_long(desc_b_addr),
-        *move(LONG, AN_IND, 4, DN, 4),
-        *prime_c,
-
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
         0xF016, 0x0800,                       # PMOVE (A6),TT0
@@ -2832,23 +2796,36 @@ async def test_mmu_ptest_without_a_field_leaves_an_unchanged(dut):
 
 @cocotb.test()
 async def test_mmu_ptest_an_holds_last_successful_descriptor_on_fault(dut):
-    """A faulting fetch leaves An at the last descriptor successfully fetched (PRM)."""
+    """A faulting fetch leaves An at the last descriptor successfully fetched (PRM).
+
+    The fault is a real BERR on the leaf descriptor's bus cycle. It used to be
+    the absence of that descriptor from a snooped shadow, which is not a fault
+    the architecture has: the descriptor was resident and valid in memory the
+    whole time. Now the only way to make MMUSR.B appear is to break the bus
+    cycle that reads it, and `bus.fault_count` proves that cycle happened.
+    """
     h = CPUTestHarness(dut)
     an_dst = h.DATA_BASE + 0xC80
     mmusr_dst = h.DATA_BASE + 0xCA0
 
-    # PTESTR #5,(A0),#7,A3 with the leaf descriptor missing from the shadow.
+    # PTESTR #5,(A0),#7,A3 : level=7, R/W=1, A=1, register=011, FC=10101.
     program, loads, descs, logical_addr = _ptest_an_program(
-        h, [0xF010, 0x9F75], an_dst, mmusr_dst, prime_leaf=False
+        h, [0xF010, 0x9F75], an_dst, mmusr_dst
     )
-    desc_b_addr = descs[1]
+    desc_b_addr, desc_c_addr = descs[1], descs[2]
 
-    await h.setup(program)
+    bus = BerrOnAddressBusModel(dut, h.mem, desc_c_addr, times=1)
+    await _setup_with_bus(h, program, bus)
     for addr, value in loads.items():
         h.mem.load_long(addr, value)
 
     found = await h.run_until_sentinel(max_cycles=100000)
     assert found, "PTEST faulting-walk address-register test did not complete"
+    assert bus.fault_count == 1, (
+        f"BERRn asserted on {bus.fault_count} supervisor-data cycles at the leaf "
+        f"descriptor (expected 1); 0 means the PTEST search never read it from "
+        f"memory"
+    )
 
     got_a3 = h.mem.read(an_dst, 4)
     assert got_a3 == desc_b_addr, (

@@ -6,7 +6,13 @@
 // MMU_TWALK_START (WF68K30L_TOP_ROUTING_MMU_TRANSLATE) are real RTL, wired to
 // each other exactly as sv/wf68k30L_top_sections/routing/
 // wf68k30L_top_routing_cache_mmu_modules.svh wires them; everything else is
-// free.
+// free apart from MMU_PTEST_START, noted where it is driven.
+//
+// It also checks the arbitration of the descriptor-bus port the walk shares
+// with the PTEST search (UM 9.8), whose sequencer is instantiated inside
+// WF68K30L_TOP_ROUTING_BUS_CACHE and so is real RTL here too: single ownership,
+// PTEST never writing a descriptor, RMC held across a search, and neither
+// client being dropped by the arbitration.
 module mmu_walk_delay_state_formal;
     logic CLK = 1'b0;
     always_ff @($global_clock) begin
@@ -18,9 +24,9 @@ module mmu_walk_delay_state_formal;
         f_past_valid <= 1'b1;
     end
 
-    // Reset is forced for the first cycle so the walk sequencer, the request
-    // latches and the descriptor shadow start from their power-on state instead
-    // of a symbolic one, and is free afterwards.
+    // Reset is forced for the first cycle so the walk sequencer, the PTEST
+    // sequencer and the request latches start from their power-on state
+    // instead of a symbolic one, and is free afterwards.
     logic RESET_FREE;
     logic RESET_CPU;
     always_comb RESET_FREE = $anyseq;
@@ -44,9 +50,7 @@ module mmu_walk_delay_state_formal;
     logic [31:0] ADR_P;
     logic [31:0] ADR_P_PHYS_LATCH;
     logic [1:0]  OP_SIZE_BUS;
-    logic [31:0] DATA_OUT;
     logic [31:0] DATA_TO_CORE_BUSIF;
-    logic        DATA_RDY_BUSIF_CORE;
     logic        DATA_RDY_BUSIF;
     logic        DATA_VALID_BUSIF;
     logic        ICACHE_HIT_NOW;
@@ -54,7 +58,6 @@ module mmu_walk_delay_state_formal;
     logic [2:0]  MMU_PTEST_FC;
     logic [31:0] MMU_PTEST_LOGICAL;
     logic [2:0]  MMU_PTEST_LEVEL;
-    logic        MMU_PTEST_START;
     logic        MMU_PTEST_CONSUME;
     logic        ICACHE_BURST_FILL_VALID;
     logic [3:0]  ICACHE_BURST_FILL_LINE;
@@ -95,9 +98,7 @@ module mmu_walk_delay_state_formal;
         ADR_P = $anyseq;
         ADR_P_PHYS_LATCH = $anyseq;
         OP_SIZE_BUS = $anyseq;
-        DATA_OUT = $anyseq;
         DATA_TO_CORE_BUSIF = $anyseq;
-        DATA_RDY_BUSIF_CORE = $anyseq;
         DATA_RDY_BUSIF = $anyseq;
         DATA_VALID_BUSIF = $anyseq;
         ICACHE_HIT_NOW = $anyseq;
@@ -105,7 +106,6 @@ module mmu_walk_delay_state_formal;
         MMU_PTEST_FC = $anyseq;
         MMU_PTEST_LOGICAL = $anyseq;
         MMU_PTEST_LEVEL = $anyseq;
-        MMU_PTEST_START = $anyseq;
         MMU_PTEST_CONSUME = $anyseq;
         ICACHE_BURST_FILL_VALID = $anyseq;
         ICACHE_BURST_FILL_LINE = $anyseq;
@@ -128,6 +128,18 @@ module mmu_walk_delay_state_formal;
         MMU_ATC_TAG_FLAT = $anyseq;
         MMU_ATC_PTAG_FLAT = $anyseq;
     end
+
+    // MMU_PTEST_START is not free. sv/wf68k30L_top_sections/
+    // wf68k30L_top_cache_mmu_state.svh gates it on !MMU_TWALK_BUSY, and that
+    // term is one half of the descriptor-port arbitration these properties
+    // are about, so it is reproduced here as wiring -- the same way the two
+    // modules below are wired to each other -- rather than as an assume. The
+    // remaining terms of that expression are core-pipeline conditions
+    // (OP_WB, ALU_BSY, ALU_REQ, level != 0) and stay free.
+    logic        MMU_PTEST_START;
+    logic        MMU_PTEST_START_FREE;
+    always_comb MMU_PTEST_START_FREE = $anyseq;
+    assign MMU_PTEST_START = MMU_PTEST_START_FREE && !MMU_TWALK_BUSY;
 
     logic        MMU_PLOAD_START;
     logic [2:0]  MMU_PLOAD_FC;
@@ -217,14 +229,7 @@ module mmu_walk_delay_state_formal;
     logic [15:0] MMU_PTEST_WALK_MMUSR;
     logic [31:0] MMU_PTEST_DESC_ADDR;
 
-    // The descriptor shadow is shrunk to the smallest legal geometry: its
-    // capacity changes how often a walk lookup misses, never whether a request
-    // is gated, and the full 128-entry array does not survive memory_map at
-    // this BMC depth.
-    WF68K30L_TOP_ROUTING_BUS_CACHE #(
-        .MMU_DESC_SHADOW_LINES(2),
-        .MMU_DESC_SHADOW_WAYS(1)
-    ) dut_bus_cache (
+    WF68K30L_TOP_ROUTING_BUS_CACHE dut_bus_cache (
         .CLK(CLK),
         .RESET_CPU(RESET_CPU),
         .BUS_BSY(BUS_BSY),
@@ -243,11 +248,8 @@ module mmu_walk_delay_state_formal;
         .MMU_SRP(MMU_SRP),
         .MMU_CRP(MMU_CRP),
         .ADR_P(ADR_P),
-        .ADR_P_PHYS(ADR_P_PHYS),
         .OP_SIZE_BUS(OP_SIZE_BUS),
-        .DATA_OUT(DATA_OUT),
         .DATA_TO_CORE_BUSIF(DATA_TO_CORE_BUSIF),
-        .DATA_RDY_BUSIF_CORE(DATA_RDY_BUSIF_CORE),
         .DATA_RDY_BUSIF(DATA_RDY_BUSIF),
         .DATA_VALID_BUSIF(DATA_VALID_BUSIF),
         .ICACHE_HIT_NOW(ICACHE_HIT_NOW),
@@ -396,6 +398,20 @@ module mmu_walk_delay_state_formal;
             f_pload_req <= 1'b1;
     end
 
+    // "The search in flight has already driven a descriptor cycle." Needed to
+    // say what UM 9.5.2 says about RMC without conflating one search's tail
+    // with the next search's start: RMC is raised by the first descriptor cycle,
+    // so before that cycle a search legitimately runs with it negated. The
+    // arbitration guarantees at least one cycle with neither sequencer busy
+    // between two searches, so this cannot carry across from one to the next.
+    logic f_search_drove = 1'b0;
+    always_ff @(posedge CLK) begin
+        if (RESET_CPU || !(MMU_TWALK_BUSY || MMU_PTEST_BUSY))
+            f_search_drove <= 1'b0;
+        else if (MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR)
+            f_search_drove <= 1'b1;
+    end
+
     always_ff @(posedge CLK) begin
         if (f_past_valid) begin
             // The arm state is one thing published on two ports: a search is in
@@ -421,32 +437,86 @@ module mmu_walk_delay_state_formal;
                 assert(MMU_TWALK_STATE == 3'd0);
             end
 
+            // The descriptor-bus port has exactly one owner at a time. UM 9.8
+            // makes PTEST perform a table search too, so the port has two
+            // clients; a search is a sequence of bus cycles UM 9.5.2 requires
+            // to run uninterrupted, so the two must never be in flight
+            // together. This is the invariant the whole arbitration rests on,
+            // and it is what makes the request mux in the RTL safe without a
+            // round-robin.
+            assert(!(MMU_TWALK_BUSY && MMU_PTEST_BUSY));
+
             // What makes "the search's own cycle" well defined: a descriptor
             // access is only ever requested by a search in flight, only while
             // the bus is free, and while a search is in flight the core's own
             // read, write and opcode requests are all held off. So no other
             // request can be taken up in the window the search drives, and the
             // search cannot be starved by one either -- which is the exclusivity
-            // the abandon rule above now depends on.
-            assert(!(MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR) || MMU_TWALK_BUSY);
+            // the abandon rule above now depends on. Both owners are admitted
+            // here; the exclusivity assert above is what keeps that from being
+            // a weaker statement than the single-owner version it replaced.
+            assert(!(MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR) ||
+                   MMU_TWALK_BUSY || MMU_PTEST_BUSY);
             assert(!(MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR) || !BUS_BSY);
             assert(!(MMU_TWALK_BUS_RD && MMU_TWALK_BUS_WR));
-            if (MMU_TWALK_BUSY && !BUS_BSY) begin
+            // Only the runtime/PLOAD search ever writes a descriptor. PTEST
+            // reports status and must not disturb the ATC or the tables
+            // (UM 9.8); the U/M history update belongs to the search that is
+            // about to allow an access to the page (UM 9.5.2/9.6.1).
+            assert(!MMU_TWALK_BUS_WR || MMU_TWALK_BUSY);
+            if ((MMU_TWALK_BUSY || MMU_PTEST_BUSY) && !BUS_BSY) begin
                 assert(RD_REQ == MMU_TWALK_BUS_RD);
                 assert(WR_REQ == MMU_TWALK_BUS_WR);
                 assert(!OPCODE_REQ);
             end
+
+            // UM 9.5.2: RMC "is asserted on the first bus cycle of the search
+            // and remains asserted throughout". Both halves are checked: it is
+            // asserted on every descriptor cycle the port drives, and it does
+            // not drop while a search is in flight. MMU_TWALK_BUS_RD or
+            // MMU_TWALK_BUS_WR is exactly "the port is driving a cycle now".
+            assert(!(MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR) || MMU_TWALK_RMC);
+            if (f_search_drove && (MMU_TWALK_BUSY || MMU_PTEST_BUSY))
+                assert(MMU_TWALK_RMC);
+
+            // The negation is one cycle late: MMU_TWALK_RMC_R is cleared by a
+            // registered "no search is in flight", so RMC stays asserted for
+            // the cycle after the search retires. That is a real deviation --
+            // the core's first post-search bus cycle can be presented with
+            // RMCn asserted -- but it is not this harness's subject and it
+            // predates the PTEST search joining the port: the clear was
+            // "else if (!MMU_TWALK_BUSY)" before and is
+            // "else if (!MMU_DESC_SEARCH_BUSY)" now, the same shape with a
+            // wider hold. Tightening it means negating RMC while the last
+            // descriptor cycle may still have AS asserted, which is a change to
+            // the bus contract rather than to the search. Stated here as a
+            // bound so the tail cannot silently grow past one cycle.
+            assert(!MMU_TWALK_RMC || MMU_TWALK_BUSY || MMU_PTEST_BUSY ||
+                   $past(MMU_TWALK_BUSY) || $past(MMU_PTEST_BUSY));
 
             if (!f_pload_req && !$past(RESET_CPU) && !$past(BUS_BSY)) begin
                 // Nothing arms a walk except a request for one.
                 if (!$past(MMU_TWALK_START) && !$past(MMU_TWALK_BUSY))
                     assert(!MMU_TWALK_BUSY);
 
-                // A requested walk with the sequencer free is always taken up,
-                // either as a search in flight or as a result available at once.
-                if ($past(MMU_TWALK_START) && !$past(MMU_TWALK_BUSY))
+                // A requested walk with the sequencer free and the descriptor
+                // port not claimed by PTEST is always taken up, either as a
+                // search in flight or as a result available at once. The PTEST
+                // terms are the arbitration, not an escape hatch: a walk that
+                // loses to PTEST is deferred, and MMU_TWALK_START is a level, so
+                // it is taken up as soon as the PTEST search retires. The
+                // symmetric non-starvation property for PTEST is below.
+                if ($past(MMU_TWALK_START) && !$past(MMU_TWALK_BUSY) &&
+                    !$past(MMU_PTEST_BUSY) && !$past(MMU_PTEST_START))
                     assert(MMU_TWALK_BUSY || MMU_TWALK_VALID);
             end
+
+            // A requested PTEST search is always taken up: either the sequencer
+            // goes busy on it or it answers from the root pointer alone. So
+            // neither client can be dropped by the arbitration -- the walk side
+            // above waits for PTEST, and PTEST never waits for itself.
+            if (!$past(RESET_CPU) && $past(MMU_PTEST_START))
+                assert(MMU_PTEST_BUSY || MMU_PTEST_READY);
 
             // An idle cycle retires the published result, so the next access
             // cannot be answered from the previous one's search.

@@ -365,10 +365,17 @@ end
 assign MMU_PTEST_FC = mmu_fc_decode(BIW_1[4:0], DR_OUT_1, SFC, DFC);
 assign MMU_PTEST_LEVEL = BIW_1[12:10];
 assign MMU_PTEST_LOGICAL = ADR_EFF;
+// The PTEST search reads its descriptors from the bus over the same port the
+// runtime/PLOAD search uses (UM 9.5.2/9.8), and a search must run uninterrupted,
+// so PTEST does not start while a walk is in flight. ALU_BSY && ALU_REQ is a
+// level for as long as the instruction is held in EXECUTE (they are set at
+// ALU_INIT and cleared at ALU_ACK, which cannot arrive before MMU_PTEST_READY),
+// so a start deferred this way is retried every cycle rather than lost.
 assign MMU_PTEST_START = (OP_WB == PTEST) &&
                          (MMU_PTEST_LEVEL != 3'b000) &&
                          ALU_BSY &&
                          ALU_REQ &&
+                         !MMU_TWALK_BUSY &&
                          !MMU_PTEST_BUSY &&
                          !MMU_PTEST_READY;
 assign MMU_PTEST_CONSUME = (OP_WB == PTEST) &&
