@@ -22,7 +22,6 @@ module WF68K30L_TOP_DESC_SHADOW_PORT #(
 localparam int SHADOW_WORD_WIDTH = 64;
 
 logic [MMU_DESC_SHADOW_WAYS-1:0] MMU_DESC_SHADOW_V [0:MMU_DESC_SHADOW_SETS-1];
-logic [MMU_DESC_SHADOW_WAY_BITS-1:0] MMU_DESC_SHADOW_REPL_PTR [0:MMU_DESC_SHADOW_SETS-1];
 logic [SHADOW_WORD_WIDTH-1:0] SHADOW_RD_DATA [0:MMU_DESC_SHADOW_WAYS-1];
 logic [MMU_DESC_SHADOW_WAYS-1:0] SHADOW_WR_EN;
 logic [MMU_DESC_SHADOW_SET_BITS-1:0] rd_set_idx;
@@ -49,7 +48,15 @@ assign wr_addr_aligned = {WR_ADDR[31:2], 2'b00};
 assign rd_set_idx = mmu_desc_shadow_set_idx(rd_addr_aligned);
 assign wr_set_idx = mmu_desc_shadow_set_idx(wr_addr_aligned);
 assign inv_set_idx = mmu_desc_shadow_set_idx(INV_ADDR);
-assign wr_way_sel = (MMU_DESC_SHADOW_WAYS == 1) ? '0 : MMU_DESC_SHADOW_REPL_PTR[wr_set_idx];
+// The way is a function of the address, not of a replacement pointer. With a
+// round-robin pointer a rewrite of an address already held (a descriptor whose
+// U or M bits have just been updated) landed in the other way, leaving two ways
+// valid for the same address; the lookup scans in way order and returned
+// whichever came first, which could be the pre-update copy. Deriving the way
+// from the address makes each address resident in exactly one way, so a rewrite
+// always replaces the entry it is updating.
+assign wr_way_sel = (MMU_DESC_SHADOW_WAYS == 1) ? '0 :
+                    wr_addr_aligned[(MMU_DESC_SHADOW_SET_BITS + 2) +: MMU_DESC_SHADOW_WAY_BITS];
 assign RD_LOOKUP = rd_lookup_next;
 
 for (genvar way_i = 0; way_i < MMU_DESC_SHADOW_WAYS; way_i = way_i + 1) begin : gen_shadow_way_ram
@@ -91,7 +98,6 @@ always_ff @(posedge CLK) begin : shadow_state
         rd_addr_r <= 32'h0000_0000;
         for (set_i = 0; set_i < MMU_DESC_SHADOW_SETS; set_i = set_i + 1) begin
             MMU_DESC_SHADOW_V[set_i] <= '0;
-            MMU_DESC_SHADOW_REPL_PTR[set_i] <= '0;
         end
     end else begin
         rd_pending_r <= RD_EN;
@@ -102,8 +108,6 @@ always_ff @(posedge CLK) begin : shadow_state
 
         if (WR_EN && WR_VALID) begin
             MMU_DESC_SHADOW_V[wr_set_idx][wr_way_sel] <= 1'b1;
-            if (MMU_DESC_SHADOW_WAYS > 1)
-                MMU_DESC_SHADOW_REPL_PTR[wr_set_idx] <= MMU_DESC_SHADOW_REPL_PTR[wr_set_idx] + 1'b1;
         end else if (WR_EN) begin
             // The stored longword cannot be reconstructed from this access, so
             // drop the set rather than keep a partially updated descriptor.

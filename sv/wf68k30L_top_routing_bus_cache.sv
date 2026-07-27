@@ -32,6 +32,8 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     input  logic [31:0] DATA_OUT,
     input  logic [31:0] DATA_TO_CORE_BUSIF,
     input  logic        DATA_RDY_BUSIF_CORE,
+    input  logic        DATA_RDY_BUSIF,
+    input  logic        DATA_VALID_BUSIF,
     input  logic        ICACHE_HIT_NOW,
     input  logic        DCACHE_HIT_NOW,
     input  logic [2:0]  MMU_PTEST_FC,
@@ -85,8 +87,19 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE #(
     output logic        OPCODE_REQ_I,
     output logic        MMU_FAULT_DATA_ACK,
     output logic        MMU_FAULT_OPCODE_ACK,
+    output logic        MMU_FAULT_SSW_VALID,
+    output logic [8:0]  MMU_FAULT_SSW,
     output logic        BUS_CYCLE_BURST,
     output logic        BUS_CYCLE_BURST_IS_OP,
+
+    // MMU table-search bus master (see the banner block below).
+    output logic        MMU_TWALK_BUS_RD,
+    output logic        MMU_TWALK_BUS_WR,
+    output logic        MMU_TWALK_BUS_ACTIVE,
+    output logic [31:0] MMU_TWALK_BUS_ADDR,
+    output logic [31:0] MMU_TWALK_BUS_DATA,
+    output logic        MMU_TWALK_RMC,
+    output logic        BUS_CYCLE_MMU_WALK,
 
     output logic        MMU_TWALK_BUSY,
     output logic        MMU_TWALK_VALID,
@@ -142,9 +155,6 @@ logic        MMU_TWALK_FETCH_LO_VALID;
 logic        MMU_TWALK_FETCH_HI_VALID;
 logic [31:0] MMU_TWALK_INDIRECT_SHORT_ADDR;
 logic [31:0] MMU_TWALK_INDIRECT_LONG_ADDR;
-logic        MMU_TWALK_SHADOW_RD_EN;
-logic [31:0] MMU_TWALK_SHADOW_RD_ADDR;
-logic [32:0] MMU_TWALK_SHADOW_LOOKUP;
 logic        MMU_PTEST_SHADOW_RD_EN;
 logic [31:0] MMU_PTEST_SHADOW_RD_ADDR;
 logic [32:0] MMU_PTEST_SHADOW_LOOKUP;
@@ -271,26 +281,8 @@ assign MMU_TWALK_NEXT_LIMIT_INDEX = mmu_index_extract(
 );
 assign MMU_TWALK_OFFSET_MASK_CUR = mmu_twalk_offset_mask(MMU_TWALK_TC, MMU_TWALK_CONSUMED);
 
-WF68K30L_TOP_DESC_SHADOW_PORT #(
-    .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
-    .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
-    .MMU_DESC_SHADOW_SETS(MMU_DESC_SHADOW_SETS),
-    .MMU_DESC_SHADOW_SET_BITS(MMU_DESC_SHADOW_SET_BITS),
-    .MMU_DESC_SHADOW_WAY_BITS(MMU_DESC_SHADOW_WAY_BITS)
-) I_MMU_TWALK_DESC_SHADOW (
-    .CLK(CLK),
-    .RESET_CPU(RESET_CPU),
-    .RD_EN(MMU_TWALK_SHADOW_RD_EN),
-    .RD_ADDR(MMU_TWALK_SHADOW_RD_ADDR),
-    .RD_LOOKUP(MMU_TWALK_SHADOW_LOOKUP),
-    .WR_EN(MMU_DESC_SHADOW_WR_EN),
-    .WR_VALID(MMU_DESC_SHADOW_WR_VALID),
-    .WR_ADDR(MMU_DESC_SHADOW_WR_ADDR),
-    .WR_DATA(MMU_DESC_SHADOW_WR_DATA),
-    .INV_EN(MMU_DESC_SHADOW_INV_EN),
-    .INV_ADDR(MMU_DESC_SHADOW_INV_ADDR)
-);
-
+// The runtime/PLOAD table search reads descriptors from the bus (UM 9.5.2), so
+// the shadow it used to be limited to is gone. The PTEST search still reads it.
 WF68K30L_TOP_DESC_SHADOW_PORT #(
     .MMU_DESC_SHADOW_LINES(MMU_DESC_SHADOW_LINES),
     .MMU_DESC_SHADOW_WAYS(MMU_DESC_SHADOW_WAYS),
@@ -358,8 +350,11 @@ always_comb begin : burst_prefetch_select
 
     // UM 7.3.7: RMC is asserted for the whole indivisible read-modify-write
     // sequence and no burst filling occurs during it, so no background fill
-    // cycle may be injected between its halves either.
-    if (!BUS_BSY && !DATA_WR && !DATA_RD && !OPCODE_RD && !BUSY_EXH && !RMC) begin
+    // cycle may be injected between its halves either. UM 9.5.2 makes the same
+    // demand of a table search, which owns the bus from its first descriptor
+    // cycle to its last.
+    if (!BUS_BSY && !DATA_WR && !DATA_RD && !OPCODE_RD && !BUSY_EXH && !RMC &&
+        !MMU_TWALK_BUSY) begin
         if (ICACHE_BURST_FILL_VALID && ICACHE_BURST_FILL_PENDING != 8'h00) begin
             for (scan_idx = 0; scan_idx < 8; scan_idx = scan_idx + 1) begin
                 if (!icache_found) begin
@@ -440,13 +435,17 @@ always_ff @(posedge CLK) begin : bus_req_latch
         MMU_FAULT_OPCODE_ACK <= 1'b0;
         BUS_CYCLE_BURST <= 1'b0;
         BUS_CYCLE_BURST_IS_OP <= 1'b0;
+        BUS_CYCLE_MMU_WALK <= 1'b0;
     end else if (!BUS_BSY) begin
         MMU_FAULT_DATA_ACK <= MMU_RUNTIME_FAULT && (DATA_RD_BUS || DATA_WR);
         MMU_FAULT_OPCODE_ACK <= MMU_RUNTIME_FAULT && OPCODE_REQ_CORE_MISS && !DATA_RD_BUS && !DATA_WR;
-        RD_REQ_I <= (DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_DATA_REQ;
-        WR_REQ_I <= DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL;
+        RD_REQ_I <= (DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
+                    BURST_PREFETCH_DATA_REQ || MMU_TWALK_BUS_RD;
+        WR_REQ_I <= (DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
+                    MMU_TWALK_BUS_WR;
         OPCODE_REQ_I <= (OPCODE_REQ_CORE_MISS && !DATA_RD && !DATA_WR &&
-                         !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
+                         !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
+                        BURST_PREFETCH_OP_REQ;
         if (BURST_PREFETCH_OP_REQ) begin
             BUS_CYCLE_BURST <= 1'b1;
             BUS_CYCLE_BURST_IS_OP <= 1'b1;
@@ -457,12 +456,67 @@ always_ff @(posedge CLK) begin : bus_req_latch
             BUS_CYCLE_BURST <= 1'b0;
             BUS_CYCLE_BURST_IS_OP <= 1'b0;
         end
+        // Descriptor traffic is invisible to the core's ready strobes.
+        BUS_CYCLE_MMU_WALK <= MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR;
     end else if (BUS_BSY) begin
         RD_REQ_I <= 1'b0;
         WR_REQ_I <= 1'b0;
         OPCODE_REQ_I <= 1'b0;
         MMU_FAULT_DATA_ACK <= 1'b0;
         MMU_FAULT_OPCODE_ACK <= 1'b0;
+    end
+end
+
+// ========================================================================
+// Special status word for an MMU translation fault
+//
+// A translation fault runs no bus cycle, so the bus controller never captures
+// fault information for it and the stacked SSW described whichever cycle ran
+// last -- with DF clear. UM 8.1.6 makes DF the bit that tells RTE to rerun the
+// faulted data cycle, so with it clear RTE restored the pipeline image instead
+// and execution resumed past the access that never happened. On the silicon the
+// fault is reported on the retried access (UM 8.1.2: "a bus error exception
+// occurs when the aborted bus cycle is retried"), which is a real data cycle,
+// so DF is set. This builds the equivalent word from the access the MMU
+// refused: DF set, RM from RMC, RW from the direction, SIZE as UM Table 8-9
+// encodes it, and the access's own function code.
+//
+// Instruction-fetch faults are left alone: those are reported through the
+// stage B/C fault bits, not DF.
+// ========================================================================
+
+logic MMU_FAULT_BUSY_EXH_D;
+
+always_ff @(posedge CLK) begin : mmu_fault_ssw_capture
+    logic [1:0] ssw_size;
+    if (RESET_CPU) begin
+        MMU_FAULT_SSW_VALID <= 1'b0;
+        MMU_FAULT_SSW <= 9'h000;
+        MMU_FAULT_BUSY_EXH_D <= 1'b0;
+    end else begin
+        MMU_FAULT_BUSY_EXH_D <= BUSY_EXH;
+        // A real bus fault carries its own captured status; and once the
+        // handler that consumed this word has finished, retire it.
+        if ((DATA_RDY_BUSIF && !DATA_VALID_BUSIF) ||
+            (MMU_FAULT_BUSY_EXH_D && !BUSY_EXH))
+            MMU_FAULT_SSW_VALID <= 1'b0;
+
+        if (!BUS_BSY && MMU_RUNTIME_FAULT && (DATA_RD_BUS || DATA_WR)) begin
+            // UM Table 8-9 SIZE encoding; matches the bus controller's own
+            // capture for a real fault.
+            case (OP_SIZE_BUS)
+                LONG:    ssw_size = 2'b10;
+                WORD:    ssw_size = 2'b01;
+                default: ssw_size = 2'b00; // BYTE
+            endcase
+            MMU_FAULT_SSW_VALID <= 1'b1;
+            MMU_FAULT_SSW <= {1'b1,                 // DF: rerun the data cycle.
+                              RMC,                  // RM
+                              !DATA_WR,             // RW: 1 = read
+                              ssw_size,
+                              1'b0,
+                              MMU_RUNTIME_ATC_FC};
+        end
     end
 end
 
@@ -477,34 +531,168 @@ localparam logic [3:0] MMU_TWALK_ST_INDIRECT_LO_REQ  = 4'd7;
 localparam logic [3:0] MMU_TWALK_ST_INDIRECT_LO_RESP = 4'd8;
 localparam logic [3:0] MMU_TWALK_ST_INDIRECT_HI_REQ  = 4'd9;
 localparam logic [3:0] MMU_TWALK_ST_INDIRECT_HI_RESP = 4'd10;
+localparam logic [3:0] MMU_TWALK_ST_HIST_WR          = 4'd11;
 
 logic [3:0] MMU_TWALK_STATE_INT;
+logic [3:0] MMU_TWALK_HIST_NEXT;
 
-always_comb begin : mmu_twalk_shadow_read
-    MMU_TWALK_SHADOW_RD_EN = 1'b0;
-    MMU_TWALK_SHADOW_RD_ADDR = 32'h0000_0000;
+// ========================================================================
+// MMU table-search bus master  (BEGIN -- self-contained block)
+//
+// UM 9.5.2: "The table search procedure uses physical addresses to access the
+// translation tables ... The read-modify-write (RMC) signal is asserted on the
+// first bus cycle of the search and remains asserted throughout, ensuring that
+// the entire table search completes without interruption."
+// UM 13 (7.3.7 list): "Table search accesses required for the MMU are always
+// read-modify-write cycles to the supervisor data space. During these cycles, a
+// write does not occur unless a descriptor is updated. No data is internally
+// cached for table search accesses since the MMU uses physical addresses to
+// access the tables."
+//
+// This port injects the walk sequencer's descriptor reads and descriptor
+// updates into the same request path BURST_PREFETCH_DATA_REQ uses: the request
+// is raised while the bus is idle, the address/FC/size/write-data overrides are
+// held for the whole cycle, and the response is hidden from the core's ready
+// strobes via BUS_CYCLE_MMU_WALK. Descriptor addresses are already physical, so
+// they bypass translation entirely.
+//
+// Exclusivity: while MMU_TWALK_BUSY every other requester (core data read and
+// write, core opcode fetch, background burst fill) is held off, so the only
+// cycle that can start once the walk is armed is the walk's own. A cycle
+// already in flight when the walk starts is not disturbed: the port only drives
+// after the bus has been idle for two consecutive cycles, which also skips the
+// single-cycle BUS_IDLE window a BERR+HALT retry passes through.
+// ========================================================================
+
+localparam logic [1:0] MMU_DESC_BUS_ST_IDLE = 2'd0;
+localparam logic [1:0] MMU_DESC_BUS_ST_ARM  = 2'd1;
+localparam logic [1:0] MMU_DESC_BUS_ST_RUN  = 2'd2;
+localparam logic [1:0] MMU_DESC_BUS_ST_DONE = 2'd3;
+
+logic [1:0]  MMU_DESC_BUS_STATE;
+logic        MMU_DESC_BUS_IDLE_D;
+logic        MMU_DESC_BUS_REQ;
+logic        MMU_DESC_BUS_REQ_WR;
+logic [31:0] MMU_DESC_BUS_REQ_ADDR;
+logic [31:0] MMU_DESC_BUS_REQ_DATA;
+logic        MMU_DESC_BUS_HOLD_WR;
+logic        MMU_DESC_BUS_DRIVE;
+logic        MMU_DESC_BUS_DONE;
+logic        MMU_DESC_BUS_ERR;
+logic [31:0] MMU_DESC_BUS_RD_DATA;
+logic [32:0] MMU_DESC_BUS_LOOKUP;
+logic        MMU_TWALK_BUS_LOCK;
+logic        MMU_TWALK_BUS_LOCK_HELD;
+logic        MMU_TWALK_RMC_R;
+
+// The requesting state of the walk sequencer names the descriptor access.
+always_comb begin : mmu_desc_bus_request
+    MMU_DESC_BUS_REQ = 1'b0;
+    MMU_DESC_BUS_REQ_WR = 1'b0;
+    MMU_DESC_BUS_REQ_ADDR = 32'h0000_0000;
+    MMU_DESC_BUS_REQ_DATA = 32'h0000_0000;
     case (MMU_TWALK_STATE_INT)
         MMU_TWALK_ST_FETCH_LO_REQ: begin
-            MMU_TWALK_SHADOW_RD_EN = 1'b1;
-            MMU_TWALK_SHADOW_RD_ADDR = MMU_TWALK_DESC_ADDR;
+            MMU_DESC_BUS_REQ = 1'b1;
+            MMU_DESC_BUS_REQ_ADDR = MMU_TWALK_DESC_ADDR;
         end
         MMU_TWALK_ST_FETCH_HI_REQ: begin
-            MMU_TWALK_SHADOW_RD_EN = 1'b1;
-            MMU_TWALK_SHADOW_RD_ADDR = MMU_TWALK_DESC_ADDR + 32'd4;
+            MMU_DESC_BUS_REQ = 1'b1;
+            MMU_DESC_BUS_REQ_ADDR = MMU_TWALK_DESC_ADDR + 32'd4;
         end
         MMU_TWALK_ST_INDIRECT_LO_REQ: begin
-            MMU_TWALK_SHADOW_RD_EN = 1'b1;
-            MMU_TWALK_SHADOW_RD_ADDR = (MMU_TWALK_DESC_DT == 2'b10) ?
-                                       MMU_TWALK_INDIRECT_SHORT_ADDR :
-                                       MMU_TWALK_INDIRECT_LONG_ADDR;
+            MMU_DESC_BUS_REQ = 1'b1;
+            MMU_DESC_BUS_REQ_ADDR = (MMU_TWALK_DESC_DT == 2'b10) ?
+                                    MMU_TWALK_INDIRECT_SHORT_ADDR :
+                                    MMU_TWALK_INDIRECT_LONG_ADDR;
         end
         MMU_TWALK_ST_INDIRECT_HI_REQ: begin
-            MMU_TWALK_SHADOW_RD_EN = 1'b1;
-            MMU_TWALK_SHADOW_RD_ADDR = MMU_TWALK_INDIRECT_LONG_ADDR + 32'd4;
+            MMU_DESC_BUS_REQ = 1'b1;
+            MMU_DESC_BUS_REQ_ADDR = MMU_TWALK_INDIRECT_LONG_ADDR + 32'd4;
+        end
+        MMU_TWALK_ST_HIST_WR: begin
+            MMU_DESC_BUS_REQ = 1'b1;
+            MMU_DESC_BUS_REQ_WR = 1'b1;
+            MMU_DESC_BUS_REQ_ADDR = MMU_DESC_HIST_ADDR;
+            MMU_DESC_BUS_REQ_DATA = MMU_DESC_HIST_DATA;
         end
         default: begin end
     endcase
 end
+
+assign MMU_DESC_BUS_DRIVE = (MMU_DESC_BUS_STATE == MMU_DESC_BUS_ST_ARM) &&
+                            !BUS_BSY && MMU_DESC_BUS_IDLE_D;
+assign MMU_TWALK_BUS_RD = MMU_DESC_BUS_DRIVE && !MMU_DESC_BUS_HOLD_WR;
+assign MMU_TWALK_BUS_WR = MMU_DESC_BUS_DRIVE && MMU_DESC_BUS_HOLD_WR;
+// The bus controller samples address, function code, size and write data live,
+// so they stay overridden for the whole cycle, including a BERR+HALT rerun.
+assign MMU_TWALK_BUS_ACTIVE = MMU_DESC_BUS_DRIVE ||
+                              (MMU_DESC_BUS_STATE == MMU_DESC_BUS_ST_RUN);
+assign MMU_DESC_BUS_DONE = (MMU_DESC_BUS_STATE == MMU_DESC_BUS_ST_DONE);
+assign MMU_DESC_BUS_LOOKUP = {!MMU_DESC_BUS_ERR, MMU_DESC_BUS_RD_DATA};
+// Held so a cycle that started before the walk armed keeps its own qualification
+// for its whole duration (the bus controller re-reads OPCODE_REQ in START_CYCLE).
+assign MMU_TWALK_BUS_LOCK = BUS_BSY ? MMU_TWALK_BUS_LOCK_HELD : MMU_TWALK_BUSY;
+assign MMU_TWALK_RMC = MMU_TWALK_RMC_R || MMU_DESC_BUS_DRIVE;
+
+always_ff @(posedge CLK) begin : mmu_desc_bus_port
+    if (RESET_CPU) begin
+        MMU_DESC_BUS_STATE <= MMU_DESC_BUS_ST_IDLE;
+        MMU_DESC_BUS_IDLE_D <= 1'b0;
+        MMU_DESC_BUS_HOLD_WR <= 1'b0;
+        MMU_TWALK_BUS_ADDR <= 32'h0000_0000;
+        MMU_TWALK_BUS_DATA <= 32'h0000_0000;
+        MMU_DESC_BUS_RD_DATA <= 32'h0000_0000;
+        MMU_DESC_BUS_ERR <= 1'b0;
+        MMU_TWALK_BUS_LOCK_HELD <= 1'b0;
+        MMU_TWALK_RMC_R <= 1'b0;
+    end else begin
+        MMU_DESC_BUS_IDLE_D <= !BUS_BSY;
+        if (!BUS_BSY)
+            MMU_TWALK_BUS_LOCK_HELD <= MMU_TWALK_BUSY;
+
+        if (MMU_DESC_BUS_DRIVE)
+            MMU_TWALK_RMC_R <= 1'b1;
+        else if (!MMU_TWALK_BUSY)
+            MMU_TWALK_RMC_R <= 1'b0;
+
+        case (MMU_DESC_BUS_STATE)
+            MMU_DESC_BUS_ST_IDLE: begin
+                if (MMU_DESC_BUS_REQ) begin
+                    MMU_DESC_BUS_HOLD_WR <= MMU_DESC_BUS_REQ_WR;
+                    MMU_TWALK_BUS_ADDR <= {MMU_DESC_BUS_REQ_ADDR[31:2], 2'b00};
+                    MMU_TWALK_BUS_DATA <= MMU_DESC_BUS_REQ_DATA;
+                    MMU_DESC_BUS_STATE <= MMU_DESC_BUS_ST_ARM;
+                end
+            end
+            MMU_DESC_BUS_ST_ARM: begin
+                if (!MMU_DESC_BUS_REQ)
+                    MMU_DESC_BUS_STATE <= MMU_DESC_BUS_ST_IDLE; // Requester withdrew.
+                else if (MMU_DESC_BUS_DRIVE)
+                    MMU_DESC_BUS_STATE <= MMU_DESC_BUS_ST_RUN;
+            end
+            MMU_DESC_BUS_ST_RUN: begin
+                if (DATA_RDY_BUSIF) begin
+                    MMU_DESC_BUS_RD_DATA <= DATA_TO_CORE_BUSIF;
+                    // UM 8.1.2: BERR during a table search bus cycle faults the
+                    // original access; the walk turns it into a fault result.
+                    MMU_DESC_BUS_ERR <= !DATA_VALID_BUSIF;
+                    MMU_DESC_BUS_STATE <= MMU_DESC_BUS_ST_DONE;
+                end else if (!BUS_BSY && MMU_DESC_BUS_IDLE_D) begin
+                    // The cycle never reached the bus; ask again.
+                    MMU_DESC_BUS_STATE <= MMU_DESC_BUS_ST_ARM;
+                end
+            end
+            default: begin
+                MMU_DESC_BUS_STATE <= MMU_DESC_BUS_ST_IDLE;
+            end
+        endcase
+    end
+end
+
+// ========================================================================
+// MMU table-search bus master  (END)
+// ========================================================================
 
 always_comb begin : mmu_twalk_state_status
     unique case (MMU_TWALK_STATE_INT)
@@ -517,6 +705,7 @@ always_comb begin : mmu_twalk_state_status
         MMU_TWALK_ST_EVAL: MMU_TWALK_STATE = 3'd4;
         MMU_TWALK_ST_INDIRECT_LO_REQ,
         MMU_TWALK_ST_INDIRECT_LO_RESP: MMU_TWALK_STATE = 3'd5;
+        MMU_TWALK_ST_HIST_WR: MMU_TWALK_STATE = 3'd7;
         default: MMU_TWALK_STATE = 3'd6;
     endcase
 end
@@ -547,7 +736,11 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
     logic [31:0] walk_start_logical;
     logic        walk_start_write;
     logic [31:0] walk_hist_data;
+    logic        walk_hist_req;
+    logic        walk_complete;
+    logic [3:0]  walk_next_state;
     if (RESET_CPU) begin
+        MMU_TWALK_HIST_NEXT <= MMU_TWALK_ST_IDLE;
         MMU_TWALK_IS_PLOAD <= 1'b0;
         MMU_PLOAD_PENDING <= 1'b0;
         MMU_DESC_HIST_WR_EN <= 1'b0;
@@ -581,9 +774,11 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
         MMU_TWALK_FETCH_LO_VALID <= 1'b0;
         MMU_TWALK_FETCH_HI_VALID <= 1'b0;
         MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
-    end else if (BUS_BSY && !MMU_TWALK_IS_PLOAD) begin
+    end else if (BUS_BSY && !MMU_TWALK_IS_PLOAD && !MMU_TWALK_BUSY) begin
         // A runtime walk belongs to the pending access, so it is abandoned once
-        // a bus cycle starts. A PLOAD walk carries its own latched operands.
+        // a bus cycle it does not own starts. A search in flight owns every
+        // cycle that can start (see the bus-master banner above), and a PLOAD
+        // walk carries its own latched operands, so both survive BUS_BSY.
         MMU_TWALK_BUSY <= 1'b0;
         MMU_TWALK_VALID <= 1'b0;
         MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
@@ -737,11 +932,12 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
             end
 
             MMU_TWALK_ST_FETCH_LO_REQ: begin
-                MMU_TWALK_STATE_INT <= MMU_TWALK_ST_FETCH_LO_RESP;
+                if (MMU_DESC_BUS_DONE)
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_FETCH_LO_RESP;
             end
 
             MMU_TWALK_ST_FETCH_LO_RESP: begin
-                walk_lookup = MMU_TWALK_SHADOW_LOOKUP;
+                walk_lookup = MMU_DESC_BUS_LOOKUP;
                 MMU_TWALK_FETCH_LO_WORD <= walk_lookup[31:0];
                 MMU_TWALK_FETCH_LO_VALID <= walk_lookup[32];
                 if (MMU_TWALK_DESC_SIZE == 4'd8) begin
@@ -754,11 +950,12 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
             end
 
             MMU_TWALK_ST_FETCH_HI_REQ: begin
-                MMU_TWALK_STATE_INT <= MMU_TWALK_ST_FETCH_HI_RESP;
+                if (MMU_DESC_BUS_DONE)
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_FETCH_HI_RESP;
             end
 
             MMU_TWALK_ST_FETCH_HI_RESP: begin
-                walk_lookup = MMU_TWALK_SHADOW_LOOKUP;
+                walk_lookup = MMU_DESC_BUS_LOOKUP;
                 MMU_TWALK_FETCH_HI_WORD <= walk_lookup[31:0];
                 MMU_TWALK_FETCH_HI_VALID <= walk_lookup[32];
                 MMU_TWALK_STATE_INT <= MMU_TWALK_ST_EVAL;
@@ -768,6 +965,9 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 walk_fault = 1'b0;
                 walk_wp_accum = MMU_TWALK_WP_ACCUM;
                 walk_page_m = MMU_TWALK_WRITE;
+                walk_hist_req = 1'b0;
+                walk_complete = 1'b0;
+                walk_next_state = MMU_TWALK_ST_IDLE;
 
                 walk_desc = MMU_TWALK_FETCH_LO_WORD;
                 walk_desc_dt = MMU_TWALK_DESC_DT_CUR;
@@ -779,13 +979,17 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 if (!walk_fault && MMU_TWALK_DESC_SIZE == 4'd8 && !MMU_TWALK_FC[2] && walk_desc[8])
                     walk_fault = 1'b1;
 
+                // UM 9.5.2/9.6.1: U is set in every descriptor encountered, and
+                // M in the page descriptor of a write, except after a supervisor
+                // violation. The update is a real memory write (UM 13), so it is
+                // sequenced before the search advances or reports.
                 if (!walk_fault) begin
                     walk_hist_data = mmu_desc_history_bits(
                         walk_desc,
                         (walk_desc_dt == 2'b01) && MMU_TWALK_WRITE && !walk_wp_accum
                     );
                     if (walk_hist_data != walk_desc) begin
-                        MMU_DESC_HIST_WR_EN <= 1'b1;
+                        walk_hist_req = 1'b1;
                         MMU_DESC_HIST_ADDR <= MMU_TWALK_DESC_ADDR;
                         MMU_DESC_HIST_DATA <= walk_hist_data;
                     end
@@ -796,9 +1000,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                         2'b00: begin
                             walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
                             MMU_TWALK_RESULT <= walk_result;
-                            MMU_TWALK_VALID <= 1'b1;
-                            MMU_TWALK_BUSY <= 1'b0;
-                            MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                            walk_complete = 1'b1;
                         end
                         2'b01: begin
                             if (MMU_TWALK_DESC_SIZE == 4'd8 && MMU_TWALK_HAS_NEXT && MMU_TWALK_NEXT_WIDTH != 4'h0) begin
@@ -819,9 +1021,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                             if (MMU_TWALK_WRITE && walk_wp_accum)
                                 walk_result[32] = 1'b1;
                             MMU_TWALK_RESULT <= walk_result;
-                            MMU_TWALK_VALID <= 1'b1;
-                            MMU_TWALK_BUSY <= 1'b0;
-                            MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                            walk_complete = 1'b1;
                         end
                         default: begin
                             if (MMU_TWALK_HAS_NEXT) begin
@@ -839,42 +1039,82 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                                         MMU_TWALK_WRITE
                                     );
                                     MMU_TWALK_RESULT <= walk_result;
-                                    MMU_TWALK_VALID <= 1'b1;
-                                    MMU_TWALK_BUSY <= 1'b0;
-                                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                                    walk_complete = 1'b1;
                                 end else begin
                                     MMU_TWALK_TABLE_BASE <= MMU_TWALK_DESC_TABLE_BASE_NEXT;
                                     MMU_TWALK_DESC_SIZE <= (walk_desc_dt == 2'b10) ? 4'd4 : 4'd8;
                                     MMU_TWALK_WP_ACCUM <= walk_wp_accum;
                                     MMU_TWALK_LEVELS <= next_levels;
-                                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_STEP;
+                                    walk_next_state = MMU_TWALK_ST_STEP;
                                 end
                             end else begin
                                 MMU_TWALK_DESC_PTR <= (MMU_TWALK_DESC_SIZE == 4'd8) ? MMU_TWALK_FETCH_HI_WORD : walk_desc;
                                 MMU_TWALK_DESC_DT <= walk_desc_dt;
                                 MMU_TWALK_WP_ACCUM <= walk_wp_accum;
                                 MMU_TWALK_LEVELS <= next_levels;
-                                MMU_TWALK_STATE_INT <= MMU_TWALK_ST_INDIRECT_LO_REQ;
+                                walk_next_state = MMU_TWALK_ST_INDIRECT_LO_REQ;
                             end
                         end
                     endcase
                 end else begin
                     walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
                     MMU_TWALK_RESULT <= walk_result;
-                    MMU_TWALK_VALID <= 1'b1;
-                    MMU_TWALK_BUSY <= 1'b0;
-                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                    walk_complete = 1'b1;
+                end
+
+                if (walk_complete)
+                    walk_next_state = MMU_TWALK_ST_IDLE;
+
+                if (walk_hist_req) begin
+                    MMU_TWALK_HIST_NEXT <= walk_next_state;
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_HIST_WR;
+                end else begin
+                    MMU_TWALK_STATE_INT <= walk_next_state;
+                    if (walk_complete) begin
+                        MMU_TWALK_VALID <= 1'b1;
+                        MMU_TWALK_BUSY <= 1'b0;
+                    end
+                end
+            end
+
+            // A descriptor update is an extended read-modify-write leg of the
+            // search: the write must land in memory before the page it describes
+            // may be accessed (UM 9.6.1).
+            MMU_TWALK_ST_HIST_WR: begin
+                if (MMU_DESC_BUS_DONE) begin
+                    if (MMU_DESC_BUS_ERR) begin
+                        walk_result = mmu_twalk_fault_result(
+                            MMU_TWALK_LOGICAL,
+                            MMU_TWALK_WP_ACCUM,
+                            MMU_TWALK_WRITE
+                        );
+                        MMU_TWALK_RESULT <= walk_result;
+                        MMU_TWALK_VALID <= 1'b1;
+                        MMU_TWALK_BUSY <= 1'b0;
+                        MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                    end else begin
+                        // Mirror the accepted value into the descriptor shadow the
+                        // PTEST search reads, so the two never disagree.
+                        MMU_DESC_HIST_WR_EN <= 1'b1;
+                        MMU_TWALK_STATE_INT <= MMU_TWALK_HIST_NEXT;
+                        if (MMU_TWALK_HIST_NEXT == MMU_TWALK_ST_IDLE) begin
+                            MMU_TWALK_VALID <= 1'b1;
+                            MMU_TWALK_BUSY <= 1'b0;
+                        end
+                    end
                 end
             end
 
             MMU_TWALK_ST_INDIRECT_LO_REQ: begin
-                MMU_TWALK_STATE_INT <= MMU_TWALK_ST_INDIRECT_LO_RESP;
+                if (MMU_DESC_BUS_DONE) begin
+                    walk_lookup = MMU_DESC_BUS_LOOKUP;
+                    MMU_TWALK_FETCH_LO_WORD <= walk_lookup[31:0];
+                    MMU_TWALK_FETCH_LO_VALID <= walk_lookup[32];
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_INDIRECT_LO_RESP;
+                end
             end
 
             MMU_TWALK_ST_INDIRECT_LO_RESP: begin
-                walk_lookup = MMU_TWALK_SHADOW_LOOKUP;
-                MMU_TWALK_FETCH_LO_WORD <= walk_lookup[31:0];
-                MMU_TWALK_FETCH_LO_VALID <= walk_lookup[32];
                 if (MMU_TWALK_DESC_DT == 2'b10)
                     MMU_TWALK_STATE_INT <= MMU_TWALK_ST_INDIRECT_HI_RESP;
                 else
@@ -882,13 +1122,15 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
             end
 
             MMU_TWALK_ST_INDIRECT_HI_REQ: begin
-                MMU_TWALK_STATE_INT <= MMU_TWALK_ST_INDIRECT_HI_RESP;
+                if (MMU_DESC_BUS_DONE)
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_INDIRECT_HI_RESP;
             end
 
             MMU_TWALK_ST_INDIRECT_HI_RESP: begin
                 walk_fault = 1'b0;
                 walk_wp_accum = MMU_TWALK_WP_ACCUM;
                 walk_page_m = MMU_TWALK_WRITE;
+                walk_hist_req = 1'b0;
                 walk_lookup = {MMU_TWALK_FETCH_LO_VALID, MMU_TWALK_FETCH_LO_WORD};
 
                 if (MMU_TWALK_DESC_DT == 2'b10) begin
@@ -907,7 +1149,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                         );
                     end
                 end else begin
-                    if (!walk_lookup[32] || !MMU_TWALK_SHADOW_LOOKUP[32] || walk_lookup[1:0] != 2'b01) begin
+                    if (!walk_lookup[32] || !MMU_DESC_BUS_LOOKUP[32] || walk_lookup[1:0] != 2'b01) begin
                         walk_fault = 1'b1;
                         walk_result = mmu_twalk_fault_result(MMU_TWALK_LOGICAL, walk_wp_accum, MMU_TWALK_WRITE);
                     end else begin
@@ -918,7 +1160,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                         end else begin
                             walk_page_m = walk_lookup[4] || MMU_TWALK_WRITE;
                             walk_result = mmu_twalk_page_result(
-                                {MMU_TWALK_SHADOW_LOOKUP[31:8], 8'h00} + (MMU_TWALK_LOGICAL & MMU_TWALK_OFFSET_MASK_CUR),
+                                {MMU_DESC_BUS_LOOKUP[31:8], 8'h00} + (MMU_TWALK_LOGICAL & MMU_TWALK_OFFSET_MASK_CUR),
                                 1'b0,
                                 walk_wp_accum,
                                 walk_page_m,
@@ -936,7 +1178,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                         MMU_TWALK_WRITE && !walk_wp_accum
                     );
                     if (walk_hist_data != walk_lookup[31:0]) begin
-                        MMU_DESC_HIST_WR_EN <= 1'b1;
+                        walk_hist_req = 1'b1;
                         MMU_DESC_HIST_ADDR <= (MMU_TWALK_DESC_DT == 2'b10) ?
                                               MMU_TWALK_INDIRECT_SHORT_ADDR :
                                               MMU_TWALK_INDIRECT_LONG_ADDR;
@@ -944,9 +1186,14 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                     end
                 end
                 MMU_TWALK_RESULT <= walk_result;
-                MMU_TWALK_VALID <= 1'b1;
-                MMU_TWALK_BUSY <= 1'b0;
-                MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                if (walk_hist_req) begin
+                    MMU_TWALK_HIST_NEXT <= MMU_TWALK_ST_IDLE;
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_HIST_WR;
+                end else begin
+                    MMU_TWALK_VALID <= 1'b1;
+                    MMU_TWALK_BUSY <= 1'b0;
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                end
             end
 
             default: begin
@@ -980,7 +1227,10 @@ always_ff @(posedge CLK) begin : mmu_desc_shadow_update
         MMU_DESC_SHADOW_PENDING_FULL <= 1'b0;
         MMU_DESC_SHADOW_PENDING_SPAN <= 1'b0;
     end else begin
-        if (!BUS_BSY && (DATA_RD_BUS || DATA_WR) && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) begin
+        // UM 6.1.2.2/13: table search accesses are never internally cached, and
+        // they are not core traffic, so they are not snooped either.
+        if (!BUS_BSY && (DATA_RD_BUS || DATA_WR) && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL &&
+            !MMU_TWALK_BUS_LOCK) begin
             MMU_DESC_SHADOW_PENDING <= 1'b1;
             MMU_DESC_SHADOW_PENDING_ADDR <= ADR_P_PHYS;
             MMU_DESC_SHADOW_PENDING_WR <= DATA_WR;
@@ -1011,8 +1261,12 @@ assign MMU_DESC_SHADOW_INV_EN = MMU_DESC_SNOOP_WR && MMU_DESC_SHADOW_PENDING_SPA
 assign MMU_DESC_SHADOW_INV_ADDR = {MMU_DESC_SHADOW_PENDING_ADDR[31:2], 2'b00} + 32'd4;
 
 // Core-visible bus requests: direct when idle, held via latches while BUS_BSY.
-assign RD_REQ = !BUS_BSY ? ((DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_DATA_REQ) : RD_REQ_I;
-assign WR_REQ = !BUS_BSY ? (DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) : WR_REQ_I;
+// A table search in flight owns the bus (UM 9.5.2), so core traffic is held off
+// and the search's own descriptor cycles are injected instead.
+assign RD_REQ = !BUS_BSY ? ((DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
+                            BURST_PREFETCH_DATA_REQ || MMU_TWALK_BUS_RD) : RD_REQ_I;
+assign WR_REQ = !BUS_BSY ? ((DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
+                            MMU_TWALK_BUS_WR) : WR_REQ_I;
 assign OPCODE_REQ_CORE = !BUS_BSY ? OPCODE_RD : OPCODE_REQ_I;
 
 assign OPCODE_REQ_CORE_MISS = OPCODE_REQ_CORE && !ICACHE_HIT_NOW;
@@ -1025,7 +1279,8 @@ assign OPCODE_REQ_BUS_OK = BUS_BSY || (!DATA_RD && !DATA_WR);
 
 // On an instruction-cache hit, satisfy the opcode fetch internally.
 assign OPCODE_REQ = (OPCODE_REQ_CORE_MISS && OPCODE_REQ_BUS_OK &&
-                     !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_OP_REQ;
+                     !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
+                    BURST_PREFETCH_OP_REQ;
 
 assign DATA_RD_BUS = DATA_RD && !DCACHE_HIT_NOW;
 

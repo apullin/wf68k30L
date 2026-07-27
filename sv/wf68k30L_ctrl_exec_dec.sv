@@ -37,7 +37,10 @@ module WF68K30L_CTRL_EXEC_DEC (
     // Phase
     input  logic        PHASE2,
 
-    // MMU
+    // MMU. Driven with "the MMU search this instruction asked for has finished",
+    // which is PTEST's walk or PLOAD's; the two can never be in EXECUTE at the
+    // same time. The port keeps its original name because the instantiation in
+    // wf68k30L_control.sv connects it by name.
     input  logic        MMU_PTEST_READY,
 
     // Output
@@ -172,6 +175,18 @@ always_comb begin : exec_wb_dec
                     PTEST: begin
                         if (BIW_1_WB[12:10] == 3'b000 || MMU_PTEST_READY)
                             NEXT_EXEC_WB_STATE = BIW_1_WB[8] ? WRITEBACK : IDLE; // Descriptor address to An.
+                        else
+                            NEXT_EXEC_WB_STATE = EXECUTE;
+                    end
+                    // UM 9.8: "The PLOAD instruction performs a table search
+                    // operation for a specified function code and logical
+                    // address and then loads the translation for the address
+                    // into the ATC." The instruction does not retire until the
+                    // search has, so software may read the ATC straight after
+                    // it, exactly as for PTEST.
+                    PLOAD: begin
+                        if (MMU_PTEST_READY)
+                            NEXT_EXEC_WB_STATE = IDLE;
                         else
                             NEXT_EXEC_WB_STATE = EXECUTE;
                     end

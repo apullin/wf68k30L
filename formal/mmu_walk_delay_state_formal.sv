@@ -47,6 +47,8 @@ module mmu_walk_delay_state_formal;
     logic [31:0] DATA_OUT;
     logic [31:0] DATA_TO_CORE_BUSIF;
     logic        DATA_RDY_BUSIF_CORE;
+    logic        DATA_RDY_BUSIF;
+    logic        DATA_VALID_BUSIF;
     logic        ICACHE_HIT_NOW;
     logic        DCACHE_HIT_NOW;
     logic [2:0]  MMU_PTEST_FC;
@@ -96,6 +98,8 @@ module mmu_walk_delay_state_formal;
         DATA_OUT = $anyseq;
         DATA_TO_CORE_BUSIF = $anyseq;
         DATA_RDY_BUSIF_CORE = $anyseq;
+        DATA_RDY_BUSIF = $anyseq;
+        DATA_VALID_BUSIF = $anyseq;
         ICACHE_HIT_NOW = $anyseq;
         DCACHE_HIT_NOW = $anyseq;
         MMU_PTEST_FC = $anyseq;
@@ -147,7 +151,6 @@ module mmu_walk_delay_state_formal;
     logic        MMU_RUNTIME_ATC_B;
     logic        MMU_RUNTIME_ATC_W;
     logic        MMU_RUNTIME_ATC_M;
-    logic        MMU_RUNTIME_ATC_M_SET;
     logic        MMU_RUNTIME_ATC_CI;
     logic [31:0] ADR_P_PHYS;
     logic [31:0] ADR_P_PHYS_CALC;
@@ -175,6 +178,14 @@ module mmu_walk_delay_state_formal;
     logic        MMU_FAULT_OPCODE_ACK;
     logic        BUS_CYCLE_BURST;
     logic        BUS_CYCLE_BURST_IS_OP;
+    // MMU table-search bus master (UM 9.5.2).
+    logic        MMU_TWALK_BUS_RD;
+    logic        MMU_TWALK_BUS_WR;
+    logic        MMU_TWALK_BUS_ACTIVE;
+    logic [31:0] MMU_TWALK_BUS_ADDR;
+    logic [31:0] MMU_TWALK_BUS_DATA;
+    logic        MMU_TWALK_RMC;
+    logic        BUS_CYCLE_MMU_WALK;
     logic        MMU_PLOAD_DONE;
     logic [35:0] MMU_PLOAD_RESULT;
     logic        MMU_TWALK_BUSY;
@@ -237,6 +248,8 @@ module mmu_walk_delay_state_formal;
         .DATA_OUT(DATA_OUT),
         .DATA_TO_CORE_BUSIF(DATA_TO_CORE_BUSIF),
         .DATA_RDY_BUSIF_CORE(DATA_RDY_BUSIF_CORE),
+        .DATA_RDY_BUSIF(DATA_RDY_BUSIF),
+        .DATA_VALID_BUSIF(DATA_VALID_BUSIF),
         .ICACHE_HIT_NOW(ICACHE_HIT_NOW),
         .DCACHE_HIT_NOW(DCACHE_HIT_NOW),
         .MMU_PTEST_FC(MMU_PTEST_FC),
@@ -284,6 +297,13 @@ module mmu_walk_delay_state_formal;
         .MMU_FAULT_OPCODE_ACK(MMU_FAULT_OPCODE_ACK),
         .BUS_CYCLE_BURST(BUS_CYCLE_BURST),
         .BUS_CYCLE_BURST_IS_OP(BUS_CYCLE_BURST_IS_OP),
+        .MMU_TWALK_BUS_RD(MMU_TWALK_BUS_RD),
+        .MMU_TWALK_BUS_WR(MMU_TWALK_BUS_WR),
+        .MMU_TWALK_BUS_ACTIVE(MMU_TWALK_BUS_ACTIVE),
+        .MMU_TWALK_BUS_ADDR(MMU_TWALK_BUS_ADDR),
+        .MMU_TWALK_BUS_DATA(MMU_TWALK_BUS_DATA),
+        .MMU_TWALK_RMC(MMU_TWALK_RMC),
+        .BUS_CYCLE_MMU_WALK(BUS_CYCLE_MMU_WALK),
         .MMU_TWALK_BUSY(MMU_TWALK_BUSY),
         .MMU_TWALK_VALID(MMU_TWALK_VALID),
         .MMU_TWALK_FC(MMU_TWALK_FC),
@@ -357,7 +377,6 @@ module mmu_walk_delay_state_formal;
         .MMU_RUNTIME_ATC_B(MMU_RUNTIME_ATC_B),
         .MMU_RUNTIME_ATC_W(MMU_RUNTIME_ATC_W),
         .MMU_RUNTIME_ATC_M(MMU_RUNTIME_ATC_M),
-        .MMU_RUNTIME_ATC_M_SET(MMU_RUNTIME_ATC_M_SET),
         .MMU_RUNTIME_ATC_CI(MMU_RUNTIME_ATC_CI),
         .MMU_RUNTIME_STALL(MMU_RUNTIME_STALL),
         .MMU_TWALK_START(MMU_TWALK_START)
@@ -390,12 +409,32 @@ module mmu_walk_delay_state_formal;
                 assert(MMU_TWALK_STATE == 3'd0);
             end
 
-            // A started bus cycle abandons the runtime walk: the search belongs
-            // to the access that is now on the bus.
-            if (!f_pload_req && $past(BUS_BSY)) begin
+            // A bus cycle the search does not own abandons the runtime walk:
+            // that cycle belongs to the access which displaced it. The search
+            // itself masters the bus for its descriptor accesses (UM 9.5.2), so
+            // a cycle started while a search is in flight is the search's own
+            // and must not abandon it. The property used to be unconditional in
+            // $past(BUS_BSY) because no walk could ever own a cycle.
+            if (!f_pload_req && $past(BUS_BSY) && !$past(MMU_TWALK_BUSY)) begin
                 assert(!MMU_TWALK_BUSY);
                 assert(!MMU_TWALK_VALID);
                 assert(MMU_TWALK_STATE == 3'd0);
+            end
+
+            // What makes "the search's own cycle" well defined: a descriptor
+            // access is only ever requested by a search in flight, only while
+            // the bus is free, and while a search is in flight the core's own
+            // read, write and opcode requests are all held off. So no other
+            // request can be taken up in the window the search drives, and the
+            // search cannot be starved by one either -- which is the exclusivity
+            // the abandon rule above now depends on.
+            assert(!(MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR) || MMU_TWALK_BUSY);
+            assert(!(MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR) || !BUS_BSY);
+            assert(!(MMU_TWALK_BUS_RD && MMU_TWALK_BUS_WR));
+            if (MMU_TWALK_BUSY && !BUS_BSY) begin
+                assert(RD_REQ == MMU_TWALK_BUS_RD);
+                assert(WR_REQ == MMU_TWALK_BUS_WR);
+                assert(!OPCODE_REQ);
             end
 
             if (!f_pload_req && !$past(RESET_CPU) && !$past(BUS_BSY)) begin
