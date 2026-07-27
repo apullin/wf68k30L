@@ -314,17 +314,27 @@ class BusModel:
                     await RisingEdge(self.dut.CLK)
 
                 if rw_n == 1:
-                    # READ cycle: drive DATA_IN with data from memory
-                    # Pack bytes into the exact bus lanes expected by the
-                    # core's SIZE/ADR transfer semantics.
-                    data = 0
-                    for lane in range(width, 4):
-                        data |= self.POISON_BYTE << ((3 - lane) * 8)
-                    for i in range(byte_count):
-                        b = self.memory.read(addr + i, 1) & 0xFF
-                        lane = start_lane + i
-                        shift = (3 - lane) * 8  # MSB-first lane mapping
-                        data |= b << shift
+                    burst = self._burst_acknowledged(rw_n, width)
+                    if burst:
+                        # UM 7.3.7 State 2: "All of the byte sections (D24-D31,
+                        # D16-D23, D8-D15, and D0-D7) of the data bus must be
+                        # driven since the burst operation latches 32 bits on
+                        # every cycle." A device that answers CBREQ therefore
+                        # drives the whole long word on the first access too,
+                        # whatever SIZ0-SIZ1 asked for -- the processor caches the
+                        # entry, not just the operand.
+                        data = self._long_at(addr)
+                    else:
+                        # Pack bytes into the exact bus lanes expected by the
+                        # core's SIZE/ADR transfer semantics.
+                        data = 0
+                        for lane in range(width, 4):
+                            data |= self.POISON_BYTE << ((3 - lane) * 8)
+                        for i in range(byte_count):
+                            b = self.memory.read(addr + i, 1) & 0xFF
+                            lane = start_lane + i
+                            shift = (3 - lane) * 8  # MSB-first lane mapping
+                            data |= b << shift
 
                     self.dut.DATA_IN.value = data
                     if self._trace_enabled(addr):
@@ -337,7 +347,6 @@ class BusModel:
                             byte_count,
                             data,
                         )
-                    burst = self._burst_acknowledged(rw_n, width)
                     if burst:
                         # UM 6.1.3.2: "The device must also assert CBACK (at the
                         # same time as STERM) at the end of the cycle in which

@@ -499,6 +499,9 @@ logic [31:0] DCACHE_WRITE_ADDR;
 OP_SIZETYPE  DCACHE_WRITE_SIZE;
 logic [31:0] DCACHE_WRITE_DATA;
 logic        DCACHE_WRITE_CACHEABLE;
+// Retired background line-completion request path (UM 7.3.7 replaced it with
+// address-held burst streaming). Tied off in WF68K30L_TOP_ROUTING_BUS_CACHE; the
+// nets remain because WF68K30L_TOP_ROUTING_MMU_TRANSLATE still takes them.
 logic        BURST_PREFETCH_OP_REQ;
 logic        BURST_PREFETCH_DATA_REQ;
 logic [2:0]  BURST_PREFETCH_OP_WORD;
@@ -507,3 +510,15 @@ logic [31:0] BURST_PREFETCH_ADDR;
 logic [2:0]  BURST_PREFETCH_FC;
 logic        BUS_CYCLE_BURST;
 logic        BUS_CYCLE_BURST_IS_OP;
+
+// Address-held burst streaming (UM 7.3.7). BURST_REQ_BUSIF is the burst request
+// the bus interface arms the engine from -- the same term CBREQn is driven from --
+// and the beat port carries one streamed long word per clock to the cache.
+logic        BURST_REQ_BUSIF;
+logic        BURST_ACTIVE;
+logic        BURST_CBREQ_HOLD;
+logic        BURST_BEAT_RDY;
+logic        BURST_BEAT_FIRST;
+logic        BURST_BEAT_IS_OP;
+logic [31:0] BURST_BEAT_ADDR;
+logic [31:0] BURST_BEAT_DATA;
