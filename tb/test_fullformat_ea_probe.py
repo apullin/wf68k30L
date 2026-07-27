@@ -486,3 +486,31 @@ async def test_brief_format_index_written_by_previous_instruction(dut):
     assert got_val == TABLE_VALUE, (
         f"Load through it returned 0x{got_val:08X}, expected 0x{TABLE_VALUE:08X}"
     )
+
+
+@cocotb.test()
+async def test_fullformat_move_index_written_by_previous_instruction(dut):
+    """Same hazard on a MOVE source EA, to show it is not LEA-specific."""
+    h = CPUTestHarness(dut)
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(INDEX << 24),
+        *moveq(24, 3),
+        *lsr(LONG, 3, 2, ir=1),                    # D2 = 3, immediately before
+        # MOVE.L (0x00010340,D2.L*4),D5
+        0x2A30, 0x2DB0, (TABLE_BASE >> 16) & 0xFFFF, TABLE_BASE & 0xFFFF,
+        *move_to_abs_long(LONG, DN, 5, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(TABLE_BASE + INDEX * 4, TABLE_VALUE)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+    got = h.read_result_long(0)
+    h.cleanup()
+    assert got == TABLE_VALUE, (
+        f"MOVE.L (0x{TABLE_BASE:08X},D2.L*4),D5 with D2 written by the "
+        f"preceding LSR.L loaded 0x{got:08X}, expected 0x{TABLE_VALUE:08X}"
+    )
