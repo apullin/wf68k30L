@@ -689,3 +689,64 @@ async def test_berr_postincrement_store_is_recovered_by_the_rte_rerun(dut):
     assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
         "Execution did not continue correctly after the RTE rerun"
     )
+
+
+@cocotb.test()
+async def test_berr_double_fault_on_the_replay_reenters_the_handler(dut):
+    """UM 8.2.3: a fault on the replayed cycle starts bus error processing again.
+
+    "If a fault occurs when the RTE instruction attempts to rerun the bus
+    cycle(s), the processor creates a new stack frame on the supervisor stack
+    after deallocating the previous frame, and address error or bus error
+    exception processing starts in the normal manner."
+
+    Faulting the same address twice makes the replay itself fault. Asserted here:
+    vector 2 is taken a second time and the handler is entered again, on a frame
+    pushed at the same stack address because the first was deallocated before the
+    replay ran.
+
+    KNOWN GAP, deliberately not asserted: the *contents* of that second frame do
+    not describe the still-outstanding write, so its RTE cannot complete it. The
+    fields the frame builder reads are all overwritten while the handler runs --
+    PC_BF tracks the live PC, and DOB_WB and OUTBUFFER both follow the handler's
+    own stores -- so the second frame names the handler's RTE instruction and
+    carries the handler's write data. The surviving copies of the original fault
+    address, output buffer and continuation PC are the exception handler's own
+    rte_bf_* registers, which the frame builder cannot see. Closing this means
+    exporting those four fields back to the datapath helper's DATA_EXH mux; it is
+    a separate change from the replay itself and is not needed for a handler that
+    actually repairs the fault, which is the case UM 8.2.3 is written for.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrOnceBusModel(dut, h.mem, times=2)
+
+    program = [
+        0x207C, 0x000E, 0x0000,                   # 0x100 MOVEA.L #$E0000,A0
+        0x263C, 0x5A5A, 0xA5A5,                   # 0x106 MOVE.L #$5A5AA5A5,D3
+        0x20C3,                                   # 0x10C MOVE.L D3,(A0)+  <- BERR x2
+        0x7421,                                   # 0x10E MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x110 MOVE.L D2,($20018).L
+        0x23C8, 0x0002, 0x001C,                   # 0x116 MOVE.L A0,($2001C).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x11C MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x122 MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x128 STOP #$2700
+    ]
+    h.mem.load_long(FAULT_ADDR + 4, 0x1234ABCD)
+
+    await _boot(dut, h, bus, program, STORE_FAULT_HANDLER)
+
+    counter = h.mem.read(COUNTER_ADDR, 4)
+    pc = h.mem.read(PC_ADDR, 4)
+    assert bus.fault_count == 2, (
+        f"BERRn asserted {bus.fault_count} times; the replayed write cycle was "
+        f"never issued if this is 1"
+    )
+    assert counter == 2, (
+        f"Bus-error handler ran {counter} times (expected 2: the original fault, "
+        f"then the fault the replayed cycle took). 1 means the abandoned RTE did "
+        f"not raise a fresh bus error, or re-entered RTE on the frame it had just "
+        f"pushed instead of letting the handler run"
+    )
+    # First entry records the storing instruction; the second overwrites it with
+    # whatever the second frame named. Only the first value is well defined.
+    assert pc != 0, "Handler never read a stacked PC"

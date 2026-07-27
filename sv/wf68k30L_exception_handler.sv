@@ -456,7 +456,12 @@ always_comb begin : decode_instruction_trap_source
     else if ((EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE) ||
              (EX_STATE == EXS_EXAMINE_VERSION && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE))
         trap_source = TRAP_SRC_FORMAT;
-    else if (TRAP_CODE_OPC == T_RTE && !rte_pc_odd && !rte_abort_hold)
+    // Both abort terms have to appear here combinationally, not only through
+    // rte_abort_hold: trap_set_rte takes priority over clear_instruction_traps in
+    // pending_instruction_traps, so a registered hold would arrive a cycle too
+    // late and EX_P_RTE would survive the abort. It would then re-enter RTE on the
+    // fresh bus-fault frame the abort just pushed, before the handler ever ran.
+    else if (TRAP_CODE_OPC == T_RTE && !rte_pc_odd && !rte_bf_replay_flt && !rte_abort_hold)
         trap_source = TRAP_SRC_RTE;
 end
 
