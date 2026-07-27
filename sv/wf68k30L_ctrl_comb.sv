@@ -560,7 +560,17 @@ assign BERR = (OP == BKPT) ? 1'b0 : // No bus error during breakpoint cycle.
 // ====================================================================
 
 assign SFC_RD = MOVEC_RD_OP && (BIW_1[11:0] == 12'h000);
-assign SFC_WR = MOVEC_WR_OP && (BIW_1[11:0] == 12'h000); // Intentional BIW_1 (non-WB) compatibility.
+// MOVEC_WR_OP is qualified on OP_WB_I, BIW_0_WB and EXEC_WB_STATE == WRITEBACK,
+// so its register-select field must come from BIW_1_WB like all six siblings
+// below. This line read the live BIW_1, which control.sv's history entry
+// ("Fixed a MOVEC writeback issue (use BIW_WB... instead of BIW_...)") shows was
+// the form that fix was meant to remove; SFC_WR was missed by it. 12'h000 is
+// both the SFC selector and a common idle value of BIW_1, so the old form could
+// write SFC during a MOVEC to some other control register. No instruction
+// sequence was found that actually does -- the current pipeline timing masks it
+// -- so this is a latent inconsistency corrected, not a reproduced defect.
+// test_movec_to_dfc_leaves_sfc_alone guards it.
+assign SFC_WR = MOVEC_WR_OP && (BIW_1_WB[11:0] == 12'h000);
 
 assign DFC_RD = MOVEC_RD_OP && (BIW_1[11:0] == 12'h001);
 assign DFC_WR = MOVEC_WR_OP && (BIW_1_WB[11:0] == 12'h001);
@@ -630,10 +640,19 @@ assign IPIPE_FLUSH_I = ((OP == BRA || OP == BSR) && FETCH_RETIRE) ? 1'b1 :
                        ((OP == ANDI_TO_SR || OP == EORI_TO_SR || OP == MOVE_TO_SR || OP == ORI_TO_SR) && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 :
                        ((OP == JMP || OP == JSR) && FETCH_RETIRE) ? 1'b1 :
                        (OP == MOVEC && BIW_0[0] && FETCH_RETIRE) ? 1'b1 : // Writing control registers.
+                       // Deliberately NOT written as PMOVE_TC_SEL || PMOVE_SRP_SEL ||
+                       // PMOVE_CRP_SEL || PMOVE_TT0_SEL || PMOVE_TT1_SEL, even though
+                       // those names exist in this file. The last term here is
+                       // [12:10] >= 3'b010, which also covers the reserved encodings
+                       // 100-111; PMOVE_TT0_SEL/PMOVE_TT1_SEL are == 010 and == 011
+                       // only. Substituting the named form would NARROW the predicate
+                       // and stop flushing the pipe on a reserved PMOVE encoding.
+                       // Flushing there is harmless and conservative, so the wider
+                       // form stays.
                        (OP == PMOVE && !BIW_1[9] &&
                         ((BIW_1[15:13] == 3'b010 && BIW_1[12:10] == 3'b000) || // TC
                          (BIW_1[15:13] == 3'b010 && BIW_1[12:10] >= 3'b010 && BIW_1[12:10] <= 3'b011) || // SRP/CRP
-                         (BIW_1[15:13] == 3'b000 && BIW_1[12:10] >= 3'b010)) && // TT0/TT1
+                         (BIW_1[15:13] == 3'b000 && BIW_1[12:10] >= 3'b010)) && // TT0/TT1 + reserved
                         FETCH_RETIRE) ? 1'b1 :
                        ((OP == RTD || OP == RTR || OP == RTS) && FETCH_RETIRE) ? 1'b1 : 1'b0;
 

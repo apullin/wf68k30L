@@ -264,6 +264,18 @@ always_comb begin : other_states_dec
                             NEXT_FETCH_STATE = FETCH_EXWORD_1;
                         end
                     end
+                    // These arms test BIW_1[15] where the MOVE phase-2 path above uses
+                    // EXT_WORD[15] via EXWORD_SRC_READY. That is deliberate and the two
+                    // are NOT interchangeable: opcode_decoder.sv loads BIW_1 from IPIPE_C
+                    // (:427) and EXT_WORD from IPIPE_D (:435), different pipe stages. The
+                    // opcodes reaching these two arms -- LEA, PEA, CLR, JMP, JSR,
+                    // MOVE_FROM_CCR, MOVE_FROM_SR, MOVEM, Scc -- are all single-word with
+                    // one effective address, which is exactly the condition the comment at
+                    // the top of this file names as making the two coincide; MOVE has two
+                    // effective addresses, so its second EA's extension word is not BIW_1.
+                    // Both directions are covered by tb/test_fullformat_ea_probe.py
+                    // (An index ignoring a pending Dn write, and the Dn index hazard), so
+                    // re-run that suite before touching either spelling.
                     LEA, PEA: begin
                         if ((!BIW_1[15] && !AR_IN_USE && !DR_IN_USE) || (BIW_1[15] && !AR_IN_USE)) begin // ADH.
                             NEXT_FETCH_STATE = SWITCH_STATE;

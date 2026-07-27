@@ -1122,3 +1122,46 @@ async def test_rtr_returns_from_a_subroutine(dut):
     assert sp == h.SSP_INIT, (
         f"SP should be back at 0x{h.SSP_INIT:08X}, got 0x{sp:08X}")
     h.cleanup()
+
+
+@cocotb.test()
+async def test_movec_to_dfc_leaves_sfc_alone(dut):
+    """A MOVEC writing one control register must not write another.
+
+    SFC_WR decoded its register-select field from the live BIW_1 while all six
+    sibling control-register writes use BIW_1_WB, the writeback-stage copy that
+    MOVEC_WR_OP is itself qualified against (OP_WB_I, BIW_0_WB, EXEC_WB_STATE ==
+    WRITEBACK).  control.sv's own history records the intended form: "Fixed a
+    MOVEC writeback issue (use BIW_WB... instead of BIW_...)" -- SFC_WR was
+    missed by that fix.  12'h000 is both the SFC selector and a common idle
+    value of BIW_1, so a MOVEC writing any other control register could write
+    SFC as well.
+
+    The MOVES tests could not see this: _set_sfc_dfc writes SFC and DFC the same
+    value, so a cross-write is invisible.  This test gives them different values
+    and reads both back.
+    """
+    h = CPUTestHarness(dut)
+    program = [
+        *_load_long(0, 5),
+        *movec_to_cr(0, CR_SFC),                        # SFC = 5
+        *_load_long(1, 1),
+        *movec_to_cr(1, CR_DFC),                        # DFC = 1, SFC untouched
+        *movec_from_cr(CR_SFC, 2),                      # D2 = SFC
+        *movec_from_cr(CR_DFC, 3),                      # D3 = DFC
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE),
+        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE + 4),
+        *nop(), *nop(),
+        *h.sentinel_program(),
+    ]
+    await h.setup(program)
+    found = await h.run_until_sentinel()
+    assert found, "Sentinel not reached"
+    sfc = h.read_result_long(0) & 0x7
+    dfc = h.read_result_long(4) & 0x7
+    assert sfc == 5, (
+        f"SFC = {sfc}, expected 5: the MOVEC to DFC overwrote SFC, which means "
+        f"SFC_WR is decoding its selector from the live BIW_1 rather than BIW_1_WB"
+    )
+    assert dfc == 1, f"DFC = {dfc}, expected 1"
+    h.cleanup()
