@@ -1811,9 +1811,12 @@ async def test_mmu_desc_shadow_subword_touch_does_not_fabricate_translation(dut)
         f"Expected the memory-resident descriptor to translate to "
         f"0x{expected_value:08X}, got 0x{got:08X} (0x02 means a bus error was taken)"
     )
-    # The byte write is the descriptor's real content now, so it must be there.
-    assert (h.mem.read(desc_c_addr, 4) & 0xFF) == touch_byte, (
-        "Byte write did not reach the page descriptor in memory"
+    # The byte write is the descriptor's real content now, so its bits must
+    # still be there. The search adds U (and M on a write) on top of them.
+    status = h.mem.read(desc_c_addr, 4) & 0xFF
+    assert (status & touch_byte) == touch_byte, (
+        f"Byte write did not reach the page descriptor in memory "
+        f"(status byte 0x{status:02X}, expected to contain 0x{touch_byte:02X})"
     )
     h.cleanup()
 
@@ -3292,5 +3295,165 @@ async def test_mmu_berr_on_descriptor_fetch_faults_the_access(dut):
     mmusr = h.mem.read(mmusr_dst, 2)
     assert (mmusr & MMUSR_B) != 0, (
         f"Search that bus-errored must leave B set in the ATC entry, got 0x{mmusr:04X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_u_and_m_history_bits_reach_memory(dut):
+    """U on every descriptor and M on a written page must land in memory.
+
+    UM 9.5.2: "During a table search, the U bit in each descriptor that is
+    encountered is checked and set if it is not already set. Similarly, when the
+    table search is for a write access and the M bit of the page descriptor is
+    clear, the processor sets the bit." UM 9.6.1 on the U bit: "Updates of the U
+    bit are performed before the MC68030 allows a page to be accessed."
+
+    Read back through the CPU, so it is the content of memory being asserted on
+    and not any internal copy. U is bit 3 and M is bit 4 of the descriptor
+    status (UM Figures 9-10..9-14).
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xE40)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    DESC_U = 1 << 3
+    DESC_M = 1 << 4
+
+    def read_back(addr, result_offset):
+        """CPU read of a descriptor (transparent via TT1) into RESULT_BASE."""
+        return [
+            *movea(LONG, SPECIAL, IMMEDIATE, 3),
+            *imm_long(addr),
+            *move(LONG, AN_IND, 3, DN, 4),
+            *move_to_abs_long(LONG, DN, 4, h.RESULT_BASE + result_offset),
+        ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+
+        # Read access: sets U in all three descriptors, must not set M.
+        *move(LONG, AN_IND, 0, DN, 1),
+        *read_back(desc_a_addr, 0x00),
+        *read_back(desc_b_addr, 0x04),
+        *read_back(desc_c_addr, 0x08),
+
+        # Write access with no resident entry: the search must set M as well.
+        0xF000, 0x2400,                       # PFLUSHA
+        *move(LONG, DN, 1, AN_IND, 0),
+        *read_back(desc_a_addr, 0x0C),
+        *read_back(desc_c_addr, 0x10),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0x11223344)
+
+    found = await h.run_until_sentinel(max_cycles=120000)
+    assert found, "History-bit write-back test did not complete"
+
+    after_read_a = h.read_result_long(0x00)
+    after_read_b = h.read_result_long(0x04)
+    after_read_c = h.read_result_long(0x08)
+    after_write_a = h.read_result_long(0x0C)
+    after_write_c = h.read_result_long(0x10)
+
+    for name, value in (("root", after_read_a), ("level B", after_read_b),
+                        ("page", after_read_c)):
+        assert value & DESC_U, (
+            f"U bit not set in the {name} descriptor in memory after a read "
+            f"(read back 0x{value:08X})"
+        )
+    assert not (after_read_c & DESC_M), (
+        f"A read set M in the page descriptor in memory (read back "
+        f"0x{after_read_c:08X})"
+    )
+    assert after_write_c & DESC_M, (
+        f"M bit not set in the page descriptor in memory after a write "
+        f"(read back 0x{after_write_c:08X})"
+    )
+    assert not (after_write_a & DESC_M), (
+        f"M must only be set in the page descriptor, but the root descriptor "
+        f"read back 0x{after_write_a:08X}"
+    )
+
+    # And the same values are what a bus master would see, not just what the
+    # CPU's own read path returns.
+    assert h.mem.read(desc_c_addr, 4) & (DESC_U | DESC_M) == (DESC_U | DESC_M), (
+        f"Memory holds 0x{h.mem.read(desc_c_addr, 4):08X}; U and M expected"
+    )
+    assert h.mem.read(desc_a_addr, 4) & DESC_U, (
+        f"Memory holds 0x{h.mem.read(desc_a_addr, 4):08X}; U expected"
+    )
+    assert h.mem.read(desc_b_addr, 4) & DESC_U, (
+        f"Memory holds 0x{h.mem.read(desc_b_addr, 4):08X}; U expected"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_berr_on_descriptor_update_faults_the_access(dut):
+    """BERR on the descriptor update write is a bus error for the access.
+
+    UM 8.1.2 makes no distinction between the read and the write half of a table
+    search: any BERR "during a bus cycle used to access the translation tables"
+    faults the original access.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xEC0)
+    handler_addr = 0x000B00
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    handler_code = [
+        *moveq(0x02, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),        # U update write bus-errors here.
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    bus = BerrOnAddressBusModel(dut, h.mem, desc_c_addr, times=1,
+                                fault_reads=False, fault_writes=True)
+    await _setup_with_bus(h, program, bus)
+
+    h.mem.load_long(2 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0xFEEDFACE)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, (
+        f"Descriptor-update bus error did not reach the handler "
+        f"(BERRn asserted {bus.fault_count} times)"
+    )
+    assert bus.fault_count == 1, (
+        f"BERRn asserted on {bus.fault_count} descriptor writes (expected 1); "
+        f"0 means the search never wrote the U bit back to memory"
+    )
+    marker = h.read_result_long(0)
+    assert marker == 0x02, (
+        f"Expected the vector-2 handler marker 0x02, got 0x{marker:08X}; "
+        f"0xFEEDFACE means the faulted descriptor update was ignored"
     )
     h.cleanup()

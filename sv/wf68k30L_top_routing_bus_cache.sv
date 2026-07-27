@@ -476,8 +476,10 @@ localparam logic [3:0] MMU_TWALK_ST_INDIRECT_LO_REQ  = 4'd7;
 localparam logic [3:0] MMU_TWALK_ST_INDIRECT_LO_RESP = 4'd8;
 localparam logic [3:0] MMU_TWALK_ST_INDIRECT_HI_REQ  = 4'd9;
 localparam logic [3:0] MMU_TWALK_ST_INDIRECT_HI_RESP = 4'd10;
+localparam logic [3:0] MMU_TWALK_ST_HIST_WR          = 4'd11;
 
 logic [3:0] MMU_TWALK_STATE_INT;
+logic [3:0] MMU_TWALK_HIST_NEXT;
 
 // ========================================================================
 // MMU table-search bus master  (BEGIN -- self-contained block)
@@ -552,6 +554,12 @@ always_comb begin : mmu_desc_bus_request
         MMU_TWALK_ST_INDIRECT_HI_REQ: begin
             MMU_DESC_BUS_REQ = 1'b1;
             MMU_DESC_BUS_REQ_ADDR = MMU_TWALK_INDIRECT_LONG_ADDR + 32'd4;
+        end
+        MMU_TWALK_ST_HIST_WR: begin
+            MMU_DESC_BUS_REQ = 1'b1;
+            MMU_DESC_BUS_REQ_WR = 1'b1;
+            MMU_DESC_BUS_REQ_ADDR = MMU_DESC_HIST_ADDR;
+            MMU_DESC_BUS_REQ_DATA = MMU_DESC_HIST_DATA;
         end
         default: begin end
     endcase
@@ -642,6 +650,7 @@ always_comb begin : mmu_twalk_state_status
         MMU_TWALK_ST_EVAL: MMU_TWALK_STATE = 3'd4;
         MMU_TWALK_ST_INDIRECT_LO_REQ,
         MMU_TWALK_ST_INDIRECT_LO_RESP: MMU_TWALK_STATE = 3'd5;
+        MMU_TWALK_ST_HIST_WR: MMU_TWALK_STATE = 3'd7;
         default: MMU_TWALK_STATE = 3'd6;
     endcase
 end
@@ -676,6 +685,7 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
     logic        walk_complete;
     logic [3:0]  walk_next_state;
     if (RESET_CPU) begin
+        MMU_TWALK_HIST_NEXT <= MMU_TWALK_ST_IDLE;
         MMU_TWALK_IS_PLOAD <= 1'b0;
         MMU_PLOAD_PENDING <= 1'b0;
         MMU_DESC_HIST_WR_EN <= 1'b0;
@@ -1000,12 +1010,43 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 if (walk_complete)
                     walk_next_state = MMU_TWALK_ST_IDLE;
 
-                if (walk_hist_req)
-                    MMU_DESC_HIST_WR_EN <= 1'b1;
-                MMU_TWALK_STATE_INT <= walk_next_state;
-                if (walk_complete) begin
-                    MMU_TWALK_VALID <= 1'b1;
-                    MMU_TWALK_BUSY <= 1'b0;
+                if (walk_hist_req) begin
+                    MMU_TWALK_HIST_NEXT <= walk_next_state;
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_HIST_WR;
+                end else begin
+                    MMU_TWALK_STATE_INT <= walk_next_state;
+                    if (walk_complete) begin
+                        MMU_TWALK_VALID <= 1'b1;
+                        MMU_TWALK_BUSY <= 1'b0;
+                    end
+                end
+            end
+
+            // A descriptor update is an extended read-modify-write leg of the
+            // search: the write must land in memory before the page it describes
+            // may be accessed (UM 9.6.1).
+            MMU_TWALK_ST_HIST_WR: begin
+                if (MMU_DESC_BUS_DONE) begin
+                    if (MMU_DESC_BUS_ERR) begin
+                        walk_result = mmu_twalk_fault_result(
+                            MMU_TWALK_LOGICAL,
+                            MMU_TWALK_WP_ACCUM,
+                            MMU_TWALK_WRITE
+                        );
+                        MMU_TWALK_RESULT <= walk_result;
+                        MMU_TWALK_VALID <= 1'b1;
+                        MMU_TWALK_BUSY <= 1'b0;
+                        MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                    end else begin
+                        // Mirror the accepted value into the descriptor shadow the
+                        // PTEST search reads, so the two never disagree.
+                        MMU_DESC_HIST_WR_EN <= 1'b1;
+                        MMU_TWALK_STATE_INT <= MMU_TWALK_HIST_NEXT;
+                        if (MMU_TWALK_HIST_NEXT == MMU_TWALK_ST_IDLE) begin
+                            MMU_TWALK_VALID <= 1'b1;
+                            MMU_TWALK_BUSY <= 1'b0;
+                        end
+                    end
                 end
             end
 
@@ -1090,11 +1131,14 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                     end
                 end
                 MMU_TWALK_RESULT <= walk_result;
-                if (walk_hist_req)
-                    MMU_DESC_HIST_WR_EN <= 1'b1;
-                MMU_TWALK_VALID <= 1'b1;
-                MMU_TWALK_BUSY <= 1'b0;
-                MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                if (walk_hist_req) begin
+                    MMU_TWALK_HIST_NEXT <= MMU_TWALK_ST_IDLE;
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_HIST_WR;
+                end else begin
+                    MMU_TWALK_VALID <= 1'b1;
+                    MMU_TWALK_BUSY <= 1'b0;
+                    MMU_TWALK_STATE_INT <= MMU_TWALK_ST_IDLE;
+                end
             end
 
             default: begin
