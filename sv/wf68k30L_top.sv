@@ -17,7 +17,10 @@
 //   address, FC, SIZ and R/W held for the whole burst, one long word    //
 //   per STERM, up to four.                                              //
 // - RTE bus-fault return: format A/B frame validation, long-format      //
-//   version checks, and replay of a faulted data write cycle.           //
+//   version checks, replay of a faulted data write cycle, and replay    //
+//   of a faulted data read -- the frame's data input buffer image at    //
+//   $2C becomes the suspended instruction's operand (UM 8.2.2), or the  //
+//   read is rerun when the handler left DF set (UM 8.2.1/8.2.3).        //
 //                                                                      //
 // What is NOT implemented:                                             //
 // - External coprocessor execution and CIR bus-cycle sequencing. An     //

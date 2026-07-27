@@ -254,6 +254,29 @@ logic [8:0]  SSW_LOW_STACKED; // SSW[8:0] written to the frame at offset $A.
 logic [31:0] DOB_STACKED;    // Output buffer written to the frame at offset $18.
 logic        RTE_RERUN_WR;   // The handler is replaying the faulted data write.
 logic [31:0] RTE_RERUN_DATA; // Output buffer popped from the frame for the replay.
+// Data-read replay support for RTE (UM 8.2.2). The frame carries the repaired
+// operand in the data input buffer image at $2C, flags replay eligibility in SSW
+// bit 3 and "the faulted read already updated its address register" in bit 9;
+// both bits are UM internal-use bits (Figure 8-9).
+logic        DATA_RD_PENDING; // Core data read outstanding in the previous cycle.
+logic        RD_REPLAYABLE;   // That read is its instruction's only memory transfer.
+logic        RD_AN_UPDATED;   // ... and it has already applied its (An)+/-(An).
+logic        BF_REPLAY_RD;    // Faulted read completable by handing over the DIB.
+logic        BF_AN_UPDATED;   // The faulted access already updated its An.
+logic        RTE_RERUN_RD;      // The handler armed a faulted-read replay.
+logic [31:0] RTE_RERUN_RD_DATA; // Operand the replayed read must return.
+logic        RTE_RERUN_RD_AN;   // Frame's SSW bit 9, forwarded to the replay.
+logic        RTE_DIB_PEND;    // Replay armed, waiting for the operand read.
+logic        RTE_DIB_AN_PEND; // One address-register update still to be skipped.
+logic        RTE_DIB_ACK;     // Synthesized acknowledge for the replayed read.
+logic        RTE_DIB_LAST;    // The last data acknowledge was that synthesized one.
+logic [31:0] RTE_DIB_VALUE;   // Operand the synthesized acknowledge returns.
+logic        rte_dib_take;    // The resumed instruction's operand read is now.
+logic [2:0]  SSW_INTERNAL_HI; // SSW[11:9] written to the frame at offset $A.
+logic        RTE_DIB_HOLD;    // Keep the replayed read off the bus.
+logic        RTE_DIB_AN_HOLD; // Skip this address-register update.
+logic        AR_INC_EFF;      // AR_INC after the replay's one-shot suppression.
+logic        AR_DEC_EFF;      // AR_DEC after the replay's one-shot suppression.
 logic        CYCLE_STERM_32; // Burst eligibility: 32-bit synchronous cycle.
 logic        STERM_NOW;
 logic        CBACK_HONOURED; // UM 6.1.3.2: CBACK only counts on a STERM cycle.

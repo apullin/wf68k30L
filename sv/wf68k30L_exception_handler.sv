@@ -98,6 +98,9 @@ module WF68K30L_EXCEPTION_HANDLER #(
     output logic        RTE_PIPE_B_FAULT,
     output logic        RTE_RERUN_WR,   // Replaying the faulted data write (UM 8.2.3).
     output logic [31:0] RTE_RERUN_DATA, // Data output buffer popped from the frame.
+    output logic        RTE_RERUN_RD,   // Replaying the faulted data read (UM 8.2.2).
+    output logic [31:0] RTE_RERUN_RD_DATA, // Data input buffer image the read gets.
+    output logic        RTE_RERUN_RD_AN,   // That read already updated its An.
     output logic        REFILLn,
     output logic        RESTORE_ISP_PC,
 
@@ -157,7 +160,9 @@ typedef enum logic [4:0] {
     EXS_READ_BF_PIPE    = 5'd18,
     EXS_READ_BF_ADR     = 5'd19,
     EXS_READ_BF_DOB     = 5'd20,
-    EXS_RERUN_WRITE     = 5'd21
+    EXS_RERUN_WRITE     = 5'd21,
+    EXS_READ_BF_DIB     = 5'd22,
+    EXS_RERUN_READ      = 5'd23
 } EX_STATES;
 
 // ---- Exception type identifiers ----
@@ -273,9 +278,13 @@ logic        rte_bf_b_fault_restore;
 logic        rte_bf_need_rerun;
 logic [31:0] rte_bf_fault_adr;   // Frame $10: address the faulted cycle drove.
 logic [31:0] rte_bf_dob;         // Frame $18: data output buffer.
+logic [31:0] rte_bf_dib;         // Frame $2C: data input buffer image.
 logic        rte_bf_replay_write; // The SSW asks for a data write rerun.
+logic        rte_bf_replay_read;  // The SSW asks for a data read replay.
+logic        rte_bf_replay_rd_rerun; // ... and DF is still set, so re-read.
+logic        rte_bf_replay_rd_dib;   // ... and DF is clear, so use the DIB.
 logic [1:0]  rte_bf_replay_size;
-logic        rte_bf_replay_flt;  // The replayed write faulted in turn.
+logic        rte_bf_replay_flt;  // The replayed cycle faulted in turn.
 logic        rte_pc_odd;
 logic        rte_abort_hold;
 
@@ -475,14 +484,15 @@ end
 assign rte_pc_odd = (EXCEPTION == EX_RTE && EX_STATE == EXS_RESTORE_PC &&
                      DATA_RDY && DATA_VALID && DATA_0);
 
-// A fault on the replayed data write abandons the RTE the same way. UM 8.2.3:
+// A fault on the replayed data cycle abandons the RTE the same way. UM 8.2.3:
 // "If a fault occurs when the RTE instruction attempts to rerun the bus
 // cycle(s), the processor creates a new stack frame on the supervisor stack
 // after deallocating the previous frame, and address error or bus error
 // exception processing starts in the normal manner." The frame is already
 // deallocated at this point, so dropping to idle with EX_P_BERR pending is
 // exactly that; the hold keeps the abandoned RTE from re-arming underneath it.
-assign rte_bf_replay_flt = (EX_STATE == EXS_RERUN_WRITE && DATA_RDY && !DATA_VALID);
+assign rte_bf_replay_flt = ((EX_STATE == EXS_RERUN_WRITE || EX_STATE == EXS_RERUN_READ) &&
+                            DATA_RDY && !DATA_VALID);
 
 always_ff @(posedge CLK) begin : rte_abort_tracker
     if (SYS_INIT)
@@ -657,6 +667,7 @@ assign CPU_SPACE = (NEXT_EX_STATE == EXS_GET_VECTOR);
 // in EXS_UPDATE_PC already uses.
 assign ADR_OFFSET = (EX_STATE == EXS_REFILL_PIPE) ? {24'h0, 5'b0, PIPE_CNT, 1'b0} :
                     (NEXT_EX_STATE == EXS_RERUN_WRITE) ? rte_bf_fault_adr :
+                    (NEXT_EX_STATE == EXS_RERUN_READ) ? rte_bf_fault_adr :
                     (NEXT_EX_STATE == EXS_RESTORE_PC && EXCEPTION == EX_RESET_EX) ? 32'h4 :
                     // A replayed write resumes at the continuation PC in the
                     // internal-register long word, not by re-executing from the
@@ -671,11 +682,15 @@ assign ADR_OFFSET = (EX_STATE == EXS_REFILL_PIPE) ? {24'h0, 5'b0, PIPE_CNT, 1'b0
                     (NEXT_EX_STATE == EXS_READ_BF_PIPE) ? 32'hC :
                     (NEXT_EX_STATE == EXS_READ_BF_ADR) ? 32'h10 :
                     (NEXT_EX_STATE == EXS_READ_BF_DOB) ? 32'h18 :
+                    // UM 8.2.2: "the image of the data input buffer (DIB) at
+                    // location SP + $2C of the long format stack frame".
+                    (NEXT_EX_STATE == EXS_READ_BF_DIB) ? 32'h2C :
                     (NEXT_EX_STATE == EXS_UPDATE_PC) ? INT_VECT : 32'h0;
 
 // ---- Operand size for bus transactions ----
 
 assign OP_SIZE = (EX_STATE == EXS_RERUN_WRITE || NEXT_EX_STATE == EXS_RERUN_WRITE) ? rte_bf_replay_size :
+                 (EX_STATE == EXS_RERUN_READ || NEXT_EX_STATE == EXS_RERUN_READ) ? rte_bf_replay_size :
                  (EX_STATE == EXS_INIT) ? LONG : // Decrement the stack by four (ISP_DEC).
                  (NEXT_EX_STATE == EXS_RESTORE_ISP || NEXT_EX_STATE == EXS_RESTORE_PC) ? LONG :
                  (NEXT_EX_STATE == EXS_BUILD_STACK || NEXT_EX_STATE == EXS_BUILD_TSTACK) ? LONG :
@@ -683,6 +698,7 @@ assign OP_SIZE = (EX_STATE == EXS_RERUN_WRITE || NEXT_EX_STATE == EXS_RERUN_WRIT
                  (EX_STATE == EXS_SWITCH_STATE) ? LONG :
                  (NEXT_EX_STATE == EXS_READ_BF_META || NEXT_EX_STATE == EXS_READ_BF_PIPE) ? LONG :
                  (NEXT_EX_STATE == EXS_READ_BF_ADR || NEXT_EX_STATE == EXS_READ_BF_DOB) ? LONG :
+                 (NEXT_EX_STATE == EXS_READ_BF_DIB) ? LONG :
                  (NEXT_EX_STATE == EXS_GET_VECTOR) ? BYTE : WORD;
 
 // ---- Stack frame displacement lookup ----
@@ -719,6 +735,8 @@ assign DATA_RD_I = DATA_RDY ? 1'b0 :
                    (NEXT_EX_STATE == EXS_READ_BF_PIPE) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_READ_BF_ADR) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_READ_BF_DOB) ? 1'b1 :
+                   (NEXT_EX_STATE == EXS_READ_BF_DIB) ? 1'b1 :
+                   (EX_STATE == EXS_RERUN_READ) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_RESTORE_ISP) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_RESTORE_STATUS) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_UPDATE_PC) ? 1'b1 :
@@ -760,7 +778,8 @@ assign HALT_OUTn = !(EX_STATE == EXS_HALTED);
 assign RESTORE_ISP_PC = (EXCEPTION == EX_RESET_EX && (NEXT_EX_STATE == EXS_RESTORE_ISP || EX_STATE == EXS_RESTORE_ISP)) ||
                         (EXCEPTION == EX_RESET_EX && (NEXT_EX_STATE == EXS_RESTORE_PC || EX_STATE == EXS_RESTORE_PC)) ||
                         (NEXT_EX_STATE == EXS_UPDATE_PC) ||
-                        (NEXT_EX_STATE == EXS_RERUN_WRITE);
+                        (NEXT_EX_STATE == EXS_RERUN_WRITE) ||
+                        (NEXT_EX_STATE == EXS_RERUN_READ);
 
 assign REFILLn = !(EX_STATE == EXS_REFILL_PIPE);
 
@@ -768,7 +787,20 @@ assign STACK_FORMAT = STACK_FORMAT_I;
 
 assign rte_bf_c_fault_restore = rte_bf_ssw[15] && rte_bf_ssw[13];
 assign rte_bf_b_fault_restore = rte_bf_ssw[14] && rte_bf_ssw[12];
-assign rte_bf_need_rerun = rte_bf_ssw[8] || rte_bf_c_fault_restore || rte_bf_b_fault_restore;
+// A data read replay refills the pipe from the restored PC rather than taking the
+// frame's stage images, even when DF is clear and nothing else asks for a rerun.
+// UM 8.2.2 forbids a handler from touching those images ("Except for the data
+// input buffer (DIB), the copy of the status register, and the SSW, the handler
+// should not modify a bus fault stack frame"), and RB/RC are clear on a pure data
+// fault, so the stage words still equal what is in memory at the stacked PC and
+// re-prefetching them is equivalent. It is also the only path that survives: the
+// stage B image this design stacks for a mid-instruction data fault is zero
+// (measured: frame $0E = 0x0000 for MOVE.L (A0)+,D3 faulting at 0x106, whose
+// stage B word at 0x10A is 0x0002), so restoring the image resumes on a corrupted
+// instruction stream. That is a separate defect in the frame builder; the read
+// replay simply does not depend on it.
+assign rte_bf_need_rerun = rte_bf_ssw[8] || rte_bf_c_fault_restore ||
+                           rte_bf_b_fault_restore || rte_bf_replay_read;
 
 // ---- Data write replay (UM 8.2.3) ----
 // "If the DF bit is still set at the time of the RTE execution, the faulted data
@@ -803,6 +835,57 @@ assign rte_bf_replay_size = um_size_to_op_size(rte_bf_ssw[5:4]);
 
 assign RTE_RERUN_WR = (EX_STATE == EXS_RERUN_WRITE) || (NEXT_EX_STATE == EXS_RERUN_WRITE);
 assign RTE_RERUN_DATA = rte_bf_dob;
+
+// ---- Data read replay (UM 8.2.2) ----
+// A faulted read cannot be completed by rerunning the cycle alone: the value has
+// to reach the instruction. UM 8.2.2 states the contract:
+//
+//   "Data read faults only generate the long bus fault frame and the handler
+//    must transfer properly sized data from the location indicated by the fault
+//    address and address space to the image of the data input buffer (DIB) at
+//    location SP + $2C of the long format stack frame. Byte, word, and 3-byte
+//    operands are right-justified in the 4-byte data buffers. In addition, the
+//    software handler must clear the DF bit of the SSW to indicate that the
+//    faulted bus cycle has been corrected."
+//
+// and UM 8.2.1 says what RTE then does with it:
+//
+//   "If the DF bit is set when the processor reads the stack frame, it reruns
+//    the faulted data access; otherwise, it assumes that the data input buffer
+//    value on the stack is valid for a read ..."
+//
+// So DF selects where the operand comes from, not whether the instruction is
+// resumed: DF clear takes the repaired DIB from $2C, DF still set reruns the
+// read cycle from the fault address ($10) at the SSW's size. Either way the
+// value is then handed to the suspended instruction in place of its own read -
+// see rte_dib_injection in the top level's datapath helper - so the read is
+// never issued twice and the address register the faulted access already
+// updated is not updated again.
+//
+// Conditions, all from the SSW:
+//   format $B            - UM 8.2.2: read faults only build the long frame, and
+//                          $2C exists only there.
+//   RM  (bit 7) clear    - UM 8.2.3: with RM set the rerun "reruns the entire
+//                          instruction", which is what the pipe-image path does.
+//   RW  (bit 6) set      - a read.
+//   bit 3 set            - internal: the faulted read was its instruction's only
+//                          memory transfer and was an operand read, so handing
+//                          it the value is equivalent to continuing the
+//                          suspended instruction (see RD_REPLAYABLE in the top
+//                          level's datapath helper).
+// SSW bit 9, also internal-use, says the faulted read had already applied its
+// (An)+/-(An) update, so the replay must suppress the repeat.
+assign rte_bf_replay_read = (EXCEPTION == EX_RTE) && (STACK_FORMAT_I == 4'hB) &&
+                            !rte_bf_ssw[7] && rte_bf_ssw[6] && rte_bf_ssw[3];
+
+assign rte_bf_replay_rd_rerun = rte_bf_replay_read && rte_bf_ssw[8];
+assign rte_bf_replay_rd_dib   = rte_bf_replay_read && !rte_bf_ssw[8];
+
+// Armed while the pipe is refilled, which is after the frame has been read and
+// deallocated and before the resumed instruction can issue its read.
+assign RTE_RERUN_RD = (EX_STATE == EXS_REFILL_PIPE) && rte_bf_replay_read;
+assign RTE_RERUN_RD_DATA = rte_bf_dib;
+assign RTE_RERUN_RD_AN = rte_bf_ssw[9];
 
 assign RTE_PIPE_LOAD = (EX_STATE == EXS_RESTORE_STATUS && DATA_RDY && DATA_VALID &&
                         EXCEPTION == EX_RTE &&
@@ -883,7 +966,9 @@ end
 // plus the data fault address ($10) and data output buffer ($18) a data write
 // rerun needs. Without the last two the design could not replay the cycle at
 // all - it had no register anywhere holding either value once the frame was
-// pushed.
+// pushed. rte_bf_dib is the same for the data input buffer image at $2C, which a
+// data read replay hands to the resumed instruction; when DF is still set it is
+// instead loaded from the rerun read the RTE issues itself (UM 8.2.1).
 always_ff @(posedge CLK) begin : rte_bus_fault_capture
     if (SYS_INIT) begin
         rte_bf_biw_0 <= 16'h0;
@@ -892,6 +977,7 @@ always_ff @(posedge CLK) begin : rte_bus_fault_capture
         rte_bf_ssw <= 16'h0;
         rte_bf_fault_adr <= 32'h0;
         rte_bf_dob <= 32'h0;
+        rte_bf_dib <= 32'h0;
     end else if (EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID) begin
         // Reset capture before reading frame-specific fields. A non-A/B format
         // must not be able to leave a previous frame's SSW behind, or its RTE
@@ -910,6 +996,13 @@ always_ff @(posedge CLK) begin : rte_bus_fault_capture
         rte_bf_fault_adr <= DATA_IN;
     end else if (EX_STATE == EXS_READ_BF_DOB && DATA_RDY && DATA_VALID) begin
         rte_bf_dob <= DATA_IN;
+    end else if (EX_STATE == EXS_READ_BF_DIB && DATA_RDY && DATA_VALID) begin
+        rte_bf_dib <= DATA_IN;
+    end else if (EX_STATE == EXS_RERUN_READ && DATA_RDY && DATA_VALID) begin
+        // DF was still set, so UM 8.2.1 has the RTE rerun the faulted access
+        // rather than trust the frame's DIB image. The value the rerun returns
+        // takes the DIB's place and reaches the instruction the same way.
+        rte_bf_dib <= DATA_IN;
     end
 end
 
@@ -1082,18 +1175,39 @@ always_comb begin : exception_handler_dec
         EXS_READ_BF_PIPE:
             // The data fault address and output buffer are only popped when the
             // SSW asks for a data write rerun, so an unrelated frame costs no
-            // extra bus cycles.
-            NEXT_EX_STATE = ACCESS_ERR          ? EXS_IDLE :
-                            !DATA_RDY           ? EXS_READ_BF_PIPE :
-                            rte_bf_replay_write ? EXS_READ_BF_ADR : EXS_RESTORE_PC;
+            // extra bus cycles. A data read replay pops the fault address when it
+            // has to rerun the read (DF still set) and the DIB image at $2C when
+            // the handler has already repaired it (DF clear).
+            NEXT_EX_STATE = ACCESS_ERR             ? EXS_IDLE :
+                            !DATA_RDY              ? EXS_READ_BF_PIPE :
+                            rte_bf_replay_write    ? EXS_READ_BF_ADR :
+                            rte_bf_replay_rd_rerun ? EXS_READ_BF_ADR :
+                            rte_bf_replay_rd_dib   ? EXS_READ_BF_DIB : EXS_RESTORE_PC;
 
         EXS_READ_BF_ADR:
-            NEXT_EX_STATE = ACCESS_ERR ? EXS_IDLE :
-                            DATA_RDY   ? EXS_READ_BF_DOB : EXS_READ_BF_ADR;
+            NEXT_EX_STATE = ACCESS_ERR          ? EXS_IDLE :
+                            !DATA_RDY           ? EXS_READ_BF_ADR :
+                            rte_bf_replay_write ? EXS_READ_BF_DOB : EXS_RESTORE_PC;
 
         EXS_READ_BF_DOB:
             NEXT_EX_STATE = ACCESS_ERR ? EXS_IDLE :
                             DATA_RDY   ? EXS_RESTORE_PC : EXS_READ_BF_DOB;
+
+        EXS_READ_BF_DIB:
+            NEXT_EX_STATE = ACCESS_ERR ? EXS_IDLE :
+                            DATA_RDY   ? EXS_RESTORE_PC : EXS_READ_BF_DIB;
+
+        EXS_RERUN_READ: begin
+            // Same placement as EXS_RERUN_WRITE below: after the frame has been
+            // read and deallocated, so a fault here builds a fresh frame under
+            // the old one.
+            if (ACCESS_ERR)
+                NEXT_EX_STATE = EXS_IDLE;
+            else if (DATA_RDY)
+                NEXT_EX_STATE = EXS_REFILL_PIPE;
+            else
+                NEXT_EX_STATE = EXS_RERUN_READ;
+        end
 
         EXS_RERUN_WRITE: begin
             // UM 8.2.3 puts the rerun after the frame is read and deallocated,
@@ -1116,6 +1230,8 @@ always_comb begin : exception_handler_dec
                 NEXT_EX_STATE = EXS_VALIDATE_FRAME; // Throwaway stack frame.
             else if (DATA_RDY && rte_bf_replay_write)
                 NEXT_EX_STATE = EXS_RERUN_WRITE; // Complete the faulted data write.
+            else if (DATA_RDY && rte_bf_replay_rd_rerun)
+                NEXT_EX_STATE = EXS_RERUN_READ; // DF still set: rerun the read.
             else if (DATA_RDY)
                 NEXT_EX_STATE = EXS_REFILL_PIPE;
             else
