@@ -14,6 +14,13 @@ end
 always_comb begin : fc_generation
     if (BUS_BSY)
         FC_I = FC_LATCH;
+    // UM 8.2.2: the RTE rerun writes the frame's data output buffer "to the
+    // location indicated by the data fault address in the address space defined
+    // by the SSW", so the replayed cycle takes its function code from the frame,
+    // not from the space the restored SR implies. They differ for a faulted MOVES
+    // write, which ran in the space DFC named.
+    else if (RTE_RERUN_WR)
+        FC_I = RTE_RERUN_FC;
     else if (USE_SFC)
         FC_I = SFC;
     else if (USE_DFC)

@@ -20,6 +20,11 @@ D0_ADDR = 0x020014
 class BerrOnceBusModel(BusModel):
     """Asserts BERRn (no DSACK) for the first N accesses to FAULT_ADDR."""
 
+    # Cycles recorded in self.log once the first fault has been injected. A
+    # subclass raises it when the cycle of interest is further into the run than
+    # the fault handler's own traffic.
+    LOG_LIMIT = 60
+
     def __init__(self, dut, memory, wait_states=0, fault_addr=FAULT_ADDR, times=1):
         super().__init__(dut, memory, wait_states)
         self.fault_addr = fault_addr
@@ -50,7 +55,7 @@ class BerrOnceBusModel(BusModel):
                     fc = int(self.dut.FC_OUT.value)
                 except ValueError:
                     fc = -1
-                if self.fault_count and len(self.log) < 60:
+                if self.fault_count and len(self.log) < self.LOG_LIMIT:
                     try:
                         rw = int(self.dut.RWn.value)
                     except ValueError:
@@ -837,3 +842,80 @@ async def test_ssw_size_field_uses_the_um_encoding(dut):
             f"holds 0x{got:08X}, expected 0x{expect_mem:08X} over the "
             f"0x11223344 witness"
         )
+
+        h.cleanup()
+
+
+class BerrReplayLogBusModel(BerrOnceBusModel):
+    """Logs far enough past the fault to reach the RTE's replayed cycle.
+
+    The frame push, the handler and the frame pop are all bus traffic, so the
+    replay is several hundred cycles after the fault that caused it.
+    """
+
+    LOG_LIMIT = 4000
+
+
+@cocotb.test()
+async def test_rte_replay_uses_the_ssw_function_code(dut):
+    """The replayed cycle runs in the address space the SSW names, not the SR's.
+
+    UM 8.2.2: the handler must transfer "the properly sized data from the data
+    output buffer (DOB) on the stack frame to the location indicated by the data
+    fault address in the address space defined by the SSW", and UM 8.2.3 has RTE
+    do exactly that when DF is still set. MOVES is the instruction that separates
+    the SSW's FC field from the space the restored SR implies: its write runs in
+    the space DFC names, so a supervisor MOVES into user data space faults with
+    FC = 1 in the SSW while the restored SR would put the rerun in FC = 5.
+    """
+    h = CPUTestHarness(dut)
+    bus = BerrReplayLogBusModel(dut, h.mem, times=1)
+
+    program = [
+        0x203C, 0x0000, 0x0001,                   # 0x100 MOVE.L #1,D0 (user data)
+        0x4E7B, 0x0001,                           # 0x106 MOVEC D0,DFC
+        0x207C, 0x000E, 0x0000,                   # 0x10A MOVEA.L #$E0000,A0
+        0x263C, 0x5A5A, 0xA5A5,                   # 0x110 MOVE.L #$5A5AA5A5,D3
+        0x0E90, 0x3800,                           # 0x116 MOVES.L D3,(A0) <- BERR
+        0x7421,                                   # 0x11A MOVEQ #$21,D2
+        0x23C2, 0x0002, 0x0018,                   # 0x11C MOVE.L D2,($20018).L
+        0x2E3C, 0xDEAD, 0xCAFE,                   # 0x122 MOVE.L #$DEADCAFE,D7
+        0x23C7, 0x0003, 0x0000,                   # 0x128 MOVE.L D7,($30000).L
+        0x4E72, 0x2700,                           # 0x12E STOP #$2700
+    ]
+    h.mem.load_long(SSW_ADDR, 0)
+
+    found = await _boot(dut, h, bus, program, STORE_FAULT_SSW_HANDLER)
+
+    ssw = h.mem.read(SSW_ADDR, 2)
+    assert bus.fault_count == 1, f"BERRn asserted {bus.fault_count} times"
+    assert bus.faulted[0][1] == 1, (
+        f"the MOVES write ran with FC = {bus.faulted[0][1]}, expected 1: DFC was "
+        f"not in force, so this test proves nothing about the replay"
+    )
+    assert ssw & 0x0100, (
+        f"SSW = 0x{ssw:04X}: DF clear, so RTE never replayed the write"
+    )
+    assert (ssw & 0x7) == 1, (
+        f"SSW = 0x{ssw:04X} carries FC = {ssw & 0x7}, expected the 1 the faulted "
+        f"MOVES write drove"
+    )
+    assert found, "program did not complete after the RTE replay"
+
+    replays = [(a, r, fc) for a, r, fc in bus.log if a == FAULT_ADDR and r == 0]
+    assert replays, (
+        f"no replayed write to 0x{FAULT_ADDR:06X} was seen: {bus.log}"
+    )
+    assert all(fc == 1 for _a, _r, fc in replays), (
+        f"the replayed write cycle drove FC = {[fc for _a, _r, fc in replays]}, "
+        f"expected 1 (user data, the space the SSW names). 5 means the rerun took "
+        f"its function code from the restored SR instead of from SSW[2:0]"
+    )
+    assert h.mem.read(FAULT_ADDR, 4) == 0x5A5AA5A5, (
+        f"the replay did not land: 0x{FAULT_ADDR:06X} holds "
+        f"0x{h.mem.read(FAULT_ADDR, 4):08X}"
+    )
+    assert h.mem.read(STORE_WITNESS, 4) == 0x21, (
+        "execution did not continue after the RTE replay"
+    )
+    h.cleanup()

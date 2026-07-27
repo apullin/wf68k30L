@@ -98,6 +98,7 @@ module WF68K30L_EXCEPTION_HANDLER #(
     output logic        RTE_PIPE_B_FAULT,
     output logic        RTE_RERUN_WR,   // Replaying the faulted data write (UM 8.2.3).
     output logic [31:0] RTE_RERUN_DATA, // Data output buffer popped from the frame.
+    output logic [2:0]  RTE_RERUN_FC,   // Address space of the replay, from the SSW.
     output logic        REFILLn,
     output logic        RESTORE_ISP_PC,
 
@@ -803,6 +804,14 @@ assign rte_bf_replay_size = um_size_to_op_size(rte_bf_ssw[5:4]);
 
 assign RTE_RERUN_WR = (EX_STATE == EXS_RERUN_WRITE) || (NEXT_EX_STATE == EXS_RERUN_WRITE);
 assign RTE_RERUN_DATA = rte_bf_dob;
+
+// FC field of the SSW. UM 8.2.2 defines the rerun's address space with it -- the
+// handler must write "the properly sized data from the data output buffer (DOB)
+// on the stack frame to the location indicated by the data fault address in the
+// address space defined by the SSW" -- so the replayed cycle drives this rather
+// than the space the restored SR would imply. The two differ for MOVES, whose
+// faulted write ran in the space DFC named.
+assign RTE_RERUN_FC = rte_bf_ssw[2:0];
 
 assign RTE_PIPE_LOAD = (EX_STATE == EXS_RESTORE_STATUS && DATA_RDY && DATA_VALID &&
                         EXCEPTION == EX_RTE &&

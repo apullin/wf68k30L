@@ -4,7 +4,15 @@
 // Portable inference-first synchronous single-read/single-write RAM.
 // - One registered read port.
 // - One write port.
-// - Read and write may occur in the same cycle.
+// - Read and write may occur in the same cycle, on the same address:
+//   the read returns the value being written (write-first).
+//
+// The bypass is not an optimisation. Both cache state machines set an entry's
+// valid bit on the same edge that registers its RAM write strobe, so the clock
+// in which the write is presented here is already a clock in which a lookup can
+// see the entry as valid and address it. Read-before-write would hand that
+// lookup the pre-fill content of the entry -- for an instruction fetch, a word
+// that was never in memory.
 // ====================================================================
 
 (* keep_hierarchy = "yes" *)
@@ -28,7 +36,7 @@ module WF68K30L_SYNC_RAM_1R1W #(
         if (WR_EN)
             mem[WR_ADDR] <= WR_DATA;
         if (RD_EN)
-            RD_DATA <= mem[RD_ADDR];
+            RD_DATA <= (WR_EN && WR_ADDR == RD_ADDR) ? WR_DATA : mem[RD_ADDR];
     end
 
 endmodule

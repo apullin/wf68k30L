@@ -38,7 +38,7 @@ class BusModel:
 
     def __init__(self, dut, memory, wait_states=0, port_width=4, sync_term=False,
                  cback=False, cback_beats=BURST_BEATS, cback_drop_after=None,
-                 ciin_on_beat=None):
+                 ciin_on_beat=None, berr_on_beat=None):
         """
         Args:
             dut: cocotb handle to the DUT (WF68K30L_TOP).
@@ -58,6 +58,9 @@ class BusModel:
                 supplied, modelling a burst cut short by the device.
             ciin_on_beat: Assert CIINn while supplying this beat (2..4),
                 modelling a non-cachable long word part-way through a burst.
+            berr_on_beat: Assert BERRn while supplying this beat (2..4),
+                modelling a device that faults part-way through a burst. HALTn
+                is left negated, so this is a plain bus error and not a retry.
         """
         assert port_width in self.DSACK_FOR_WIDTH, f"bad port_width {port_width}"
         assert not (sync_term and port_width != 4), "STERM requires a 32-bit port"
@@ -69,6 +72,8 @@ class BusModel:
             "burst streaming needs wait_states=0"
         assert ciin_on_beat is None or 2 <= ciin_on_beat <= self.BURST_BEATS, \
             "ciin_on_beat names a burst fill beat, which is the second or later"
+        assert berr_on_beat is None or 2 <= berr_on_beat <= self.BURST_BEATS, \
+            "berr_on_beat names a burst fill beat, which is the second or later"
         self.dut = dut
         self.memory = memory
         self.wait_states = wait_states
@@ -81,13 +86,15 @@ class BusModel:
         self.cback_beats = cback_beats
         self.cback_drop_after = cback_drop_after
         self.ciin_on_beat = ciin_on_beat
+        self.berr_on_beat = berr_on_beat
         # One (addr, size_code, is_write) record per sub-cycle served, in order.
         # Lets a test assert what the bus actually did rather than only what
         # ended up in a register.
         self.sub_cycles = []
         # One record per cycle on which this device acknowledged a burst
-        # request: {'base', 'beats', 'cback_dropped', 'ciin'}. beats == 1 means
-        # the processor did not hold the bus, so no burst fill happened.
+        # request: {'base', 'beats', 'cback_dropped', 'ciin', 'berr'}.
+        # beats == 1 means the processor did not hold the bus, so no burst fill
+        # happened.
         self.bursts = []
         self._running = False
         self._trace = os.environ.get("BUS_TRACE", "0") not in ("", "0", "false", "False")
@@ -203,6 +210,7 @@ class BusModel:
         beats = 1
         dropped = False
         ciin = False
+        berr = False
 
         await RisingEdge(self.dut.CLK)  # Acknowledge edge of the first cycle.
         while self._running and self.sync_term and beats < self.cback_beats:
@@ -226,16 +234,29 @@ class BusModel:
             if self.ciin_on_beat == beats:
                 self.dut.CIINn.value = 0
                 ciin = True
+            if self.berr_on_beat == beats:
+                # UM 7.5.1: a bus error on the second cycle or later aborts the
+                # burst, so a device that faults stops supplying long words.
+                self.dut.BERRn.value = 0
+                berr = True
+                break
             if self.cback_drop_after is not None and beats >= self.cback_drop_after:
                 self.dut.CBACKn.value = 1
                 dropped = True
                 break
+
+        if berr:
+            # BERR is stable across the edge that samples it with STERM, then
+            # released before any following cycle can see it.
+            await RisingEdge(self.dut.CLK)
+            self.dut.BERRn.value = 1
 
         self.bursts.append({
             "base": addr,
             "beats": beats,
             "cback_dropped": dropped,
             "ciin": ciin,
+            "berr": berr,
         })
 
     def _cycle_layout(self, addr, size_code, *, is_write=False):

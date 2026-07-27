@@ -224,7 +224,19 @@ end
 // BERRn, which is the same edge the terminating sub-cycle leaves DATA_C1C4 on.
 // That cycle therefore has to qualify the negedge sample directly. When the
 // fault is a retry, BUS_CYC_RDY is already suppressed, so this stays clear.
-assign BUS_FLT_ANY = BUS_FLT || (BUS_CYC_RDY && LAST_SUB_CYCLE && BUS_FLT_VAR);
+//
+// UM 7.5.1: "for either cache, when a bus error occurs after the burst mode has
+// been entered (that is, on the second cycle or later), the cache entry
+// corresponding to that cycle is marked invalid, but the processor does not take
+// an exception (the microsequencer has not yet requested the data)." The burst
+// engine acknowledges the whole operation on the same edge the aborting beat is
+// processed on, so the direct term would otherwise read that beat's BERR as a
+// fault on a completing read; the registered path above is excluded for the same
+// reason. A bus error on the first cycle is a real fault and still reaches this,
+// because BURST_ENTER requires BUS_FLT_VAR clear and so burst mode is not
+// entered on that edge at all.
+assign BUS_FLT_ANY = BUS_FLT ||
+                     (!BURST_ACTIVE && BUS_CYC_RDY && LAST_SUB_CYCLE && BUS_FLT_VAR);
 
 // ---- Access type tracking ----
 // Latches which type of access (read/write/opcode) is active during a bus cycle.

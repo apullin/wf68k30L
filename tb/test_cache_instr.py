@@ -1916,6 +1916,31 @@ async def _bringup(dut, h, program, bus):
     await ClockCycles(dut.CLK, 4)
 
 
+BURST_INSTR_CACR = 0x0000_0011  # IBE, EI
+BURST_COUNT_STEPS = 24
+BURST_COUNT_RESULT = 1 + BURST_COUNT_STEPS
+
+
+def _burst_count_program(h, res):
+    """Enable the instruction cache with burst filling, then count in a straight line.
+
+    Every prefetch miss in the run is burst eligible, and the code is long enough
+    to cross several cache lines, so an abnormally terminated instruction burst
+    has to leave the line coherent for the count to come out right.
+    """
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(BURST_INSTR_CACR),
+        *movec_dn_to_cr(0, CR_CACR),
+        *moveq(0x01, 1),
+    ]
+    for _ in range(BURST_COUNT_STEPS):
+        program.extend(addq(LONG, 1, DN, 1))
+    program.extend(move_to_abs_long(LONG, DN, 1, res))
+    program.extend(h.sentinel_program())
+    return program
+
+
 def _burst_read_program(h, data_addr, res, cacr=BURST_DATA_CACR):
     """Enable the data cache with burst filling, then miss on an aligned long.
 
@@ -2096,7 +2121,19 @@ async def test_cbreq_not_asserted_inside_rmc_sequence(dut):
 # SIZ0-SIZ1 for the whole burst and to take one long word per STERM. The device
 # side is BusModel(sync_term=True, cback=True): it holds CBACK with STERM,
 # advances A3:A2 itself with line wraparound (UM Figure 6-12), and supports
-# cback_drop_after and ciin_on_beat for the abnormal terminations.
+# cback_drop_after, ciin_on_beat and berr_on_beat for the abnormal terminations.
+#
+# All three of UM 7.3.7's abnormal terminations are per transfer, because CBACK
+# and CIIN are "internally latched on the rising edge of the clock for which
+# STERM is asserted" (UM 6.1.3.2) and each streamed long word has its own such
+# edge. A CBACK negation keeps the long word it was sampled with -- "Because
+# CBACK corresponds to the next cycle, three long words are transferred even
+# though CBACK is only asserted for two clock periods" (UM 7.3.7, Figure 7-39) --
+# while CIIN and BERR keep theirs out of the cache. None of the three is a retry:
+# UM 7.3.7 says of BERR and HALT together on a fill beat that it "indicates a bus
+# error condition, which aborts the burst operation", and UM 7.5.1 says a bus
+# error there leaves "the cache entry corresponding to that cycle ... marked
+# invalid, but the processor does not take an exception".
 #
 # Residual deviations, deliberate and not observable on the bus: the requested
 # long word reaches the execution unit when the burst completes rather than at
@@ -2115,6 +2152,45 @@ def _line_read_cycles(bus, line_base):
         addr for addr, _code, is_write in bus.sub_cycles
         if not is_write and line_base <= addr < line_base + 16
     ]
+
+
+def _entry_mask(base_addr, entries):
+    """Validity mask of a burst of `entries` long words from base_addr's entry.
+
+    The device advances A3:A2 with wraparound inside the line (UM Figure 6-12),
+    so a burst cut short holds the requested entry and its wrapped successors.
+    """
+    base = (base_addr >> 2) & 0x3
+    mask = 0
+    for i in range(entries):
+        mask |= 1 << ((base + i) & 0x3)
+    return mask
+
+
+def _assert_dcache_line_coherent(dut, h, line_base):
+    """Every valid entry of the line must hold the long word memory holds.
+
+    An abnormally terminated burst may leave entries invalid, but it must never
+    leave one valid over data the burst did not transfer. Returns the validity
+    mask so the caller can say which entries it expects.
+    """
+    line = (line_base >> 4) & 0xF
+    valid = int(cache_state(dut).DCACHE_VALID[line].value)
+    tag = int(cache_state(dut).DCACHE_TAG[line].value)
+    assert tag == (line_base >> 8), (
+        f"D-cache line {line:X} is tagged 0x{tag:06X}, expected "
+        f"0x{line_base >> 8:06X}"
+    )
+    for entry in range(4):
+        if not (valid >> entry) & 1:
+            continue
+        got = int(dut.I_DCACHE_DATA_RAM.mem[(line << 2) | entry].value)
+        want = h.mem.read(line_base + 4 * entry, 4)
+        assert got == want, (
+            f"D-cache entry {entry} of line 0x{line_base:06X} is valid holding "
+            f"0x{got:08X}, but memory holds 0x{want:08X}"
+        )
+    return valid
 
 
 @cocotb.test()
@@ -2168,7 +2244,6 @@ async def test_cback_negated_mid_burst_ends_it_cleanly(dut):
     h = CPUTestHarness(dut)
     data_addr = h.DATA_BASE + 0x740
     line_base = data_addr & ~0xF
-    line_idx = (line_base >> 4) & 0xF
     res = h.RESULT_BASE + 0xE0
 
     for i in range(4):
@@ -2189,10 +2264,12 @@ async def test_cback_negated_mid_burst_ends_it_cleanly(dut):
     assert bus.bursts[0]["beats"] == 2, (
         f"device supplied {bus.bursts[0]['beats']} long words, expected 2"
     )
-    # Two entries loaded, and no further external traffic for the other two.
-    valid = int(cache_state(dut).DCACHE_VALID[line_idx].value)
-    assert bin(valid).count("1") == 2, (
-        f"D-cache line validity 0x{valid:X} after a two-beat burst"
+    # The two transferred entries loaded, the two the burst never reached left
+    # invalid rather than filled, and no further external traffic for them.
+    valid = _assert_dcache_line_coherent(dut, h, line_base)
+    assert valid == _entry_mask(data_addr, 2), (
+        f"D-cache line validity 0x{valid:X} after a two-beat burst, expected "
+        f"0x{_entry_mask(data_addr, 2):X}"
     )
     assert _line_read_cycles(bus, line_base) == [data_addr], (
         "the aborted burst was followed by extra AS cycles for the same line"
@@ -2212,7 +2289,6 @@ async def test_ciin_mid_burst_aborts_it(dut):
     h = CPUTestHarness(dut)
     data_addr = h.DATA_BASE + 0x780
     line_base = data_addr & ~0xF
-    line_idx = (line_base >> 4) & 0xF
     res = h.RESULT_BASE + 0xE4
 
     for i in range(4):
@@ -2230,12 +2306,178 @@ async def test_ciin_mid_burst_aborts_it(dut):
     assert found, "CIIN mid-burst test did not complete"
 
     assert bus.bursts and bus.bursts[0]["ciin"], "CIIN was never asserted mid-burst"
-    valid = int(cache_state(dut).DCACHE_VALID[line_idx].value)
-    assert bin(valid).count("1") == 2, (
+    valid = _assert_dcache_line_coherent(dut, h, line_base)
+    assert valid == _entry_mask(data_addr, 2), (
         f"D-cache line validity 0x{valid:X}: the CIIN-marked beat and everything "
-        "after it must stay out of the cache"
+        f"after it must stay out of the cache, leaving 0x{_entry_mask(data_addr, 2):X}"
     )
     assert _line_read_cycles(bus, line_base) == [data_addr], (
         "the aborted burst was followed by extra AS cycles for the same line"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_ciin_on_the_first_fill_beat_caches_only_the_head(dut):
+    """CIIN on the second cycle of the burst leaves only the requested entry cached.
+
+    UM 6.1.3.2: "The assertion of CIIN during the second, third, or fourth cycle
+    of a burst operation prevents the data during that cycle from being loaded
+    into the appropriate cache and causes CBREQ to negate, aborting the burst
+    operation. However, if the data for the cycle contains part of the requested
+    operand, the execution unit uses that data." CIIN is therefore a per-transfer
+    input: the first cycle's long word, sampled with its own CIIN negated, stays
+    cached, and the marked beat plus the remainder do not.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x800
+    line_base = data_addr & ~0xF
+    res = h.RESULT_BASE + 0xF4
+
+    for i in range(4):
+        h.mem.load_long(line_base + 4 * i, 0xB5D2_0000 | i)
+
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True, ciin_on_beat=2)
+    await _bringup(dut, h, _burst_read_program(h, data_addr, res), bus)
+
+    found = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert bus.bursts and bus.bursts[0]["ciin"], "CIIN was never asserted mid-burst"
+    h.check_no_unexpected_exception()
+    assert found, "CIIN on the first fill beat test did not complete"
+    assert h.mem.read(res, 4) == 0xB5D2_0000 | ((data_addr >> 2) & 0x3), (
+        "the requested operand did not reach the core"
+    )
+    valid = _assert_dcache_line_coherent(dut, h, line_base)
+    assert valid == _entry_mask(data_addr, 1), (
+        f"D-cache line validity 0x{valid:X}: only the entry the first cycle "
+        f"transferred may be cached, leaving 0x{_entry_mask(data_addr, 1):X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_berr_on_burst_beat_aborts_without_exception(dut):
+    """A plain bus error on a burst fill beat aborts the burst, silently.
+
+    UM 7.5.1: "for either cache, when a bus error occurs after the burst mode has
+    been entered (that is, on the second cycle or later), the cache entry
+    corresponding to that cycle is marked invalid, but the processor does not take
+    an exception (the microsequencer has not yet requested the data)."
+
+    The long word the instruction asked for was transferred by the first cycle, so
+    the read completes with its data and only the faulted entry -- and, since the
+    burst aborts, the entries after it -- are left invalid.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x7C0
+    line_base = data_addr & ~0xF
+    res = h.RESULT_BASE + 0xE8
+
+    for i in range(4):
+        h.mem.load_long(line_base + 4 * i, 0xB4E7_0000 | i)
+
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True, berr_on_beat=2)
+    await _bringup(dut, h, _burst_read_program(h, data_addr, res), bus)
+
+    found = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert bus.bursts and bus.bursts[0]["berr"], "BERR was never asserted mid-burst"
+    h.check_no_unexpected_exception()
+    assert found, "burst-beat bus-error test did not complete"
+    assert h.mem.read(res, 4) == 0xB4E7_0000 | ((data_addr >> 2) & 0x3), (
+        "the operand the first cycle of the burst transferred did not reach the core"
+    )
+    valid = _assert_dcache_line_coherent(dut, h, line_base)
+    assert valid == _entry_mask(data_addr, 1), (
+        f"D-cache line validity 0x{valid:X}: only the entry the first cycle "
+        f"transferred may be valid, the faulted beat's entry must not be"
+    )
+    assert _line_read_cycles(bus, line_base) == [data_addr], (
+        "the burst was retried or re-run after the bus error: "
+        f"{[hex(a) for a in _line_read_cycles(bus, line_base)]}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_berr_on_instruction_burst_beat_keeps_running(dut):
+    """Bus errors on instruction burst fill beats never reach the sequencer.
+
+    UM 7.5.1: "In the case of an instruction cache burst, the data from the
+    aborted cycle is completely ignored. Pending instruction prefetches are still
+    pending and are subsequently run by the processor." Every prefetch miss here
+    bursts and every burst faults on its second long word, so the run only
+    completes if none of them raises an exception.
+    """
+    h = CPUTestHarness(dut)
+    res = h.RESULT_BASE + 0xEC
+
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True, berr_on_beat=2)
+    await _bringup(dut, h, _burst_count_program(h, res), bus)
+
+    found = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    faulted = [b for b in bus.bursts if b["berr"]]
+    assert faulted, "no instruction burst was faulted on a fill beat"
+    h.check_no_unexpected_exception()
+    assert found, "instruction burst bus-error test did not complete"
+    assert h.mem.read(res, 4) == BURST_COUNT_RESULT, (
+        f"the instruction stream executed wrongly: got "
+        f"0x{h.mem.read(res, 4):08X}, expected 0x{BURST_COUNT_RESULT:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_cback_negated_mid_instruction_burst_keeps_the_stream_intact(dut):
+    """An instruction burst cut short by CBACK leaves the line's words coherent.
+
+    UM 6.1.3.2: "The premature negation of the CBACK signal during the burst
+    operation causes the current cycle to complete normally, loading the data
+    successfully transferred into the appropriate cache. However, the burst
+    operation aborts." The entries the burst never reached stay invalid, so the
+    fetches for them go to the bus and the instruction stream must be exactly the
+    one in memory -- every partially filled line here is executed straight through.
+    """
+    h = CPUTestHarness(dut)
+    res = h.RESULT_BASE + 0xF0
+
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True, cback_drop_after=2)
+    await _bringup(dut, h, _burst_count_program(h, res), bus)
+
+    found = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    cut_short = [b for b in bus.bursts if b["cback_dropped"]]
+    assert cut_short, "no instruction burst was cut short by a CBACK negation"
+    assert all(b["beats"] == 2 for b in cut_short), (
+        f"a cut-short burst still ran past the CBACK negation: "
+        f"{[b['beats'] for b in cut_short]}"
+    )
+    h.check_no_unexpected_exception()
+    assert found, "instruction burst CBACK-abort test did not complete"
+    assert h.mem.read(res, 4) == BURST_COUNT_RESULT, (
+        f"the instruction stream executed wrongly: got "
+        f"0x{h.mem.read(res, 4):08X}, expected 0x{BURST_COUNT_RESULT:08X}"
     )
     h.cleanup()

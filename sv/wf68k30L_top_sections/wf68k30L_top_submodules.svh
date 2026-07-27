@@ -488,6 +488,7 @@
         .RTE_PIPE_B_FAULT       (RTE_PIPE_B_FAULT),
         .RTE_RERUN_WR           (RTE_RERUN_WR),
         .RTE_RERUN_DATA         (RTE_RERUN_DATA),
+        .RTE_RERUN_FC           (RTE_RERUN_FC),
         .REFILLn                (REFILLn_EXH),
         .RESTORE_ISP_PC         (RESTORE_ISP_PC),
 

@@ -254,6 +254,7 @@ logic [8:0]  SSW_LOW_STACKED; // SSW[8:0] written to the frame at offset $A.
 logic [31:0] DOB_STACKED;    // Output buffer written to the frame at offset $18.
 logic        RTE_RERUN_WR;   // The handler is replaying the faulted data write.
 logic [31:0] RTE_RERUN_DATA; // Output buffer popped from the frame for the replay.
+logic [2:0]  RTE_RERUN_FC;   // Address space of the replay, from the frame's SSW.
 logic        CYCLE_STERM_32; // Burst eligibility: 32-bit synchronous cycle.
 logic        STERM_NOW;
 logic        CBACK_HONOURED; // UM 6.1.3.2: CBACK only counts on a STERM cycle.
