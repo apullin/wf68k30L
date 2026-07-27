@@ -149,7 +149,6 @@ module mmu_runtime_gate_formal;
     logic        MMU_RUNTIME_ATC_B;
     logic        MMU_RUNTIME_ATC_W;
     logic        MMU_RUNTIME_ATC_M;
-    logic        MMU_RUNTIME_ATC_M_SET;
     logic        MMU_RUNTIME_ATC_CI;
     logic [31:0] ADR_P_PHYS;
     logic [31:0] ADR_P_PHYS_CALC;
@@ -376,7 +375,6 @@ module mmu_runtime_gate_formal;
         .MMU_RUNTIME_ATC_B(MMU_RUNTIME_ATC_B),
         .MMU_RUNTIME_ATC_W(MMU_RUNTIME_ATC_W),
         .MMU_RUNTIME_ATC_M(MMU_RUNTIME_ATC_M),
-        .MMU_RUNTIME_ATC_M_SET(MMU_RUNTIME_ATC_M_SET),
         .MMU_RUNTIME_ATC_CI(MMU_RUNTIME_ATC_CI),
         .MMU_RUNTIME_STALL(MMU_RUNTIME_STALL),
         .MMU_TWALK_START(MMU_TWALK_START)

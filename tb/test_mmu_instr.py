@@ -3666,3 +3666,74 @@ async def test_mmu_pload_search_completes_before_the_next_instruction(dut):
         f"PLOADR (read form) must leave M clear, got MMUSR 0x{mmusr:04X}"
     )
     h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_write_to_m_clear_entry_researches_the_table(dut):
+    """A write to a resident M-clear page must re-search, not just set M in the ATC.
+
+    UM 9.4: "If the M bit is clear and a write access to this logical address is
+    attempted, the MC68030 aborts the access and initiates a table search,
+    setting the M bit in the page descriptor, invalidating the old ATC entry,
+    and creating a new entry with the M bit set. The MMU then allows the original
+    write access to be performed."
+
+    A read first creates the entry with M clear. The write that follows has a
+    perfectly good translation available, so nothing forces a search except that
+    rule -- and without the search the descriptor in memory would keep M clear
+    forever, which is what happened while M was set in the entry alone. There is
+    no PFLUSH anywhere in this program.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xFC0)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    stored_value = 0x4D0DEF17
+
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    DESC_M = 1 << 4
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+
+        *move(LONG, AN_IND, 0, DN, 1),        # Read: entry created with M clear.
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 3, DN, 4),
+        *move_to_abs_long(LONG, DN, 4, h.RESULT_BASE + 0),
+
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(stored_value),
+        *move(LONG, DN, 2, AN_IND, 0),        # Write hit on an M-clear entry.
+        *move(LONG, AN_IND, 3, DN, 5),
+        *move_to_abs_long(LONG, DN, 5, h.RESULT_BASE + 4),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0)
+
+    found = await h.run_until_sentinel(max_cycles=90000)
+    assert found, "M-clear write re-search test did not complete"
+
+    after_read = h.read_result_long(0)
+    after_write = h.read_result_long(4)
+    assert not (after_read & DESC_M), (
+        f"A read set M in the page descriptor (0x{after_read:08X})"
+    )
+    assert after_write & DESC_M, (
+        f"The write did not re-search: the page descriptor in memory still reads "
+        f"0x{after_write:08X} with M clear"
+    )
+    # UM 9.4: "The MMU then allows the original write access to be performed."
+    got = h.mem.read(expected_phys_addr & 0xFFFFF, 4)
+    assert got == stored_value, (
+        f"The re-searched write did not land: page holds 0x{got:08X}, expected "
+        f"0x{stored_value:08X}"
+    )
+    h.cleanup()

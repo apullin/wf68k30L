@@ -27,7 +27,6 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic        MMU_RUNTIME_ATC_B,
     input  logic        MMU_RUNTIME_ATC_W,
     input  logic        MMU_RUNTIME_ATC_M,
-    input  logic        MMU_RUNTIME_ATC_M_SET,
     input  logic        MMU_RUNTIME_ATC_CI,
     input  logic [15:0] BIW_1,
     input  logic [31:0] DR_OUT_1,
@@ -408,17 +407,11 @@ always_ff @(posedge CLK) begin : mmu_registers
             MMU_PLOAD_READY <= 1'b1;
         end
 
-        // A write to a page whose entry has M clear sets M in the entry (UM 9.4).
-        if (MMU_RUNTIME_ATC_M_SET) begin
-            atc_set_idx = mmu_atc_set_idx(MMU_RUNTIME_ATC_FC, MMU_RUNTIME_ATC_TAG);
-            for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
-                if (MMU_ATC_V[atc_set_idx][way_i] &&
-                    MMU_ATC_FC[atc_set_idx][way_i] == MMU_RUNTIME_ATC_FC &&
-                    MMU_ATC_TAG[atc_set_idx][way_i] == MMU_RUNTIME_ATC_TAG)
-                    MMU_ATC_M[atc_set_idx][way_i] <= 1'b1;
-            end
-        end
-
+        // A write to a page whose entry has M clear no longer sets M in the
+        // entry on its own. UM 9.4 requires the access to be aborted and the
+        // table searched again, so the descriptor in memory gets the bit too;
+        // the translate module routes such a write through the search and the
+        // refill below replaces the entry with M set.
         if (MMU_RUNTIME_ATC_REFILL || MMU_PLOAD_DONE) begin
             if (MMU_PLOAD_DONE) begin
                 atc_fc = MMU_PLOAD_FC;
