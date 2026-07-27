@@ -250,6 +250,19 @@ logic        BF_IS_WRITE;    // The faulted access was a core data write.
 logic        PC_BF_FROZEN;   // PC_BF/ADR_BF hold the faulted access's owner.
 logic [31:0] PC_STACKED;     // PC written to the frame at offset $2.
 logic [31:0] ADR_STACKED;    // Fault address written to the frame at offset $10.
+// Data-write replay support for RTE (UM 8.2.3). The frame carries the
+// continuation PC in the format $A/$B internal-register long word at $14 and
+// flags replay eligibility in SSW bit 3, one of the SSW's internal-use bits.
+logic [31:0] PC_NEXT_WB;     // PC after the instruction owning the writeback stage.
+logic [31:0] DOB_WB;         // Write data of the instruction owning the writeback stage.
+logic        WB_REPLAYABLE;  // That write is its instruction's last memory transfer.
+logic [31:0] PC_CONT_BF;     // Continuation PC for a format $A/$B bus-fault frame.
+logic [31:0] DOB_BF;         // Core write data behind the faulted access.
+logic        BF_REPLAY_WR;   // Faulted write completable by replaying the cycle.
+logic [8:0]  SSW_LOW_STACKED; // SSW[8:0] written to the frame at offset $A.
+logic [31:0] DOB_STACKED;    // Output buffer written to the frame at offset $18.
+logic        RTE_RERUN_WR;   // The handler is replaying the faulted data write.
+logic [31:0] RTE_RERUN_DATA; // Output buffer popped from the frame for the replay.
 logic        CYCLE_STERM_32; // Burst eligibility: 32-bit synchronous cycle.
 logic        STERM_NOW;
 logic        CBACK_HONOURED; // UM 6.1.3.2: CBACK only counts on a STERM cycle.

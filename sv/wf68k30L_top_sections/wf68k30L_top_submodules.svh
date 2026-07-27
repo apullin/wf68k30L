@@ -457,6 +457,8 @@
         .RTE_PIPE_BIW_2         (RTE_PIPE_BIW_2),
         .RTE_PIPE_C_FAULT       (RTE_PIPE_C_FAULT),
         .RTE_PIPE_B_FAULT       (RTE_PIPE_B_FAULT),
+        .RTE_RERUN_WR           (RTE_RERUN_WR),
+        .RTE_RERUN_DATA         (RTE_RERUN_DATA),
         .REFILLn                (REFILLn_EXH),
         .RESTORE_ISP_PC         (RESTORE_ISP_PC),
 
