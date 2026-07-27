@@ -132,7 +132,6 @@ typedef enum logic [1:0] {
     LVL_B = 2'd2
 } INSTR_LVL_TYPE;
 
-logic        REQ;
 logic        EW_REQ;
 
 // Instruction pipe - record fields become separate signals
@@ -140,7 +139,6 @@ logic [15:0] IPIPE_D;
 logic [15:0] IPIPE_C;
 logic [15:0] IPIPE_B;
 
-logic        FIFO_RD;
 logic        IPIPE_B_FAULT;
 logic        IPIPE_C_FAULT;
 logic        IPIPE_D_FAULT;

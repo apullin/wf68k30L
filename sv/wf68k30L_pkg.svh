@@ -162,12 +162,6 @@ parameter int SR_Z = 2;       // Zero
 parameter int SR_N = 3;       // Negative
 parameter int SR_X = 4;       // Extend
 
-// System byte bit positions
-parameter int SR_IPL_LO = 8;  // Interrupt priority mask low bit
-parameter int SR_IPL_HI = 10; // Interrupt priority mask high bit
-parameter int SR_S = 13;      // Supervisor mode
-parameter int SR_T = 15;      // Trace mode
-
 // ---- Addressing mode constants ----
 parameter logic [2:0] ADR_DN      = 3'b000; // Data register direct
 parameter logic [2:0] ADR_AN      = 3'b001; // Address register direct
@@ -255,11 +249,3 @@ function automatic logic [1:0] um_size_to_op_size(logic [1:0] um_code);
     endcase
 endfunction
 
-// ---- Condition code flags struct ----
-typedef struct packed {
-    logic x; // Extend
-    logic n; // Negative
-    logic z; // Zero
-    logic v; // Overflow
-    logic c; // Carry
-} ccr_t;
