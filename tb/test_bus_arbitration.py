@@ -10,8 +10,8 @@ legitimately depend on:
     AS assertion and BUS_EN negated, which is what WF68K30L_CPU_WRAPPER uses
     to three-state exactly the outputs UM Table 5-2 marks three-stateable.
   - RMC is asserted continuously over a whole read-modify-write sequence, BG
-    is withheld for its duration, and no foreign bus cycle -- including a
-    background cache fill -- appears inside it (UM 5.6.4, 7.3.3).
+    is withheld for its duration, and no foreign bus cycle -- and no burst
+    request -- appears inside it (UM 5.6.4, 7.3.3, 7.3.7).
 
 Cycle accuracy is not the goal; contract accuracy is.
 
@@ -29,10 +29,11 @@ import os
 import re
 
 import cocotb
+from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, ClockCycles
 
 from cpu_harness import CPUTestHarness
-from bus_model import AlternateBusMaster
+from bus_model import AlternateBusMaster, BusModel
 from m68k_encode import (
     move, movea, moveq, imm_long, tas, nop, divu_l, movec_to_cr,
     LONG, DN, AN_IND, SPECIAL, IMMEDIATE,
@@ -87,6 +88,29 @@ def _rd(dut, name, default=None):
         return int(getattr(dut, name).value)
     except (ValueError, AttributeError):
         return default
+
+
+async def _bringup_with_bus(dut, h, program, bus):
+    """Bring the CPU up against a caller-supplied bus model.
+
+    CPUTestHarness.setup() always installs a plain asynchronous BusModel, so a
+    test needing a synchronous or burst-capable device does the sequence itself.
+    """
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    h._init_idle_inputs()
+    h._install_trap_stubs()
+    h._load_memory(program)
+    await RisingEdge(dut.CLK)
+    await RisingEdge(dut.CLK)
+    dut.RESET_INn.value = 0
+    dut.HALT_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+    h.bus = bus
+    await bus.start()
+    dut.RESET_INn.value = 1
+    dut.HALT_INn.value = 1
+    await ClockCycles(dut.CLK, 4)
 
 
 # ===================================================================
@@ -463,18 +487,20 @@ async def test_rmc_asserted_continuously_across_read_modify_write(dut):
 
 
 @cocotb.test()
-async def test_no_background_cache_fill_inside_read_modify_write(dut):
+async def test_no_burst_fill_inside_read_modify_write(dut):
     """UM 7.3.3: "No burst filling of the data cache occurs during a
     read-modify-write operation."
 
-    Both caches and burst filling are enabled and the device acknowledges
-    burst mode, so the core's background line-fill cycles really do run -- the
-    test asserts that at least one of them happened, which is what keeps it
-    from passing vacuously -- and none of them lands inside the RMC window.
+    Both caches and burst filling are enabled and the device really does burst:
+    the read ahead of the locked sequence fills its whole cache line under one
+    AS, which is what keeps this from passing vacuously. No burst may be
+    requested inside the RMC window (UM 7.3.7: "CBREQ is not asserted during the
+    read or write cycles of any read-modify-write operation"), and no cycle
+    other than the locked operand's and instruction fetches may appear in it.
     """
     h = CPUTestHarness(dut)
     tas_addr = h.DATA_BASE + 0x2040
-    line_addr = h.DATA_BASE + 0x1000     # cache line armed for a burst fill
+    line_addr = h.DATA_BASE + 0x1000     # cache line filled by a burst
     h.mem.write(tas_addr, 1, 0x00)
     for i in range(16):
         h.mem.load_long(line_addr + 4 * i, 0x1000_0000 + i)
@@ -486,15 +512,16 @@ async def test_no_background_cache_fill_inside_read_modify_write(dut):
             *imm_long(CACR_CACHES_AND_BURST),
             *movec_to_cr(0, CR_CACR),
             *movea(LONG, SPECIAL, IMMEDIATE, 2), *imm_long(line_addr),
-            # Arms a data-cache burst fill for the whole line.
+            # Bursts the whole line into the data cache.
             *move(LONG, AN_IND, 2, DN, 3),
         ],
     )
-    await h.setup(program)
-    dut.CBACKn.value = 0                 # slave supports burst mode
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True)
+    await _bringup_with_bus(dut, h, program, bus)
 
     inside_rmc = []
-    line_cycles = []
+    rmc_clocks = 0
+    rmc_cbreq_low = 0
     prev_as = 1
     for _ in range(10000):
         await RisingEdge(dut.CLK)
@@ -503,32 +530,36 @@ async def test_no_background_cache_fill_inside_read_modify_write(dut):
         adr = _rd(dut, "ADR_OUT")
         if adr is None:
             continue
-        if prev_as == 1 and as_n == 0:
-            rec = (adr, _rd(dut, "RWn"), _rd(dut, "FC_OUT"))
-            if line_addr <= adr < line_addr + 0x40:
-                line_cycles.append(rec)
-            if rmcn == 0:
-                inside_rmc.append(rec)
+        if as_n == 0 and rmcn == 0:
+            rmc_clocks += 1
+            if _rd(dut, "CBREQn", 1) == 0:
+                rmc_cbreq_low += 1
+        if prev_as == 1 and as_n == 0 and rmcn == 0:
+            inside_rmc.append((adr, _rd(dut, "RWn"), _rd(dut, "FC_OUT")))
         prev_as = as_n
         if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
             break
 
     assert h.mem.read(tas_addr, 1) == 0x80, "TAS did not run"
-    background = [c for c in line_cycles if c[0] != line_addr]
-    assert background, (
-        f"no background cache-fill cycle ran at all, so this test would not "
-        f"have detected one inside RMC; line cycles seen = "
-        f"{[(hex(a), rw, fc) for a, rw, fc in line_cycles]}"
+    assert bus.bursts and any(b["beats"] > 1 for b in bus.bursts), (
+        f"no burst fill ran at all, so this test would not have detected one "
+        f"inside RMC; bursts seen = {bus.bursts}"
+    )
+    line_cycles = [addr for addr, _c, is_write in bus.sub_cycles
+                   if line_addr <= addr < line_addr + 0x40]
+    assert line_cycles.count(line_addr) == 1 and len(line_cycles) == 1, (
+        f"the line was filled with more than the one burst cycle: "
+        f"{[hex(a) for a in line_cycles]}"
+    )
+    assert rmc_clocks, "never observed a bus cycle with RMC asserted"
+    assert rmc_cbreq_low == 0, (
+        f"CBREQn was asserted on {rmc_cbreq_low} of {rmc_clocks} RMC bus clocks"
     )
     strays = [c for c in inside_rmc if not (c[0] == tas_addr
                                             or c[2] == FC_SUPER_PROG)]
     assert not strays, (
         f"foreign bus cycle inside the read-modify-write sequence: "
         f"{[(hex(a), rw, fc) for a, rw, fc in strays]}"
-    )
-    assert not [c for c in inside_rmc if line_addr <= c[0] < line_addr + 0x40], (
-        f"a cache-line fill cycle ran inside the RMC window: "
-        f"{[(hex(a), rw, fc) for a, rw, fc in inside_rmc]}"
     )
     h.cleanup()
 

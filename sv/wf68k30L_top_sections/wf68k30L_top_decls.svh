@@ -119,14 +119,9 @@ logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_CI_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*3-1:0] MMU_ATC_FC_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT;
-// Descriptor-shadow store backing MMU walk helpers. Keep 64 sets so existing
-// address hashing remains stable, but add a second way to avoid false
-// evictions between root/leaf descriptors that alias the same set.
-localparam int MMU_DESC_SHADOW_LINES = 128;
-localparam int MMU_DESC_SHADOW_WAYS = 2;
-localparam int MMU_DESC_SHADOW_SETS = MMU_DESC_SHADOW_LINES / MMU_DESC_SHADOW_WAYS;
-localparam int MMU_DESC_SHADOW_SET_BITS = $clog2(MMU_DESC_SHADOW_SETS);
-localparam int MMU_DESC_SHADOW_WAY_BITS = (MMU_DESC_SHADOW_WAYS > 1) ? $clog2(MMU_DESC_SHADOW_WAYS) : 1;
+// The descriptor-shadow store that used to back the MMU walk helpers is gone:
+// every table search -- runtime, PLOAD and PTEST -- reads its descriptors from
+// memory over the bus (UM 9.5.2), so there is no internal copy to size.
 
 // Remaining datapath, handshake, trap, and runtime-translation signals.
 logic        DR_WR_1;
@@ -250,6 +245,19 @@ logic        BF_IS_WRITE;    // The faulted access was a core data write.
 logic        PC_BF_FROZEN;   // PC_BF/ADR_BF hold the faulted access's owner.
 logic [31:0] PC_STACKED;     // PC written to the frame at offset $2.
 logic [31:0] ADR_STACKED;    // Fault address written to the frame at offset $10.
+// Data-write replay support for RTE (UM 8.2.3). The frame carries the
+// continuation PC in the format $A/$B internal-register long word at $14 and
+// flags replay eligibility in SSW bit 3, one of the SSW's internal-use bits.
+logic [31:0] PC_NEXT_WB;     // PC after the instruction owning the writeback stage.
+logic [31:0] DOB_WB;         // Write data of the instruction owning the writeback stage.
+logic        WB_REPLAYABLE;  // That write is its instruction's last memory transfer.
+logic [31:0] PC_CONT_BF;     // Continuation PC for a format $A/$B bus-fault frame.
+logic [31:0] DOB_BF;         // Core write data behind the faulted access.
+logic        BF_REPLAY_WR;   // Faulted write completable by replaying the cycle.
+logic [8:0]  SSW_LOW_STACKED; // SSW[8:0] written to the frame at offset $A.
+logic [31:0] DOB_STACKED;    // Output buffer written to the frame at offset $18.
+logic        RTE_RERUN_WR;   // The handler is replaying the faulted data write.
+logic [31:0] RTE_RERUN_DATA; // Output buffer popped from the frame for the replay.
 logic        CYCLE_STERM_32; // Burst eligibility: 32-bit synchronous cycle.
 logic        STERM_NOW;
 logic        CBACK_HONOURED; // UM 6.1.3.2: CBACK only counts on a STERM cycle.
@@ -499,6 +507,9 @@ logic [31:0] DCACHE_WRITE_ADDR;
 OP_SIZETYPE  DCACHE_WRITE_SIZE;
 logic [31:0] DCACHE_WRITE_DATA;
 logic        DCACHE_WRITE_CACHEABLE;
+// Retired background line-completion request path (UM 7.3.7 replaced it with
+// address-held burst streaming). Tied off in WF68K30L_TOP_ROUTING_BUS_CACHE; the
+// nets remain because WF68K30L_TOP_ROUTING_MMU_TRANSLATE still takes them.
 logic        BURST_PREFETCH_OP_REQ;
 logic        BURST_PREFETCH_DATA_REQ;
 logic [2:0]  BURST_PREFETCH_OP_WORD;
@@ -507,3 +518,15 @@ logic [31:0] BURST_PREFETCH_ADDR;
 logic [2:0]  BURST_PREFETCH_FC;
 logic        BUS_CYCLE_BURST;
 logic        BUS_CYCLE_BURST_IS_OP;
+
+// Address-held burst streaming (UM 7.3.7). BURST_REQ_BUSIF is the burst request
+// the bus interface arms the engine from -- the same term CBREQn is driven from --
+// and the beat port carries one streamed long word per clock to the cache.
+logic        BURST_REQ_BUSIF;
+logic        BURST_ACTIVE;
+logic        BURST_CBREQ_HOLD;
+logic        BURST_BEAT_RDY;
+logic        BURST_BEAT_FIRST;
+logic        BURST_BEAT_IS_OP;
+logic [31:0] BURST_BEAT_ADDR;
+logic [31:0] BURST_BEAT_DATA;

@@ -314,17 +314,27 @@ class BusModel:
                     await RisingEdge(self.dut.CLK)
 
                 if rw_n == 1:
-                    # READ cycle: drive DATA_IN with data from memory
-                    # Pack bytes into the exact bus lanes expected by the
-                    # core's SIZE/ADR transfer semantics.
-                    data = 0
-                    for lane in range(width, 4):
-                        data |= self.POISON_BYTE << ((3 - lane) * 8)
-                    for i in range(byte_count):
-                        b = self.memory.read(addr + i, 1) & 0xFF
-                        lane = start_lane + i
-                        shift = (3 - lane) * 8  # MSB-first lane mapping
-                        data |= b << shift
+                    burst = self._burst_acknowledged(rw_n, width)
+                    if burst:
+                        # UM 7.3.7 State 2: "All of the byte sections (D24-D31,
+                        # D16-D23, D8-D15, and D0-D7) of the data bus must be
+                        # driven since the burst operation latches 32 bits on
+                        # every cycle." A device that answers CBREQ therefore
+                        # drives the whole long word on the first access too,
+                        # whatever SIZ0-SIZ1 asked for -- the processor caches the
+                        # entry, not just the operand.
+                        data = self._long_at(addr)
+                    else:
+                        # Pack bytes into the exact bus lanes expected by the
+                        # core's SIZE/ADR transfer semantics.
+                        data = 0
+                        for lane in range(width, 4):
+                            data |= self.POISON_BYTE << ((3 - lane) * 8)
+                        for i in range(byte_count):
+                            b = self.memory.read(addr + i, 1) & 0xFF
+                            lane = start_lane + i
+                            shift = (3 - lane) * 8  # MSB-first lane mapping
+                            data |= b << shift
 
                     self.dut.DATA_IN.value = data
                     if self._trace_enabled(addr):
@@ -337,7 +347,6 @@ class BusModel:
                             byte_count,
                             data,
                         )
-                    burst = self._burst_acknowledged(rw_n, width)
                     if burst:
                         # UM 6.1.3.2: "The device must also assert CBACK (at the
                         # same time as STERM) at the end of the cycle in which
@@ -536,11 +545,35 @@ class AlternateBusMaster:
         self.dut.BGACKn.value = 0
         if negate_br:
             self.negate_br()
+        self._take_bus()
+
+    def _take_bus(self):
+        """Start acting as bus master, and as the contention checker."""
         self.owns_bus = True
         if self.responder is not None:
             self.responder.bus_owner = self
         self._monitoring = True
         self._monitor_task = cocotb.start_soon(self._ownership_monitor())
+
+    async def wait_as_negated(self, timeout=256, settled=2):
+        """UM 7.7.4 Figure 7-62 NOTE: the single-wire takeover precondition.
+
+        "The alternate bus master must sample AS high on two consecutive rising
+        edges of the clock (after BGACK is recognized low) before taking the
+        bus."
+
+        AS is the whole condition: unlike UM 7.7.3's three-wire handover, which
+        also waits for DSACKx/STERM, single-wire arbitration is specified on AS
+        alone, and it is the processor recognizing BGACK -- not the slave going
+        quiet -- that stops further cycles.
+        """
+        high = 0
+        for _ in range(timeout):
+            await RisingEdge(self.dut.CLK)
+            high = high + 1 if self._rd("ASn", 0) == 1 else 0
+            if high >= settled:
+                return True
+        return False
 
     async def hold(self, clocks):
         """Stay bus master for a while, standing in for the master's cycles."""
@@ -576,11 +609,26 @@ class AlternateBusMaster:
 
         UM 7.7.4: "As shown by the path from state 0 to state 4, BGACK alone
         can be used to place the processor's external bus buffers in the
-        high-impedance state, providing single-wire arbitration capability."
+        high-impedance state, providing single-wire arbitration capability...
+        An alternate master forces the MC68030 to release the bus by asserting
+        BGACK and waits for AS to negate before taking the bus."
+
+        That is the order the UM specifies and the order used here: BGACK first,
+        wherever the processor happens to be, and only then the two-consecutive-
+        edges AS check of the Figure 7-62 NOTE.  Asserting BGACK after the AS
+        check instead asks the processor to un-drive an AS it committed to before
+        BGACK existed on the pin -- two clocks before it can be synchronized in
+        (UM 7.7.4: "all asynchronous inputs to the MC68030 are internally
+        synchronized in a maximum of two cycles of the processor clock") -- which
+        is exactly what the NOTE's "after BGACK is recognized low" rules out.
+        The cycle in progress at BGACK time is allowed to finish; the contention
+        check starts at the moment this master takes the bus.
         """
-        if not await self.wait_bus_free(timeout=timeout, settled=settled):
+        self.dut.BGACKn.value = 0
+        if not await self.wait_as_negated(timeout=timeout, settled=settled):
+            self.dut.BGACKn.value = 1
             return False
-        await self.assert_bgack(negate_br=False)
+        self._take_bus()
         await self.hold(hold_clocks)
         return True
 

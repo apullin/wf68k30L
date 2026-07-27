@@ -27,26 +27,42 @@ VHDL_SRC := $(VHDL_DIR)/wf68k30L_address_registers.vhd \
 
 ALL_SRC := $(VHDL_PKG) $(VHDL_SRC)
 
-.PHONY: all synth json clean test-fast test-full test-known-gaps test-mmu-random test-csmith-smoke test-csmith-smoke-jump-tables test-coremark-smoke test-jump-tables test-qemu-diff test-qemu-diff-fuzz test-qemu-diff-campaign test-software-torture test-shakeout formal-smoke
+# The SystemVerilog design -- this is the core under development. Globbed so the
+# list cannot go stale as modules are added; the package must be read first.
+SV_PKG := $(SV_DIR)/wf68k30L_pkg.sv
+SV_SRC := $(filter-out $(SV_PKG),$(sort $(wildcard $(SV_DIR)/wf68k30L_*.sv)))
+SV_INC := $(wildcard $(SV_DIR)/*.svh) \
+          $(wildcard $(SV_DIR)/wf68k30L_top_sections/*.svh) \
+          $(wildcard $(SV_DIR)/wf68k30L_top_sections/*/*.svh)
+
+YOSYS_SV_READ := read_verilog -sv -I. -I$(SV_DIR) $(SV_PKG) $(SV_SRC)
+
+.PHONY: all synth json synth-vhdl-ref clean test-fast test-full test-mmu-random test-csmith-smoke test-csmith-smoke-jump-tables test-coremark-smoke test-jump-tables test-qemu-diff test-qemu-diff-fuzz test-qemu-diff-campaign test-software-torture test-shakeout formal-smoke
 
 all: json
 
-# Import VHDL into Yosys via GHDL and run generic synthesis
-synth: $(ALL_SRC)
-	yosys -m ghdl -p \
-	  "ghdl $(GHDL_FLAGS) $(ALL_SRC) -e $(TOP); \
-	   synth -top $(TOP); \
-	   stat"
+# Generic Yosys synthesis of the SystemVerilog design. Target-neutral: for a real
+# part use synth/fpga/run_ecp5_representative.sh, synth/vivado/run_vivado.tcl, or
+# synth/synth_check.sh for the LUT/FF regression tripwire.
+synth: $(SV_PKG) $(SV_SRC) $(SV_INC)
+	yosys -p "$(YOSYS_SV_READ); synth -top $(TOP); stat"
 
 # Produce a JSON netlist (useful for nextpnr or inspection)
 json: $(JSON_OUT)
 
-$(JSON_OUT): $(ALL_SRC)
+$(JSON_OUT): $(SV_PKG) $(SV_SRC) $(SV_INC)
 	mkdir -p $(SYNTH_OUT_DIR)
+	yosys -p "$(YOSYS_SV_READ); synth -top $(TOP); write_json $(JSON_OUT); stat"
+
+# The upstream VHDL in vhdl/ is kept as a historical reference only. It is NOT
+# the design: it predates the MMU, caches and coprocessor interface, and its own
+# README records that it was never verified against the manual, which is why
+# VHDL-vs-SV equivalence was retired (see notes on VER-2). This target exists so
+# the reference can still be elaborated; it does not build the core.
+synth-vhdl-ref: $(ALL_SRC)
 	yosys -m ghdl -p \
 	  "ghdl $(GHDL_FLAGS) $(ALL_SRC) -e $(TOP); \
 	   synth -top $(TOP); \
-	   write_json $(JSON_OUT); \
 	   stat"
 
 clean:
@@ -93,6 +109,7 @@ test-full: test-fast
 	$(MAKE) -C tb TEST_MODULE=test_instr_atomic TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_instr_misc TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_bus_arbitration TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_bus_arbitration_um_gaps TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_fullformat_ea_probe TOPLEVEL=WF68K30L_TOP
 
 # Focused repro suite for switch/jump-table control-flow issues.
@@ -195,9 +212,7 @@ test-shakeout:
 # whole cone they depend on has to be read in.
 FORMAL_MMU_RTL := $(SV_DIR)/wf68k30L_top_routing_bus_cache.sv \
                   $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv \
-                  $(SV_DIR)/wf68k30L_top_desc_shadow_port.sv \
-                  $(SV_DIR)/wf68k30L_top_mmu_ptest.sv \
-                  $(SV_DIR)/wf68k30L_sync_ram_1r1w.sv
+                  $(SV_DIR)/wf68k30L_top_mmu_ptest.sv
 FORMAL_LOWER := memory_map; clk2fflogic; chformal -lower
 SMT_SOLVER ?= bitwuzla
 FORMAL_CYCLES ?= 12
@@ -275,12 +290,3 @@ formal-selftest:
 	   echo "                 every formal result would be a vacuous PASS."; \
 	   exit 1; \
 	 fi
-
-# Suites that fail by design against known, documented RTL gaps. Kept out of
-# test-full so the gate stays meaningful, but runnable so the gaps stay visible.
-# Every failure here has its diagnosis in the test docstring.
-#   test_bus_arbitration_um_gaps -- UM 7.7.2/7.7.4 deviations: BG deferred to
-#     cycle end rather than cycle start, amplified across split transfers, and
-#     relinquish-and-retry unable to break into the first RMC read.
-test-known-gaps:
-	-$(MAKE) -C tb TEST_MODULE=test_bus_arbitration_um_gaps TOPLEVEL=WF68K30L_TOP

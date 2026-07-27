@@ -1166,7 +1166,15 @@ async def test_cbreq_suppressed_on_tt_ci_noncacheable_read(dut):
 
 @cocotb.test()
 async def test_icache_burst_tracking_suppresses_redundant_cbreq(dut):
-    """With EI+IBE and burst ack, only the first miss in a line should request burst intent."""
+    """Only the first miss in an I-cache line may request a burst.
+
+    UM 6.1.3.2 lists the two conditions that raise a burst request: "A read
+    cycle for either the instruction or data cache misses due to the indexed tag
+    not matching" or "A read cycle tag matches, but all long words in the line
+    are invalid". Once a line has been burst-acknowledged neither holds again, so
+    a second request for the same line/tag must not appear -- and with the burst
+    actually filling the line, there is no second miss in it to ask.
+    """
     h = CPUTestHarness(dut)
     res = h.RESULT_BASE + 0x88
     line_base = 0x000120
@@ -1187,21 +1195,14 @@ async def test_icache_burst_tracking_suppresses_redundant_cbreq(dut):
         *h.sentinel_program(),
     ]
 
-    await h.setup(program)
-    dut.CBACKn.value = 1  # Assert burst acknowledge only after first request intent.
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True)
+    await _bringup(dut, h, program, bus)
 
     found = False
-    prev_as_n = 1
-    line_reads = 0
     cbreq_inst_req_on_line = 0
-    burst_acked = False
-
     for _ in range(32000):
         await RisingEdge(dut.CLK)
         try:
-            as_n = int(dut.ASn.value)
-            rw_n = int(dut.RWn.value)
-            addr = int(dut.ADR_OUT.value)
             adr_p_phys = int(dut.ADR_P_PHYS.value)
             cbreq_inst_req_now = int(dut.CBREQ_INST_REQ_NOW.value)
         except ValueError:
@@ -1209,32 +1210,39 @@ async def test_icache_burst_tracking_suppresses_redundant_cbreq(dut):
 
         if cbreq_inst_req_now and ((adr_p_phys >> 4) == (line_base >> 4)):
             cbreq_inst_req_on_line += 1
-            if not burst_acked:
-                # Keep CBACKn low once first request is observed so first fill records burst-track context.
-                dut.CBACKn.value = 0
-                burst_acked = True
 
-        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr in line_addrs:
-            line_reads += 1
-
-        prev_as_n = as_n
         if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
             found = True
             break
 
     assert found, "I-cache burst tracking test did not complete"
+    h.check_no_unexpected_exception()
     assert h.mem.read(res, 4) == 0x0000_005A, "I-cache burst tracking result mismatch"
-    assert line_reads >= 4, f"Expected multiple line reads, saw {line_reads}"
-    assert burst_acked, "Did not observe initial burst request intent for target I-cache line"
     assert cbreq_inst_req_on_line == 1, (
-        f"Expected one burst request intent for burst-tracked I-cache line, saw {cbreq_inst_req_on_line}"
+        f"Expected one burst request for the burst-filled I-cache line, saw "
+        f"{cbreq_inst_req_on_line}"
+    )
+    line_reads = [addr for addr, _c, is_write in bus.sub_cycles
+                  if not is_write and addr in line_addrs]
+    assert len(line_reads) == 1, (
+        f"the burst-filled line was fetched from the bus more than once: "
+        f"{[hex(a) for a in line_reads]}"
     )
     h.cleanup()
 
 
 @cocotb.test()
-async def test_icache_phase8_autonomous_line_completion(dut):
-    """Phase-8: burst-acknowledged I-cache miss should complete untouched line words in background."""
+async def test_icache_burst_fills_the_whole_line_under_one_as(dut):
+    """One burst-acknowledged I-cache miss fills all eight words of the line.
+
+    UM 6.1.3.2: "The bursting mechanism allows addresses to wrap around so that
+    the entire four long words in the cache line can be filled in a single burst
+    operation, regardless of the initial address and operand alignment", and "The
+    MC68030 holds the entire address bus constant for the duration of the burst
+    cycle". So the line goes fully valid off one AS cycle, and the two
+    instruction words of each long word both become valid even though the fetch
+    that asked for the line was word sized.
+    """
     h = CPUTestHarness(dut)
     line_base = 0x000120
     line_idx = (line_base >> 4) & 0xF
@@ -1254,51 +1262,46 @@ async def test_icache_phase8_autonomous_line_completion(dut):
         *nop(), *nop(), *nop(), *nop(), *nop(), *nop(), *nop(), *nop(),
         *nop(), *nop(), *nop(), *nop(), *nop(), *nop(), *nop(), *nop(),
         *nop(), *nop(), *nop(), *nop(), *nop(), *nop(), *nop(),
-        *bra(-2),                                  # Park core while background completion runs.
+        *bra(-2),                                  # Park the core once the line is behind us.
     ]
 
-    await h.setup(program)
-    dut.CBACKn.value = 1
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True)
+    await _bringup(dut, h, program, bus)
 
-    burst_acked = False
-    cback_released = False
     saw_full_line = False
-    for _ in range(120000):
+    for _ in range(20000):
         await RisingEdge(dut.CLK)
         try:
             icache_mask = int(cache_state(dut).ICACHE_VALID[line_idx].value)
             icache_tag = int(cache_state(dut).ICACHE_TAG[line_idx].value)
-            adr_p_phys = int(dut.ADR_P_PHYS.value)
-            cbreq_inst_req_now = int(dut.CBREQ_INST_REQ_NOW.value)
-            icache_burst_fill_valid = int(dut.ICACHE_BURST_FILL_VALID.value)
         except (ValueError, TypeError, IndexError):
             continue
-        if (not burst_acked and
-            cbreq_inst_req_now and
-            ((adr_p_phys >> 4) & 0xF) == line_idx and
-            (adr_p_phys >> 8) == line_tag):
-            # Acknowledge the first burst request for the target line only.
-            dut.CBACKn.value = 0
-            burst_acked = True
-        elif burst_acked and not cback_released and icache_burst_fill_valid:
-            # Keep acknowledgment scoped to the initial line-start event.
-            dut.CBACKn.value = 1
-            cback_released = True
         if icache_tag == line_tag and icache_mask == 0xFF:
             saw_full_line = True
             break
 
-    assert burst_acked, "Did not observe target-line burst request intent for I-cache phase-8 test"
-    assert saw_full_line, "Expected full I-cache line validity after burst-acknowledged miss"
+    assert saw_full_line, (
+        "the burst did not fill all eight instruction words of the line"
+    )
+    assert _line_read_cycles(bus, line_base) == [line_base], (
+        f"the line was filled with more than the one burst cycle: "
+        f"{[hex(a) for a in _line_read_cycles(bus, line_base)]}"
+    )
     h.cleanup()
 
 
 @cocotb.test()
-async def test_dcache_phase8_autonomous_line_completion(dut):
-    """Phase-8: burst-acknowledged D-cache miss should complete untouched entries in the same line."""
+async def test_dcache_burst_fills_the_whole_line_under_one_as(dut):
+    """One burst-acknowledged D-cache miss fills all four entries of the line.
+
+    Same clause as the I-cache case, on the data side: the device supplies four
+    long words with the address held, so the line is complete without any further
+    bus cycle for it.
+    """
     h = CPUTestHarness(dut)
     data_base = h.DATA_BASE + 0x340
     line_idx = (data_base >> 4) & 0xF
+    res = h.RESULT_BASE + 0x8C
 
     program = [
         *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
@@ -1306,29 +1309,40 @@ async def test_dcache_phase8_autonomous_line_completion(dut):
         *movec_dn_to_cr(0, CR_CACR),
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
         *imm_long(data_base),
-        *move(LONG, AN_IND, 0, DN, 1),             # First miss starts burst line completion.
-        *bra(-2),                                  # Park core; remaining line entries should fill autonomously.
+        *move(LONG, AN_IND, 0, DN, 1),             # Aligned long miss: bursts the line.
+        *move_to_abs_long(LONG, DN, 1, res),
+        *h.sentinel_program(),
     ]
 
-    h.mem.load_long(data_base + 0x0, 0xABC0_0000)
-    h.mem.load_long(data_base + 0x4, 0xABC0_0001)
-    h.mem.load_long(data_base + 0x8, 0xABC0_0002)
-    h.mem.load_long(data_base + 0xC, 0xABC0_0003)
-    await h.setup(program)
-    dut.CBACKn.value = 0
+    for i in range(4):
+        h.mem.load_long(data_base + 4 * i, 0xABC0_0000 | i)
 
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True)
+    await _bringup(dut, h, program, bus)
+
+    found = False
     saw_full_line = False
-    for _ in range(90000):
+    for _ in range(20000):
         await RisingEdge(dut.CLK)
         try:
-            dcache_mask = int(cache_state(dut).DCACHE_VALID[line_idx].value)
+            if int(cache_state(dut).DCACHE_VALID[line_idx].value) == 0xF:
+                saw_full_line = True
         except (ValueError, TypeError, IndexError):
-            dcache_mask = 0
-        if dcache_mask == 0xF:
-            saw_full_line = True
+            pass
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
             break
 
-    assert saw_full_line, "Expected full D-cache line validity after burst-acknowledged miss"
+    assert found, "D-cache burst line-fill test did not complete"
+    h.check_no_unexpected_exception()
+    assert h.mem.read(res, 4) == 0xABC0_0000, (
+        "the burst corrupted the long word the program asked for"
+    )
+    assert saw_full_line, "the burst did not fill all four entries of the line"
+    assert _line_read_cycles(bus, data_base) == [data_base], (
+        f"the line was filled with more than the one burst cycle: "
+        f"{[hex(a) for a in _line_read_cycles(bus, data_base)]}"
+    )
     h.cleanup()
 
 
@@ -1477,11 +1491,37 @@ async def test_icache_miss_bus_error_does_not_allocate_word(dut):
     h.cleanup()
 
 
+async def _collect_burst_beats(dut, h, line_base, limit, done=None):
+    """Line entries the streaming engine accepted, in arrival order."""
+    entries = []
+    for _ in range(limit):
+        await RisingEdge(dut.CLK)
+        try:
+            if int(dut.BURST_BEAT_RDY.value):
+                addr = int(dut.BURST_BEAT_ADDR.value)
+                if (addr & ~0xF) == line_base:
+                    entries.append((addr >> 2) & 0x3)
+        except ValueError:
+            pass
+        if done is not None and done():
+            break
+    return entries
+
+
 @cocotb.test()
-async def test_icache_phase8_wrap_order_from_midline_miss(dut):
-    """I-cache burst selector should choose the first pending word in wrap order."""
+async def test_icache_burst_wrap_order_from_midline_miss(dut):
+    """A mid-line I-cache miss bursts in wraparound order from the entry it needs.
+
+    UM 6.1.3.2: "Since the initial address is $06 when CBREQ is asserted, the next
+    entry to be burst filled into the cache should correspond to address $08, then
+    $0C, and last, $00" (Figure 6-12). The processor holds the address and the
+    device increments A3:A2, so the order the entries arrive in is the wraparound
+    order from the requested one.
+    """
     h = CPUTestHarness(dut)
     line_base = 0x000120
+    line_idx = (line_base >> 4) & 0xF
+    miss_addr = line_base + 0x8   # entry 2
 
     program = [
         *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
@@ -1498,68 +1538,41 @@ async def test_icache_phase8_wrap_order_from_midline_miss(dut):
         *bra(-2),                                  # park
     ]
 
-    await h.setup(program)
-    dut.CBACKn.value = 1
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True)
+    await _bringup(dut, h, program, bus)
 
-    burst_acked = False
-    observed_words = []
-    burst_fill_seen = False
-    for _ in range(120000):
-        await RisingEdge(dut.CLK)
+    def line_full():
         try:
-            cbreq_inst_req_now = int(dut.CBREQ_INST_REQ_NOW.value)
-            adr_p_phys = int(dut.ADR_P_PHYS.value)
-            bus_bsy = int(dut.BUS_BSY.value)
-            burst_fill_valid = int(dut.ICACHE_BURST_FILL_VALID.value)
-            burst_fill_pending = int(dut.ICACHE_BURST_FILL_PENDING.value)
-            burst_fill_next = int(dut.ICACHE_BURST_FILL_NEXT_WORD.value)
-            burst_prefetch_op_req = int(dut.BURST_PREFETCH_OP_REQ.value)
-            burst_prefetch_op_word = int(dut.BURST_PREFETCH_OP_WORD.value)
-            burst_prefetch_addr = int(dut.BURST_PREFETCH_ADDR.value)
-        except ValueError:
-            continue
+            return int(cache_state(dut).ICACHE_VALID[line_idx].value) == 0xFF
+        except (ValueError, TypeError, IndexError):
+            return False
 
-        if (not burst_acked and
-            cbreq_inst_req_now and
-            (adr_p_phys & 0xFFFFFFF0) == line_base):
-            dut.CBACKn.value = 0
-            burst_acked = True
+    entries = await _collect_burst_beats(dut, h, line_base, 20000, done=line_full)
 
-        if burst_acked and burst_fill_valid:
-            burst_fill_seen = True
-
-        if (burst_fill_seen and burst_fill_valid and burst_fill_pending != 0 and
-            not bus_bsy and burst_prefetch_op_req and
-            (burst_prefetch_addr & 0xFFFFFFF0) == line_base):
-            expected_word = None
-            for offset in range(8):
-                word = (burst_fill_next + offset) & 0x7
-                if (burst_fill_pending >> word) & 0x1:
-                    expected_word = word
-                    break
-            assert expected_word is not None, "Expected pending I-cache burst word not found"
-            assert burst_prefetch_op_word == expected_word, (
-                f"I-cache burst selector mismatch: expected word {expected_word}, "
-                f"got {burst_prefetch_op_word}, pending=0x{burst_fill_pending:02x}, next={burst_fill_next}"
-            )
-            if burst_prefetch_op_word not in observed_words:
-                observed_words.append(burst_prefetch_op_word)
-
-        if burst_fill_seen and not burst_fill_valid:
-            break
-
-    assert burst_acked, "Did not observe burst-acknowledged mid-line miss"
-    assert burst_fill_seen, "I-cache burst-fill context never became active"
-    assert observed_words, "Did not observe any I-cache background burst selection"
+    assert line_full(), "the mid-line burst did not complete the line"
+    assert entries == [2, 3, 0, 1], (
+        f"burst entries arrived as {entries}; UM Figure 6-12 wraps from the "
+        f"requested entry ({(miss_addr >> 2) & 0x3})"
+    )
+    assert _line_read_cycles(bus, line_base) == [miss_addr], (
+        f"the line was filled with more than the one burst cycle: "
+        f"{[hex(a) for a in _line_read_cycles(bus, line_base)]}"
+    )
     h.cleanup()
 
 
 @cocotb.test()
-async def test_dcache_phase8_wrap_order_from_midline_miss(dut):
-    """D-cache burst selector should choose the first pending entry in wrap order."""
+async def test_dcache_burst_wrap_order_from_midline_miss(dut):
+    """A mid-line D-cache miss bursts in wraparound order from the entry it needs.
+
+    Same clause and the same Figure 6-12 example on the data side, where the
+    requested long word is the third entry of the line.
+    """
     h = CPUTestHarness(dut)
     line_base = h.DATA_BASE + 0x3C0
-    miss_addr = line_base + 0x8   # entry index 2
+    line_idx = (line_base >> 4) & 0xF
+    miss_addr = line_base + 0x8   # entry 2
+    res = h.RESULT_BASE + 0x90
 
     program = [
         *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
@@ -1567,57 +1580,38 @@ async def test_dcache_phase8_wrap_order_from_midline_miss(dut):
         *movec_dn_to_cr(0, CR_CACR),
         *movea(LONG, SPECIAL, IMMEDIATE, 0),
         *imm_long(miss_addr),
-        *move(LONG, AN_IND, 0, DN, 1),             # first miss entry=2
-        *bra(-2),                                  # park
+        *move(LONG, AN_IND, 0, DN, 1),             # miss on entry 2
+        *move_to_abs_long(LONG, DN, 1, res),
+        *h.sentinel_program(),
     ]
 
-    h.mem.load_long(line_base + 0x0, 0xABC0_0100)
-    h.mem.load_long(line_base + 0x4, 0xABC0_0101)
-    h.mem.load_long(line_base + 0x8, 0xABC0_0102)
-    h.mem.load_long(line_base + 0xC, 0xABC0_0103)
-    await h.setup(program)
-    dut.CBACKn.value = 0
+    for i in range(4):
+        h.mem.load_long(line_base + 4 * i, 0xABC0_0100 | i)
 
-    bg_order_entries = []
-    burst_fill_seen = False
-    for _ in range(90000):
-        await RisingEdge(dut.CLK)
-        try:
-            bus_bsy = int(dut.BUS_BSY.value)
-            burst_fill_valid = int(dut.DCACHE_BURST_FILL_VALID.value)
-            burst_fill_pending = int(dut.DCACHE_BURST_FILL_PENDING.value)
-            burst_fill_next = int(dut.DCACHE_BURST_FILL_NEXT_ENTRY.value)
-            burst_prefetch_data_req = int(dut.BURST_PREFETCH_DATA_REQ.value)
-            burst_prefetch_data_entry = int(dut.BURST_PREFETCH_DATA_ENTRY.value)
-            burst_prefetch_addr = int(dut.BURST_PREFETCH_ADDR.value)
-        except ValueError:
-            continue
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True)
+    await _bringup(dut, h, program, bus)
 
-        if burst_fill_valid:
-            burst_fill_seen = True
+    def done():
+        return h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL
 
-        if (burst_fill_seen and burst_fill_valid and burst_fill_pending != 0 and
-            not bus_bsy and burst_prefetch_data_req and
-            (burst_prefetch_addr & 0xFFFFFFF0) == line_base):
-            expected_entry = None
-            for offset in range(4):
-                entry = (burst_fill_next + offset) & 0x3
-                if (burst_fill_pending >> entry) & 0x1:
-                    expected_entry = entry
-                    break
-            assert expected_entry is not None, "Expected pending D-cache burst entry not found"
-            assert burst_prefetch_data_entry == expected_entry, (
-                f"D-cache burst selector mismatch: expected entry {expected_entry}, "
-                f"got {burst_prefetch_data_entry}, pending=0x{burst_fill_pending:x}, next={burst_fill_next}"
-            )
-            if burst_prefetch_data_entry != ((miss_addr >> 2) & 0x3) and burst_prefetch_data_entry not in bg_order_entries:
-                bg_order_entries.append(burst_prefetch_data_entry)
+    entries = await _collect_burst_beats(dut, h, line_base, 20000, done=done)
 
-        if burst_fill_seen and not burst_fill_valid:
-            break
-
-    assert burst_fill_seen, "D-cache burst-fill context never became active"
-    assert bg_order_entries, "Did not observe any D-cache background burst selection"
+    assert done(), "D-cache mid-line burst test did not complete"
+    h.check_no_unexpected_exception()
+    assert h.mem.read(res, 4) == 0xABC0_0102, (
+        "the burst corrupted the long word the program asked for"
+    )
+    assert entries == [2, 3, 0, 1], (
+        f"burst entries arrived as {entries}; UM Figure 6-12 wraps from the "
+        f"requested entry ({(miss_addr >> 2) & 0x3})"
+    )
+    assert int(cache_state(dut).DCACHE_VALID[line_idx].value) == 0xF, (
+        "the mid-line burst did not complete the line"
+    )
+    assert _line_read_cycles(bus, line_base) == [miss_addr], (
+        f"the line was filled with more than the one burst cycle: "
+        f"{[hex(a) for a in _line_read_cycles(bus, line_base)]}"
+    )
     h.cleanup()
 
 
@@ -1890,10 +1884,10 @@ async def test_ciin_prevents_icache_fill(dut):
 # occurs." UM 6.1.3.2 adds: "The MC68030 ignores the assertion of CBACK during
 # cycles terminated with DSACKx."
 #
-# The address-held streaming engine that second sentence describes is not built:
-# see the skipped tests at the end of this section for exactly what is missing.
-# What is enforced here is the qualification -- which acknowledges the model may
-# honour at all -- and that no burst is requested inside an RMC sequence.
+# This section covers the handshake -- which acknowledges the processor may honour
+# at all, and that no burst is requested inside an RMC sequence -- and then the
+# address-held streaming itself: a full line under one AS, and the three abnormal
+# terminations UM 6.1.3.2 lists.
 
 BURST_DATA_CACR = 0x0000_1100  # DBE, ED
 BURST_ALL_CACR = 0x0000_1111   # DBE, ED, IBE, EI
@@ -2096,29 +2090,22 @@ async def test_cbreq_not_asserted_inside_rmc_sequence(dut):
 
 
 # -------------------------------------------------------------------
-# Address-held burst streaming: NOT IMPLEMENTED, deliberately skipped.
+# Address-held burst streaming (UM 7.3.7).
 #
 # UM 7.3.7 requires the processor to hold AS, DS, R/W, A0-A31, FC0-FC2 and
-# SIZ0-SIZ1 for the whole burst and to take one long word per STERM. This core
-# instead completes the first cycle and then fills the rest of the line with
-# separate AS cycles, re-driving the address each time -- traffic a real MC68030
-# never generates.
+# SIZ0-SIZ1 for the whole burst and to take one long word per STERM. The device
+# side is BusModel(sync_term=True, cback=True): it holds CBACK with STERM,
+# advances A3:A2 itself with line wraparound (UM Figure 6-12), and supports
+# cback_drop_after and ciin_on_beat for the abnormal terminations.
 #
-# The engine cannot be built from the files this change is scoped to. It needs
-# ports that do not exist:
-#
-#   * WF68K30L_BUS_INTERFACE has no CBACKn input and no burst-request input, so
-#     it cannot tell that a burst was granted. Adding them means editing
-#     sv/wf68k30L_top_sections/wf68k30L_top_submodules.svh (the instantiation)
-#     and sv/wf68k30L_top_sections/wf68k30L_top_decls.svh (the nets).
-#   * The streamed long words have to reach the cache fill path, which needs
-#     new outputs on the bus interface and new inputs on
-#     WF68K30L_TOP_CACHE_STATE, instantiated in
-#     sv/wf68k30L_top_sections/wf68k30L_top_cache_mmu_state.svh.
-#
-# The device side is ready: BusModel(sync_term=True, cback=True) holds CBACK
-# with STERM, advances A3:A2 itself with line wraparound, and supports
-# cback_drop_after and ciin_on_beat. Each test below fails only on the RTL.
+# Residual deviations, deliberate and not observable on the bus: the requested
+# long word reaches the execution unit when the burst completes rather than at
+# the end of the first access (UM 6.1.3.2 makes it available immediately), and
+# SIZ0-SIZ1 during an instruction burst reads word rather than long because this
+# core's instruction prefetch is word sized. UM Figure 6-13's deferred burst --
+# the second portion of an operand that crosses a line boundary requesting a
+# burst of its own -- is not implemented either: only an aligned long-word data
+# read or an instruction prefetch requests one.
 # -------------------------------------------------------------------
 
 
@@ -2130,16 +2117,13 @@ def _line_read_cycles(bus, line_base):
     ]
 
 
-@cocotb.test(skip=True)
+@cocotb.test()
 async def test_burst_streams_a_full_line_under_one_as(dut):
-    """A burst-eligible miss must fill the line without re-driving the address.
-
-    KNOWN GAP, deliberately left failing-but-skipped: no streaming engine.
+    """A burst-eligible miss fills the line without re-driving the address.
 
     UM 6.1.3.2: "The MC68030 holds the entire address bus constant for the
     duration of the burst cycle." So one AS cycle covers the whole line and the
     device supplies four long words, wrapping A3:A2 from the requested one.
-    Today four separate AS cycles appear instead.
     """
     h = CPUTestHarness(dut)
     data_addr = h.DATA_BASE + 0x700
@@ -2172,11 +2156,9 @@ async def test_burst_streams_a_full_line_under_one_as(dut):
     h.cleanup()
 
 
-@cocotb.test(skip=True)
+@cocotb.test()
 async def test_cback_negated_mid_burst_ends_it_cleanly(dut):
     """CBACK negated after two long words ends the burst, keeping what arrived.
-
-    KNOWN GAP, deliberately left failing-but-skipped: no streaming engine.
 
     UM 6.1.3.2: "The premature negation of the CBACK signal during the burst
     operation causes the current cycle to complete normally, loading the data
@@ -2218,11 +2200,9 @@ async def test_cback_negated_mid_burst_ends_it_cleanly(dut):
     h.cleanup()
 
 
-@cocotb.test(skip=True)
+@cocotb.test()
 async def test_ciin_mid_burst_aborts_it(dut):
     """CIIN on a burst fill beat keeps that long word uncached and ends the burst.
-
-    KNOWN GAP, deliberately left failing-but-skipped: no streaming engine.
 
     UM 6.1.3.2: "The assertion of CIIN during the second, third, or fourth cycle
     of a burst operation prevents the data during that cycle from being loaded

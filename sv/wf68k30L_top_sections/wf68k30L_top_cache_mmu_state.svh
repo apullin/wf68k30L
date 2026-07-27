@@ -39,7 +39,6 @@ WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .OP_SIZE_BUS(OP_SIZE_BUS),
     .OPCODE_REQ(OPCODE_REQ),
     .ADR_BUS_REQ_PHYS(ADR_BUS_REQ_PHYS),
-    .BURST_PREFETCH_OP_REQ(BURST_PREFETCH_OP_REQ),
     .FC_I(FC_I),
     .MMU_TT0(MMU_TT0),
     .MMU_TT1(MMU_TT1),
@@ -49,21 +48,24 @@ WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .DATA_RD_BUS(DATA_RD_BUS),
     .MMU_RUNTIME_FAULT(MMU_RUNTIME_FAULT),
     .MMU_RUNTIME_STALL(MMU_RUNTIME_STALL),
-    .BURST_PREFETCH_DATA_REQ(BURST_PREFETCH_DATA_REQ),
     .RMC(RMC),
     .DATA_RDY_BUSIF(DATA_RDY_BUSIF),
     .DATA_VALID_BUSIF(DATA_VALID_BUSIF),
     .OPCODE_VALID_BUSIF(OPCODE_VALID_BUSIF),
     .BERRn(BERRn),
     .CACHE_INHIBIT_IN(CACHE_INHIBIT_IN),
-    // UM 6.1.3.2 says CBACK counts only on a STERM-terminated cycle, and
-    // CBACK_HONOURED encodes that for the CBREQ pin. It is deliberately NOT
-    // applied here: this cache completes a line with background single cycles
-    // rather than a held-address burst, so qualifying the context on STERM
-    // disables line completion outright rather than making it faithful. Apply
-    // it in the same change that adds real streaming.
-    .CBACKn(CBACKn),
-    .BUS_CYCLE_BURST(BUS_CYCLE_BURST),
+    // UM 6.1.3.2: "The MC68030 ignores the assertion of CBACK during cycles
+    // terminated with DSACKx", so the acknowledge the cache reacts to is the
+    // qualified one. Line completion no longer depends on this being the raw pin:
+    // the long words arrive on the beat port below, and CBACK's only remaining
+    // job here is to mark the line as burst-acknowledged so a follow-on miss in
+    // it does not request a second burst.
+    .CBACKn(!CBACK_HONOURED),
+    .BURST_BEAT_RDY(BURST_BEAT_RDY),
+    .BURST_BEAT_FIRST(BURST_BEAT_FIRST),
+    .BURST_BEAT_IS_OP(BURST_BEAT_IS_OP),
+    .BURST_BEAT_ADDR(BURST_BEAT_ADDR),
+    .BURST_BEAT_DATA(BURST_BEAT_DATA),
     .OPCODE_TO_CORE_BUSIF(OPCODE_TO_CORE_BUSIF),
     .DATA_TO_CORE_BUSIF(DATA_TO_CORE_BUSIF),
     .DATA_WR(DATA_WR),
@@ -83,12 +85,6 @@ WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .ICACHE_BURST_TRACK_VALID(ICACHE_BURST_TRACK_VALID),
     .ICACHE_BURST_TRACK_LINE(ICACHE_BURST_TRACK_LINE),
     .ICACHE_BURST_TRACK_TAG(ICACHE_BURST_TRACK_TAG),
-    .ICACHE_BURST_FILL_VALID(ICACHE_BURST_FILL_VALID),
-    .ICACHE_BURST_FILL_LINE(ICACHE_BURST_FILL_LINE),
-    .ICACHE_BURST_FILL_TAG(ICACHE_BURST_FILL_TAG),
-    .ICACHE_BURST_FILL_PENDING(ICACHE_BURST_FILL_PENDING),
-    .ICACHE_BURST_FILL_FC(ICACHE_BURST_FILL_FC),
-    .ICACHE_BURST_FILL_NEXT_WORD(ICACHE_BURST_FILL_NEXT_WORD),
     .DATA_RDY_CACHE(DATA_RDY_CACHE),
     .DATA_VALID_CACHE(DATA_VALID_CACHE),
     .DATA_TO_CORE_CACHE(DATA_TO_CORE_CACHE),
@@ -116,12 +112,6 @@ WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .DCACHE_BURST_TRACK_VALID(DCACHE_BURST_TRACK_VALID),
     .DCACHE_BURST_TRACK_LINE(DCACHE_BURST_TRACK_LINE),
     .DCACHE_BURST_TRACK_TAG(DCACHE_BURST_TRACK_TAG),
-    .DCACHE_BURST_FILL_VALID(DCACHE_BURST_FILL_VALID),
-    .DCACHE_BURST_FILL_LINE(DCACHE_BURST_FILL_LINE),
-    .DCACHE_BURST_FILL_TAG(DCACHE_BURST_FILL_TAG),
-    .DCACHE_BURST_FILL_PENDING(DCACHE_BURST_FILL_PENDING),
-    .DCACHE_BURST_FILL_FC(DCACHE_BURST_FILL_FC),
-    .DCACHE_BURST_FILL_NEXT_ENTRY(DCACHE_BURST_FILL_NEXT_ENTRY),
     .DCACHE_WRITE_PENDING(DCACHE_WRITE_PENDING),
     .DCACHE_WRITE_ADDR(DCACHE_WRITE_ADDR),
     .DCACHE_WRITE_SIZE(DCACHE_WRITE_SIZE),
@@ -365,10 +355,17 @@ end
 assign MMU_PTEST_FC = mmu_fc_decode(BIW_1[4:0], DR_OUT_1, SFC, DFC);
 assign MMU_PTEST_LEVEL = BIW_1[12:10];
 assign MMU_PTEST_LOGICAL = ADR_EFF;
+// The PTEST search reads its descriptors from the bus over the same port the
+// runtime/PLOAD search uses (UM 9.5.2/9.8), and a search must run uninterrupted,
+// so PTEST does not start while a walk is in flight. ALU_BSY && ALU_REQ is a
+// level for as long as the instruction is held in EXECUTE (they are set at
+// ALU_INIT and cleared at ALU_ACK, which cannot arrive before MMU_PTEST_READY),
+// so a start deferred this way is retried every cycle rather than lost.
 assign MMU_PTEST_START = (OP_WB == PTEST) &&
                          (MMU_PTEST_LEVEL != 3'b000) &&
                          ALU_BSY &&
                          ALU_REQ &&
+                         !MMU_TWALK_BUSY &&
                          !MMU_PTEST_BUSY &&
                          !MMU_PTEST_READY;
 assign MMU_PTEST_CONSUME = (OP_WB == PTEST) &&

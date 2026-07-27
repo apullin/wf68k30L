@@ -16,9 +16,9 @@ module mmu_runtime_gate_formal;
         f_past_valid <= 1'b1;
     end
 
-    // Reset is forced for the first cycle so the walk sequencer, the request
-    // latches and the descriptor shadow start from their power-on state instead
-    // of a symbolic one, and is free afterwards.
+    // Reset is forced for the first cycle so the walk sequencer, the PTEST
+    // sequencer and the request latches start from their power-on state
+    // instead of a symbolic one, and is free afterwards.
     logic RESET_FREE;
     logic RESET_CPU;
     always_comb RESET_FREE = $anyseq;
@@ -42,9 +42,7 @@ module mmu_runtime_gate_formal;
     logic [31:0] ADR_P;
     logic [31:0] ADR_P_PHYS_LATCH;
     logic [1:0]  OP_SIZE_BUS;
-    logic [31:0] DATA_OUT;
     logic [31:0] DATA_TO_CORE_BUSIF;
-    logic        DATA_RDY_BUSIF_CORE;
     logic        DATA_RDY_BUSIF;
     logic        DATA_VALID_BUSIF;
     logic        ICACHE_HIT_NOW;
@@ -93,9 +91,7 @@ module mmu_runtime_gate_formal;
         ADR_P = $anyseq;
         ADR_P_PHYS_LATCH = $anyseq;
         OP_SIZE_BUS = $anyseq;
-        DATA_OUT = $anyseq;
         DATA_TO_CORE_BUSIF = $anyseq;
-        DATA_RDY_BUSIF_CORE = $anyseq;
         DATA_RDY_BUSIF = $anyseq;
         DATA_VALID_BUSIF = $anyseq;
         ICACHE_HIT_NOW = $anyseq;
@@ -215,14 +211,7 @@ module mmu_runtime_gate_formal;
     logic [15:0] MMU_PTEST_WALK_MMUSR;
     logic [31:0] MMU_PTEST_DESC_ADDR;
 
-    // The descriptor shadow is shrunk to the smallest legal geometry: its
-    // capacity changes how often a walk lookup misses, never whether a request
-    // is gated, and the full 128-entry array does not survive memory_map at
-    // this BMC depth.
-    WF68K30L_TOP_ROUTING_BUS_CACHE #(
-        .MMU_DESC_SHADOW_LINES(2),
-        .MMU_DESC_SHADOW_WAYS(1)
-    ) dut_bus_cache (
+    WF68K30L_TOP_ROUTING_BUS_CACHE dut_bus_cache (
         .CLK(CLK),
         .RESET_CPU(RESET_CPU),
         .BUS_BSY(BUS_BSY),
@@ -241,11 +230,8 @@ module mmu_runtime_gate_formal;
         .MMU_SRP(MMU_SRP),
         .MMU_CRP(MMU_CRP),
         .ADR_P(ADR_P),
-        .ADR_P_PHYS(ADR_P_PHYS),
         .OP_SIZE_BUS(OP_SIZE_BUS),
-        .DATA_OUT(DATA_OUT),
         .DATA_TO_CORE_BUSIF(DATA_TO_CORE_BUSIF),
-        .DATA_RDY_BUSIF_CORE(DATA_RDY_BUSIF_CORE),
         .DATA_RDY_BUSIF(DATA_RDY_BUSIF),
         .DATA_VALID_BUSIF(DATA_VALID_BUSIF),
         .ICACHE_HIT_NOW(ICACHE_HIT_NOW),
