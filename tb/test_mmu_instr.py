@@ -9,25 +9,37 @@ Coverage in this phase:
   - Minimal translation path: TC[E], SRE root select, DT=1 constant offset, TT matches.
   - PTEST/PLOAD/PFLUSH Phase-3 semantics (MMUSR + ATC side effects).
   - PMOVE FD/PFLUSH flush-side-effect strobe.
+  - Runtime translation faults raise a bus error (vector 2) with a bus-fault frame.
   - MMU instructions are privileged in user mode (vector 8).
 """
 
 import cocotb
-from cocotb.triggers import RisingEdge
+from cocotb.clock import Clock
+from cocotb.triggers import ClockCycles, RisingEdge
 
+from bus_model import BusModel
 from cpu_harness import CPUTestHarness
 from m68k_encode import (
     LONG,
     WORD,
+    BYTE,
     DN,
+    AN,
     AN_IND,
+    AN_DISP,
+    ABS_L,
     SPECIAL,
     IMMEDIATE,
     move,
     movea,
     moveq,
+    addq,
     move_to_abs_long,
     move_to_sr,
+    jmp_abs,
+    nop,
+    rte,
+    disp16,
     imm_long,
     imm_word,
 )
@@ -40,6 +52,26 @@ MMUSR_I = 1 << 10
 MMUSR_M = 1 << 9
 MMUSR_T = 1 << 6
 MMUSR_N = 0x0007
+
+# Bus-fault stack frames (format $A/$B) hold the format/vector word at frame
+# offset $06 and the data cycle fault address at frame offset $10.
+FRAME_OFFS_FORMAT_VECTOR = 0x06
+FRAME_OFFS_FAULT_ADDR = 0x10
+
+
+def _bus_fault_handler_code(h, marker=0x02):
+    """Vector-2 handler recording the marker, format/vector word and fault address."""
+    return [
+        *moveq(marker, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *move(WORD, AN_DISP, 7, DN, 2),
+        *disp16(FRAME_OFFS_FORMAT_VECTOR),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE + 4),
+        *move(LONG, AN_DISP, 7, DN, 3),
+        *disp16(FRAME_OFFS_FAULT_ADDR),
+        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE + 8),
+        *h.sentinel_program(),
+    ]
 
 
 @cocotb.test()
@@ -564,7 +596,9 @@ async def test_mmu_ptest_level7_short_walk_reports_n_w_m(dut):
     tc_val = 0x80C08840
 
     program = [
-        # Prime descriptor shadow while MMU is disabled.
+        # The PTEST search still reads the snooped descriptor shadow, so its
+        # tree has to be walked into the shadow first. The runtime/PLOAD
+        # search reads descriptors from the bus and needs no priming.
         *movea(LONG, SPECIAL, IMMEDIATE, 2),
         *imm_long(desc_a_addr),
         *move(LONG, AN_IND, 2, DN, 2),
@@ -709,7 +743,9 @@ async def test_mmu_ptest_level7_long_supervisor_violation_sets_s_i(dut):
     tc_val = 0x80C08840
 
     program = [
-        # Prime descriptor shadow while MMU is disabled.
+        # The PTEST search still reads the snooped descriptor shadow, so its
+        # tree has to be walked into the shadow first. The runtime/PLOAD
+        # search reads descriptors from the bus and needs no priming.
         *movea(LONG, SPECIAL, IMMEDIATE, 2),
         *imm_long(desc_a_addr + 0),
         *move(LONG, AN_IND, 2, DN, 2),
@@ -784,7 +820,9 @@ async def test_mmu_ptest_level7_invalid_descriptor_sets_i(dut):
     tc_val = 0x80C08840
 
     program = [
-        # Prime descriptor shadow while MMU is disabled.
+        # The PTEST search still reads the snooped descriptor shadow, so its
+        # tree has to be walked into the shadow first. The runtime/PLOAD
+        # search reads descriptors from the bus and needs no priming.
         *movea(LONG, SPECIAL, IMMEDIATE, 2),
         *imm_long(desc_a_addr),
         *move(LONG, AN_IND, 2, DN, 2),
@@ -1070,12 +1108,12 @@ async def test_mmu_runtime_atc_refill_hit_and_flush(dut):
 
 
 @cocotb.test()
-async def test_mmu_runtime_invalid_root_traps_vector56(dut):
-    """Runtime MMU fault on unsupported root DT should trap to vector 56."""
+async def test_mmu_runtime_invalid_root_bus_error_vector2(dut):
+    """Runtime MMU fault on unsupported root DT should raise a bus error (vector 2)."""
     h = CPUTestHarness(dut)
 
     handler_addr = 0x0007C0
-    vector_addr = 56 * 4
+    vector_addr = 2 * 4
     logical_addr = 0x38000B00
     tt1_src = h.DATA_BASE + 0x6A0
     crp_bad_src = h.DATA_BASE + 0x6C0
@@ -1086,11 +1124,7 @@ async def test_mmu_runtime_invalid_root_traps_vector56(dut):
     crp_bad_lo = 0x00010000
     tc_val = 0x80808880
 
-    handler_code = [
-        *moveq(0x38, 1),
-        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
-        *h.sentinel_program(),
-    ]
+    handler_code = _bus_fault_handler_code(h)
 
     program = [
         *movea(LONG, SPECIAL, IMMEDIATE, 7),  # A7 = TT1 source
@@ -1106,7 +1140,7 @@ async def test_mmu_runtime_invalid_root_traps_vector56(dut):
 
         *movea(LONG, SPECIAL, IMMEDIATE, 0),  # A0 = faulting logical address
         *imm_long(logical_addr),
-        *move(LONG, AN_IND, 0, DN, 0),        # Runtime MMU fault -> vector 56
+        *move(LONG, AN_IND, 0, DN, 0),        # Runtime MMU fault -> vector 2
         *moveq(0x11, 1),                      # Should not execute
         *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
         *h.sentinel_program(),
@@ -1139,7 +1173,16 @@ async def test_mmu_runtime_invalid_root_traps_vector56(dut):
         assert found, f"Runtime MMU invalid-root fault test did not complete ({debug})"
 
     marker = h.read_result_long(0)
-    assert marker == 0x38, f"Expected MMU configuration vector marker 0x38, got 0x{marker:08X}"
+    assert marker == 0x02, f"Expected bus-error vector marker 0x02, got 0x{marker:08X}"
+    fmt_vect = h.read_result_long(4)
+    assert fmt_vect == 0xB008, (
+        f"Expected format-$B bus-fault frame with vector offset $008, got 0x{fmt_vect:08X}"
+    )
+    fault_adr = h.read_result_long(8)
+    assert fault_adr == logical_addr, (
+        f"Expected fault address 0x{logical_addr:08X}, got 0x{fault_adr:08X}"
+    )
+    assert int(dut.TRAP_MMU_CFG.value) == 0, "Runtime fault must not raise the MMU configuration trap"
     h.cleanup()
 
 
@@ -1182,17 +1225,6 @@ async def test_mmu_runtime_short_descriptor_table_walk(dut):
     ]
 
     program = [
-        # Prime descriptor shadow with explicit long reads while MMU is disabled.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 3),
-        *imm_long(desc_b_addr),
-        *move(LONG, AN_IND, 3, DN, 3),
-        *movea(LONG, SPECIAL, IMMEDIATE, 4),
-        *imm_long(desc_c_addr),
-        *move(LONG, AN_IND, 4, DN, 4),
-
         # Keep low-address supervisor program/data traffic transparent.
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
@@ -1264,13 +1296,538 @@ async def test_mmu_runtime_short_descriptor_table_walk(dut):
     h.cleanup()
 
 
+def _short_walk_setup(h, base_offset):
+    """Common short-format three-level descriptor tree used by the shadow tests."""
+    return {
+        "root_tbl": 0x00000400,
+        "lvlb_tbl": 0x00000800,
+        "page_tbl": 0x00000C00,
+        "tt0_src": h.DATA_BASE + base_offset + 0x00,
+        "tt1_src": h.DATA_BASE + base_offset + 0x20,
+        "crp_src": h.DATA_BASE + base_offset + 0x40,
+        "tc_src": h.DATA_BASE + base_offset + 0x60,
+        "tt0_prog": 0x00008360,
+        "tt1_prog": 0x00008350,
+        "tc_val": 0x80C08840,  # E=1, PS=12, IS=0, TIA=8, TIB=8, TIC=4, TID=0.
+    }
+
+
 @cocotb.test()
-async def test_mmu_runtime_short_descriptor_wp_fault_vector56(dut):
-    """Short-format page descriptor WP bit should fault writes and vector to 56."""
+async def test_mmu_desc_shadow_survives_subword_traffic(dut):
+    """Byte traffic in the neighbouring longword must not disturb a translation.
+
+    The search now reads descriptors from memory over the bus, so the priming
+    reads this test used to need are gone and the byte traffic is the only thing
+    left that could disturb it. The snooped shadow the PTEST search reads is
+    still updated by that traffic, so this remains a live regression on the
+    snoop's size handling.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x940)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x5EE55EE5
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    neighbour_addr = desc_c_addr + 4          # Adjacent, unused page-table entry.
+    desc_a = (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002
+    desc_b = (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002
+    desc_c = (page_base & 0xFFFFFF00) | 0x00000001
+
+    program = [
+        # Subword traffic in the adjacent longword.
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(neighbour_addr),
+        *move(BYTE, AN_IND, 5, DN, 5),
+        *moveq(0x3C, 6),
+        *move(BYTE, DN, 6, AN_IND, 5),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(desc_a_addr, desc_a)
+    h.mem.load_long(desc_b_addr, desc_b)
+    h.mem.load_long(desc_c_addr, desc_c)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "Descriptor shadow subword-traffic test did not complete"
+
+    got = h.read_result_long(0)
+    assert got == expected_value, (
+        f"Translation after neighbouring byte traffic expected 0x{expected_value:08X}, "
+        f"got 0x{got:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_write_sets_modified_in_atc_and_descriptor(dut):
+    """A write must set M in the ATC entry and in the page descriptor.
+
+    UM 9.4: "This bit is set when a valid write access to the logical address
+    corresponding to the entry occurs." UM 9.5.2: "when the table search is for
+    a write access and the M bit of the page descriptor is clear, the processor
+    sets the bit".
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xC00)
+    mmusr_read = h.DATA_BASE + 0xC80
+    mmusr_write = h.DATA_BASE + 0xCA0
+    mmusr_level7 = h.DATA_BASE + 0xCC0
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+
+        *move(LONG, AN_IND, 0, DN, 1),        # Read: refills the ATC with M=0.
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(mmusr_read),
+        0xF012, 0x6200,                       # PMOVE MMUSR,(A2)
+
+        *move(LONG, DN, 1, AN_IND, 0),        # Write hit: must set M in the entry.
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_write),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+
+        0xF000, 0x2400,                       # PFLUSHA
+        *move(LONG, DN, 1, AN_IND, 0),        # Write miss: search sets M in the descriptor.
+        0xF010, 0x9E15,                       # PTESTR #5,(A0),#7
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(mmusr_level7),
+        0xF014, 0x6200,                       # PMOVE MMUSR,(A4)
+
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001)  # DT=1, U=0, M=0
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=90000)
+    assert found, "Modified-bit tracking test did not complete"
+
+    mmusr_r = h.mem.read(mmusr_read, 2)
+    mmusr_w = h.mem.read(mmusr_write, 2)
+    mmusr_7 = h.mem.read(mmusr_level7, 2)
+
+    assert (mmusr_r & MMUSR_I) == 0, f"Read should leave a valid entry, got 0x{mmusr_r:04X}"
+    assert (mmusr_r & MMUSR_M) == 0, f"Read must not set M, got 0x{mmusr_r:04X}"
+    assert (mmusr_w & MMUSR_M) != 0, f"Write hit must set M in the ATC entry, got 0x{mmusr_w:04X}"
+    assert (mmusr_7 & MMUSR_M) != 0, (
+        f"Write search must set M in the page descriptor, got 0x{mmusr_7:04X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_runtime_fault_marks_atc_entry_bus_error(dut):
+    """A faulting search must leave a B-marked ATC entry for the bus-error handler.
+
+    UM 9.4: the B bit "is set for an entry if a bus error, an invalid descriptor,
+    a supervisor violation, or a limit violation is encountered during the table
+    search... remains set until a PFLUSH instruction or a PLOAD instruction for
+    this entry invalidates the entry".
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xB40)
+    handler_addr = 0x000B60
+    vector_addr = 2 * 4
+    mmusr_dst = h.DATA_BASE + 0xBC0
+    logical_addr = 0x12345008
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    handler_code = [
+        *moveq(0x02, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_dst),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),        # Invalid leaf faults here.
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, 0x00000000)   # DT=0 invalid leaf.
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=80000)
+    assert found, "Fault-marked ATC entry test did not complete"
+
+    assert h.read_result_long(0) == 0x02, "Bus-error handler did not run"
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_B) != 0, f"Expected B=1 after a faulting search, got MMUSR 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_I) != 0, f"Expected I=1 with B set, got MMUSR 0x{mmusr:04X}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_pload_short_table_walk_then_access(dut):
+    """PLOADR must table-search a short-format tree and load a usable ATC entry.
+
+    UM 9.8: "The PLOAD instruction performs a table search operation for a
+    specified function code and logical address and then loads the translation
+    for the address into the ATC."
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xAA0)
+    mmusr_dst = h.DATA_BASE + 0xB00
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x0F0E0D0C
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        0xF010, 0x2215,                       # PLOADR #5,(A0)
+        # PLOAD's table search completes asynchronously in this model: the
+        # pipeline has no PLOAD stall handshake, so let the search retire.
+        *[w for _ in range(12) for w in nop()],
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_dst),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=80000)
+    assert found, "PLOAD short-table walk test did not complete"
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_I) == 0, f"PLOAD should leave a valid ATC entry, got MMUSR 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_B) == 0, f"PLOAD must not mark the entry bus-error, got MMUSR 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_W) == 0, f"Unexpected write protection, got MMUSR 0x{mmusr:04X}"
+
+    got = h.read_result_long(0)
+    assert got == expected_value, (
+        f"Access after PLOADR expected 0x{expected_value:08X}, got 0x{got:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_opcode_fetch_never_requested_at_data_address(dut):
+    """No opcode bus fetch may be requested while ADR_P still shows a data address.
+
+    `ADR_P` selects the data address for as long as the core asserts DATA_RD or
+    DATA_WR, including when the access is satisfied without a bus cycle, so an
+    opcode fetch started in that window fetches from the data address and the
+    result is latched into the instruction pipe.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xA40)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x13579BDF
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *move(LONG, AN_IND, 0, DN, 2),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE + 4),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    done = False
+    for _ in range(70000):
+        await RisingEdge(dut.CLK)
+        try:
+            opcode_req = int(dut.OPCODE_REQ.value)
+            burst_op_req = int(dut.BURST_PREFETCH_OP_REQ.value)
+            bus_bsy = int(dut.BUS_BSY.value)
+            data_rd = int(dut.DATA_RD.value)
+            data_wr = int(dut.DATA_WR.value)
+        except ValueError:
+            continue
+        if opcode_req and not burst_op_req and not bus_bsy:
+            assert not (data_rd or data_wr), (
+                "Opcode bus fetch requested while ADR_P presents the data address "
+                f"0x{int(dut.ADR_P.value):08X}"
+            )
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            done = True
+            break
+
+    assert done, "Opcode-fetch address invariant test did not complete"
+    assert h.read_result_long(0) == expected_value
+    assert h.read_result_long(4) == expected_value
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_desc_shadow_subword_touch_does_not_fabricate_translation(dut):
+    """A byte write inside a descriptor longword must not synthesize a descriptor.
+
+    `DATA_OUT` carries lane-replicated data for a byte write, so capturing it as
+    a longword used to leave a plausible-looking page descriptor behind and the
+    access silently translated to the wrong physical page.
+
+    The search now reads the descriptor from memory over the bus, so the byte
+    write is simply visible: the low byte of the page descriptor becomes 0x11
+    (DT=1, M set), the page base is unchanged, and the access translates through
+    it. What must never happen is the fabricated translation to page zero.
+
+    This assertion used to demand a bus error, which was the shadow-only model's
+    behaviour after the entry was dropped, not the architecture's.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x9A0)
+    handler_addr = 0x000A20
+    vector_addr = 2 * 4
+    logical_addr = 0x12345F00
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0xC0DEC0DE
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    desc_a = (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002
+    desc_b = (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002
+    desc_c = (page_base & 0xFFFFFF00) | 0x00000001
+
+    # A byte write to the low lane leaves 0x00000011 on the bus, which reads
+    # back as a DT=1 page descriptor with page base zero.
+    touch_byte = 0x11
+    fabricated_phys = (logical_addr & 0xFFF) & 0xFFFFF
+    fabricated_value = 0xBAD0BAD0
+
+    handler_code = [
+        *moveq(0x02, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        # Byte writes into the status byte of the page descriptor.
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(desc_c_addr + 3),
+        *moveq(touch_byte, 6),
+        *move(BYTE, DN, 6, AN_IND, 5),
+        *move(BYTE, DN, 6, AN_IND, 5),
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(s["tt0_src"]),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(s["tt1_src"]),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    h.mem.load_long(desc_a_addr, desc_a)
+    h.mem.load_long(desc_b_addr, desc_b)
+    h.mem.load_long(desc_c_addr, desc_c)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(fabricated_phys, fabricated_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "Descriptor subword-touch test did not complete"
+
+    got = h.read_result_long(0)
+    assert got != fabricated_value, (
+        "Byte write into a descriptor longword fabricated a page descriptor and "
+        f"translated to 0x{fabricated_phys:08X}"
+    )
+    assert got == expected_value, (
+        f"Expected the memory-resident descriptor to translate to "
+        f"0x{expected_value:08X}, got 0x{got:08X} (0x02 means a bus error was taken)"
+    )
+    # The byte write is the descriptor's real content now, so its bits must
+    # still be there. The search adds U (and M on a write) on top of them.
+    status = h.mem.read(desc_c_addr, 4) & 0xFF
+    assert (status & touch_byte) == touch_byte, (
+        f"Byte write did not reach the page descriptor in memory "
+        f"(status byte 0x{status:02X}, expected to contain 0x{touch_byte:02X})"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_runtime_short_descriptor_wp_fault_bus_error_vector2(dut):
+    """Short-format page descriptor WP bit should fault writes with a bus error."""
     h = CPUTestHarness(dut)
 
     handler_addr = 0x000860
-    vector_addr = 56 * 4
+    vector_addr = 2 * 4
     logical_addr = 0x1234500C
     page_base = 0x00234000
 
@@ -1294,24 +1851,15 @@ async def test_mmu_runtime_short_descriptor_wp_fault_vector56(dut):
     crp_lo = root_tbl
     tc_val = 0x80C08840
 
-    handler_code = [
-        *moveq(0x38, 1),
-        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
-        *h.sentinel_program(),
-    ]
+    # Untouched witnesses at the physical page and at the identity-mapped
+    # logical address prove the faulted write reached neither.
+    phys_witness_addr = (page_base + (logical_addr & 0xFFF)) & 0xFFFFF
+    logical_witness_addr = logical_addr & 0xFFFFF
+    witness = 0x0F1E2D3C
+
+    handler_code = _bus_fault_handler_code(h)
 
     program = [
-        # Prime descriptor shadow with descriptor reads before enabling MMU.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 3),
-        *imm_long(desc_b_addr),
-        *move(LONG, AN_IND, 3, DN, 3),
-        *movea(LONG, SPECIAL, IMMEDIATE, 4),
-        *imm_long(desc_c_addr),
-        *move(LONG, AN_IND, 4, DN, 4),
-
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
         0xF016, 0x0800,                       # PMOVE (A6),TT0
@@ -1348,22 +1896,111 @@ async def test_mmu_runtime_short_descriptor_wp_fault_vector56(dut):
     h.mem.load_long(crp_src + 0, crp_hi)
     h.mem.load_long(crp_src + 4, crp_lo)
     h.mem.load_long(tc_src, tc_val)
+    h.mem.load_long(phys_witness_addr, witness)
+    h.mem.load_long(logical_witness_addr, witness)
 
     found = await h.run_until_sentinel(max_cycles=80000)
     assert found, "Runtime short-table WP MMU fault test did not complete"
 
     marker = h.read_result_long(0)
-    assert marker == 0x38, f"Expected MMU configuration vector marker 0x38, got 0x{marker:08X}"
+    assert marker == 0x02, f"Expected bus-error vector marker 0x02, got 0x{marker:08X}"
+    fmt_vect = h.read_result_long(4)
+    assert fmt_vect == 0xB008, (
+        f"Expected format-$B bus-fault frame with vector offset $008, got 0x{fmt_vect:08X}"
+    )
+    fault_adr = h.read_result_long(8)
+    assert fault_adr == logical_addr, (
+        f"Expected fault address 0x{logical_addr:08X}, got 0x{fault_adr:08X}"
+    )
+    assert h.mem.read(phys_witness_addr, 4) == witness, (
+        "Write-protected write must not reach the physical page"
+    )
+    assert h.mem.read(logical_witness_addr, 4) == witness, (
+        "Write-protected write must not reach the untranslated address"
+    )
     h.cleanup()
 
 
 @cocotb.test()
-async def test_mmu_runtime_short_descriptor_invalid_leaf_vector56(dut):
-    """Short-format DT=0 leaf descriptor should fault cleanly and vector through 56."""
+async def test_mmu_runtime_opcode_fetch_fault_not_faked(dut):
+    """An untranslatable opcode fetch terminates with error, not a substituted NOP.
+
+    Delivery of the resulting bus error at an instruction boundary additionally
+    depends on the core's prefetch-fault path (`ctrl_comb.sv` masks BERR while
+    the controller sits in START_OP/IDLE), so this test checks the MMU side of
+    the contract: the fetch is never acknowledged as valid and vector 56 is
+    never raised.
+    """
+    h = CPUTestHarness(dut)
+
+    unmapped_code_addr = 0x12340000
+
+    # Root DT=2 with an empty table: nothing outside the transparent windows
+    # can be translated, so the fetch from unmapped_code_addr must fault.
+    root_tbl = 0x00003000
+    tt0_src = h.DATA_BASE + 0x8C0
+    tt1_src = h.DATA_BASE + 0x8E0
+    crp_src = h.DATA_BASE + 0x900
+    tc_src = h.DATA_BASE + 0x920
+    tt0_prog = 0x00008260   # E, read, FC=6 (supervisor program), A31:24 = 0x00
+    tt1_prog = 0x00008350   # E, RWM, FC=5 (supervisor data), A31:24 = 0x00
+    crp_hi = 0x7FFF0002
+    crp_lo = root_tbl
+    tc_val = 0x80C08840
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(tt0_src),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(tt1_src),
+        0xF017, 0x0C00,                       # PMOVE (A7),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(crp_src),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(tc_src),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        *jmp_abs(unmapped_code_addr),         # Opcode fetch cannot be translated.
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(tt0_src, tt0_prog)
+    h.mem.load_long(tt1_src, tt1_prog)
+    h.mem.load_long(crp_src + 0, crp_hi)
+    h.mem.load_long(crp_src + 4, crp_lo)
+    h.mem.load_long(tc_src, tc_val)
+
+    fault_acks = 0
+    for _ in range(20000):
+        await RisingEdge(dut.CLK)
+        try:
+            ack = int(dut.MMU_FAULT_OPCODE_ACK.value)
+            opcode_valid = int(dut.OPCODE_VALID.value)
+            cfg_trap = int(dut.TRAP_MMU_CFG.value)
+        except ValueError:
+            continue
+        assert cfg_trap == 0, "A translation fault must not raise the MMU configuration trap"
+        if ack:
+            fault_acks += 1
+            assert opcode_valid == 0, (
+                "Untranslatable opcode fetch was acknowledged as a valid instruction word"
+            )
+
+    assert fault_acks > 0, "No untranslatable opcode fetch was observed"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_runtime_short_descriptor_invalid_leaf_bus_error_vector2(dut):
+    """Short-format DT=0 leaf descriptor should fault cleanly through vector 2."""
     h = CPUTestHarness(dut)
 
     handler_addr = 0x000880
-    vector_addr = 56 * 4
+    vector_addr = 2 * 4
     logical_addr = 0x12345008
 
     root_tbl = 0x00000400
@@ -1386,24 +2023,9 @@ async def test_mmu_runtime_short_descriptor_invalid_leaf_vector56(dut):
     crp_lo = root_tbl
     tc_val = 0x80C08840
 
-    handler_code = [
-        *moveq(0x38, 1),
-        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
-        *h.sentinel_program(),
-    ]
+    handler_code = _bus_fault_handler_code(h)
 
     program = [
-        # Prime descriptor shadow before enabling MMU.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 3),
-        *imm_long(desc_b_addr),
-        *move(LONG, AN_IND, 3, DN, 3),
-        *movea(LONG, SPECIAL, IMMEDIATE, 4),
-        *imm_long(desc_c_addr),
-        *move(LONG, AN_IND, 4, DN, 4),
-
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
         0xF016, 0x0800,                       # PMOVE (A6),TT0
@@ -1443,7 +2065,15 @@ async def test_mmu_runtime_short_descriptor_invalid_leaf_vector56(dut):
     assert found, "Runtime short-table invalid leaf MMU fault test did not complete"
 
     marker = h.read_result_long(0)
-    assert marker == 0x38, f"Expected MMU configuration vector marker 0x38, got 0x{marker:08X}"
+    assert marker == 0x02, f"Expected bus-error vector marker 0x02, got 0x{marker:08X}"
+    fmt_vect = h.read_result_long(4)
+    assert fmt_vect == 0xB008, (
+        f"Expected format-$B bus-fault frame with vector offset $008, got 0x{fmt_vect:08X}"
+    )
+    fault_adr = h.read_result_long(8)
+    assert fault_adr == logical_addr, (
+        f"Expected fault address 0x{logical_addr:08X}, got 0x{fault_adr:08X}"
+    )
     h.cleanup()
 
 
@@ -1487,26 +2117,6 @@ async def test_mmu_runtime_long_descriptor_table_walk(dut):
     tc_val = 0x80C08840  # E=1, PS=12, IS=0, TIA=8, TIB=8, TIC=4, TID=0.
 
     program = [
-        # Prime descriptor shadow with explicit long reads while MMU is disabled.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr + 0),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr + 4),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_b_addr + 0),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_b_addr + 4),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_c_addr + 0),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_c_addr + 4),
-        *move(LONG, AN_IND, 2, DN, 2),
-
         # Keep low-address supervisor traffic transparent.
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
@@ -1595,20 +2205,6 @@ async def test_mmu_runtime_fcl_first_level_lookup(dut):
     tc_val = 0x81C08840  # E=1, FCL=1, PS=12, IS=0, TIA=8, TIB=8, TIC=4, TID=0.
 
     program = [
-        # Prime descriptor shadow while MMU is disabled.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_fc_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_b_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_c_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-
         # Keep low-address supervisor traffic transparent.
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
@@ -1699,32 +2295,6 @@ async def test_mmu_runtime_long_indirect_descriptor(dut):
     tc_val = 0x80C08840
 
     program = [
-        # Prime descriptor shadow while MMU is disabled.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr + 0),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_a_addr + 4),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_b_addr + 0),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_b_addr + 4),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_c_addr + 0),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_c_addr + 4),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(ind_page_desc + 0),
-        *move(LONG, AN_IND, 2, DN, 2),
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(ind_page_desc + 4),
-        *move(LONG, AN_IND, 2, DN, 2),
-
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
         0xF016, 0x0800,                       # PMOVE (A6),TT0
@@ -1811,11 +2381,6 @@ async def test_mmu_runtime_early_termination_contiguous_reads(dut):
     tc_val = 0x80C08840
 
     program = [
-        # Prime descriptor shadow before MMU enable.
-        *movea(LONG, SPECIAL, IMMEDIATE, 2),
-        *imm_long(desc_addr),
-        *move(LONG, AN_IND, 2, DN, 2),
-
         *movea(LONG, SPECIAL, IMMEDIATE, 6),
         *imm_long(tt0_src),
         0xF016, 0x0800,                       # PMOVE (A6),TT0
@@ -1966,4 +2531,1209 @@ async def test_mmu_privilege_violation_user_mode(dut):
 
     marker = h.read_result_long(0)
     assert marker == 0x08, f"Expected privilege vector handler marker 0x08, got 0x{marker:08X}"
+    h.cleanup()
+
+
+PAGE_CI_LOGICAL = 0x12345008
+PAGE_CI_PAGE_BASE = 0x00234000
+PAGE_CI_PHYS = PAGE_CI_PAGE_BASE + (PAGE_CI_LOGICAL & 0xFFF)
+PAGE_CI_VALUE = 0x5A6B7C8D
+
+
+def _page_ci_program(h, page_ci):
+    """Short-format three-level tree whose leaf page descriptor has CI = page_ci.
+
+    Two back-to-back long reads of the same mapped address let the caller count
+    external cycles: with CI clear the second read is a D-cache hit, with CI set
+    the page must bypass the cache entirely (UM 9.2.1).
+    """
+    root_tbl = 0x00000400
+    lvlb_tbl = 0x00000800
+    page_tbl = 0x00000C00
+    desc_a_addr = root_tbl + (0x12 << 2)
+    desc_b_addr = lvlb_tbl + (0x34 << 2)
+    desc_c_addr = page_tbl + (0x5 << 2)
+    desc_a = (lvlb_tbl & 0xFFFFFFF0) | 0x00000002   # DT=2 short table descriptor
+    desc_b = (page_tbl & 0xFFFFFFF0) | 0x00000002   # DT=2 short table descriptor
+    # DT=1 short page descriptor; bit 6 is CI (UM Figure 9-12).
+    desc_c = (PAGE_CI_PAGE_BASE & 0xFFFFFF00) | (0x40 if page_ci else 0x00) | 0x00000001
+
+    tt0_src = h.DATA_BASE + 0xB00
+    tt1_src = h.DATA_BASE + 0xB20
+    crp_src = h.DATA_BASE + 0xB40
+    tc_src = h.DATA_BASE + 0xB60
+
+    program = [
+        # Keep low-address supervisor program/data traffic transparent.
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(tt0_src),
+        0xF015, 0x0800,                       # PMOVE (A5),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(tt1_src),
+        0xF016, 0x0C00,                       # PMOVE (A6),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(crp_src),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(0x0000_0100),               # CACR: ED=1 (data cache enabled)
+        0x4E7B, 0x0002,                       # MOVEC D0,CACR
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(tc_src),
+        0xF012, 0x4000,                       # PMOVE (A2),TC (enables translation)
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(PAGE_CI_LOGICAL),
+        *move(LONG, AN_IND, 0, DN, 1),        # first translated read
+        *move(LONG, AN_IND, 0, DN, 2),        # second read of the same address
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE + 0),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE + 4),
+
+        *h.sentinel_program(),
+    ]
+
+    loads = {
+        desc_a_addr: desc_a,
+        desc_b_addr: desc_b,
+        desc_c_addr: desc_c,
+        PAGE_CI_PHYS & 0xFFFFF: PAGE_CI_VALUE,
+        tt0_src: 0x00008360,                  # E=1, CI=0, RWM, FC=supervisor program
+        tt1_src: 0x00008350,                  # E=1, CI=0, RWM, FC=supervisor data
+        crp_src + 0: 0x7FFF0002,              # Root DT=2 (short), upper-limit mode
+        crp_src + 4: root_tbl,
+        tc_src: 0x80C08840,                   # E=1, PS=12, IS=0, TIA=8, TIB=8, TIC=4
+    }
+    return program, loads
+
+
+async def _run_page_ci_reads(dut, h, page_ci):
+    """Run the two-read program and return (bus reads of the page, all CIOUTn low)."""
+    program, loads = _page_ci_program(h, page_ci)
+    await h.setup(program)
+    for addr, value in loads.items():
+        h.mem.load_long(addr, value)
+
+    found = False
+    prev_as_n = 1
+    page_reads = 0
+    page_read_ciout_low = True
+    for _ in range(90000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            ciout_n = int(dut.CIOUTn.value)
+        except ValueError:
+            continue
+        if prev_as_n == 1 and as_n == 0 and rw_n == 1 and addr == PAGE_CI_PHYS:
+            page_reads += 1
+            page_read_ciout_low &= (ciout_n == 0)
+        prev_as_n = as_n
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, f"Page-descriptor CI test (CI={page_ci}) did not complete"
+    for idx in range(2):
+        got = h.read_result_long(idx * 4)
+        assert got == PAGE_CI_VALUE, (
+            f"Read {idx} through CI={page_ci} page returned 0x{got:08X}, "
+            f"expected 0x{PAGE_CI_VALUE:08X}"
+        )
+    return page_reads, page_read_ciout_low
+
+
+@cocotb.test()
+async def test_mmu_page_ci_inhibits_dcache_and_asserts_ciout(dut):
+    """A page descriptor with CI set must bypass the D-cache and assert CIOUTn."""
+    h = CPUTestHarness(dut)
+    page_reads, ciout_low = await _run_page_ci_reads(dut, h, page_ci=True)
+    assert page_reads == 2, (
+        f"Expected both reads of a CI-marked page to reach the bus, saw {page_reads}"
+    )
+    assert ciout_low, "CIOUTn not asserted on read cycle(s) to a CI-marked page"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_page_without_ci_is_cached_and_leaves_ciout_negated(dut):
+    """Control for the CI case: a page with CI clear caches and keeps CIOUTn negated."""
+    h = CPUTestHarness(dut)
+    page_reads, ciout_low = await _run_page_ci_reads(dut, h, page_ci=False)
+    assert page_reads == 1, (
+        f"Expected the second read of a cacheable page to hit the D-cache, saw {page_reads} bus reads"
+    )
+    assert not ciout_low, "CIOUTn asserted on a page whose descriptor has CI clear"
+    h.cleanup()
+
+
+PTEST_AN_MARKER = 0x1111_2222
+
+
+def _ptest_an_program(h, ptest_words, an_dst, mmusr_dst, prime_leaf=True):
+    """Three-level short walk followed by `ptest_words`; stores A3 and the MMUSR.
+
+    With prime_leaf clear the leaf descriptor is kept out of the descriptor
+    shadow, which this model reports as a bus fault on that fetch.
+    """
+    logical_addr = 0x12345008
+    root_tbl = 0x00000400
+    lvlb_tbl = 0x00000800
+    page_tbl = 0x00000C00
+    page_base = 0x00123000
+
+    desc_a_addr = root_tbl + (0x12 << 2)
+    desc_b_addr = lvlb_tbl + (0x34 << 2)
+    desc_c_addr = page_tbl + (0x5 << 2)
+    desc_a = (lvlb_tbl & 0xFFFFFFF0) | 0x00000002
+    desc_b = (page_tbl & 0xFFFFFFF0) | 0x00000002
+    desc_c = (page_base & 0xFFFFFF00) | 0x00000001  # DT=1 short page descriptor
+
+    tt0_src = h.DATA_BASE + 0xC00
+    tt1_src = h.DATA_BASE + 0xC20
+    crp_src = h.DATA_BASE + 0xC40
+    tc_src = h.DATA_BASE + 0xC60
+
+    prime_c = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 5, DN, 5),
+    ] if prime_leaf else []
+
+    program = [
+        # The PTEST search still reads the snooped descriptor shadow, so its
+        # tree has to be walked into the shadow first. The runtime/PLOAD
+        # search reads descriptors from the bus and needs no priming.
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_a_addr),
+        *move(LONG, AN_IND, 2, DN, 2),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_b_addr),
+        *move(LONG, AN_IND, 4, DN, 4),
+        *prime_c,
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(tt0_src),
+        0xF016, 0x0800,                       # PMOVE (A6),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(tt1_src),
+        0xF015, 0x0C00,                       # PMOVE (A5),TT1
+
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(crp_src),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(tc_src),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+
+        # A3 carries a marker so an absent write is distinguishable from a wrong one.
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(PTEST_AN_MARKER),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *ptest_words,
+        *move_to_abs_long(LONG, AN, 3, an_dst),
+        *move_to_abs_long(LONG, AN, 0, an_dst + 4),
+        *movea(LONG, SPECIAL, IMMEDIATE, 6),
+        *imm_long(mmusr_dst),
+        0xF016, 0x6200,                       # PMOVE MMUSR,(A6)
+
+        *h.sentinel_program(),
+    ]
+
+    loads = {
+        desc_a_addr: desc_a,
+        desc_b_addr: desc_b,
+        desc_c_addr: desc_c,
+        tt0_src: 0x00008360,
+        tt1_src: 0x00008350,
+        crp_src + 0: 0x7FFF0002,
+        crp_src + 4: root_tbl,
+        tc_src: 0x80C08840,
+    }
+    return program, loads, (desc_a_addr, desc_b_addr, desc_c_addr), logical_addr
+
+
+@cocotb.test()
+async def test_mmu_ptest_returns_last_descriptor_address_in_an(dut):
+    """PTEST <ea>,#level,An writes the last descriptor's physical address to An (UM 9.8)."""
+    h = CPUTestHarness(dut)
+    an_dst = h.DATA_BASE + 0xC80
+    mmusr_dst = h.DATA_BASE + 0xCA0
+
+    # PTESTR #5,(A0),#7,A3 : level=7, R/W=1, A=1, register=011, FC=10101.
+    program, loads, descs, logical_addr = _ptest_an_program(
+        h, [0xF010, 0x9F75], an_dst, mmusr_dst
+    )
+    desc_c_addr = descs[2]
+
+    await h.setup(program)
+    for addr, value in loads.items():
+        h.mem.load_long(addr, value)
+
+    found = await h.run_until_sentinel(max_cycles=100000)
+    assert found, "PTEST address-register-option test did not complete"
+
+    got_a3 = h.mem.read(an_dst, 4)
+    assert got_a3 == desc_c_addr, (
+        f"Expected A3 = last descriptor address 0x{desc_c_addr:08X}, got 0x{got_a3:08X}"
+    )
+    got_a0 = h.mem.read(an_dst + 4, 4)
+    assert got_a0 == logical_addr, (
+        f"PTEST clobbered A0: expected 0x{logical_addr:08X}, got 0x{got_a0:08X}"
+    )
+
+    # The extra writeback cycle must not disturb the MMUSR result.
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_I) == 0, f"Expected valid translation (I=0), got 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_N) == 0x3, f"Expected N=3 levels, got 0x{mmusr:04X}"
+    assert (mmusr & (MMUSR_B | MMUSR_L | MMUSR_S | MMUSR_T)) == 0, (
+        f"Unexpected fault/transparent bits set: 0x{mmusr:04X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_ptest_without_a_field_leaves_an_unchanged(dut):
+    """With the A field clear, PTEST must not write any address register."""
+    h = CPUTestHarness(dut)
+    an_dst = h.DATA_BASE + 0xC80
+    mmusr_dst = h.DATA_BASE + 0xCA0
+
+    # PTESTR #5,(A0),#7 : identical apart from A=0 and a zero register field.
+    program, loads, _descs, logical_addr = _ptest_an_program(
+        h, [0xF010, 0x9E15], an_dst, mmusr_dst
+    )
+
+    await h.setup(program)
+    for addr, value in loads.items():
+        h.mem.load_long(addr, value)
+
+    found = await h.run_until_sentinel(max_cycles=100000)
+    assert found, "PTEST without address-register option did not complete"
+
+    got_a3 = h.mem.read(an_dst, 4)
+    assert got_a3 == PTEST_AN_MARKER, (
+        f"PTEST with A=0 modified A3: expected 0x{PTEST_AN_MARKER:08X}, got 0x{got_a3:08X}"
+    )
+    got_a0 = h.mem.read(an_dst + 4, 4)
+    assert got_a0 == logical_addr, (
+        f"PTEST with A=0 modified A0: expected 0x{logical_addr:08X}, got 0x{got_a0:08X}"
+    )
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_I) == 0, f"Expected valid translation (I=0), got 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_N) == 0x3, f"Expected N=3 levels, got 0x{mmusr:04X}"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_ptest_an_holds_last_successful_descriptor_on_fault(dut):
+    """A faulting fetch leaves An at the last descriptor successfully fetched (PRM)."""
+    h = CPUTestHarness(dut)
+    an_dst = h.DATA_BASE + 0xC80
+    mmusr_dst = h.DATA_BASE + 0xCA0
+
+    # PTESTR #5,(A0),#7,A3 with the leaf descriptor missing from the shadow.
+    program, loads, descs, logical_addr = _ptest_an_program(
+        h, [0xF010, 0x9F75], an_dst, mmusr_dst, prime_leaf=False
+    )
+    desc_b_addr = descs[1]
+
+    await h.setup(program)
+    for addr, value in loads.items():
+        h.mem.load_long(addr, value)
+
+    found = await h.run_until_sentinel(max_cycles=100000)
+    assert found, "PTEST faulting-walk address-register test did not complete"
+
+    got_a3 = h.mem.read(an_dst, 4)
+    assert got_a3 == desc_b_addr, (
+        f"Expected A3 = last descriptor successfully fetched 0x{desc_b_addr:08X}, "
+        f"got 0x{got_a3:08X}"
+    )
+    got_a0 = h.mem.read(an_dst + 4, 4)
+    assert got_a0 == logical_addr, (
+        f"PTEST clobbered A0: expected 0x{logical_addr:08X}, got 0x{got_a0:08X}"
+    )
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_B) != 0, f"Expected a bus fault (B=1), got 0x{mmusr:04X}"
+    assert (mmusr & MMUSR_I) != 0, f"Expected an invalid translation (I=1), got 0x{mmusr:04X}"
+    h.cleanup()
+
+
+# =========================================================================
+# Bus-mastering table search (UM 9.5.2)
+#
+# The searches below never prime anything: the descriptors exist only because
+# the testbench put them in memory, and the search has to fetch them over the
+# bus as supervisor-data read-modify-write cycles at physical addresses.
+# =========================================================================
+
+# Function code the UM requires for a table search access.
+FC_SUPERVISOR_DATA = 5
+
+
+def _start_cycle_log(dut):
+    """Record (addr, fc, rw_n, rmc_n) for every bus cycle the core starts."""
+    log = []
+
+    async def monitor():
+        prev_as = 1
+        while True:
+            await RisingEdge(dut.CLK)
+            try:
+                as_n = int(dut.ASn.value)
+            except ValueError:
+                prev_as = 1
+                continue
+            if as_n == 0 and prev_as == 1:
+                try:
+                    log.append((
+                        int(dut.ADR_OUT.value),
+                        int(dut.FC_OUT.value),
+                        int(dut.RWn.value),
+                        int(dut.RMCn.value),
+                    ))
+                except ValueError:
+                    pass
+            prev_as = as_n
+
+    cocotb.start_soon(monitor())
+    return log
+
+
+class BerrOnAddressBusModel(BusModel):
+    """Terminates the first `times` cycles at `fault_addr` with BERRn.
+
+    Only cycles carrying `fault_fc` are faulted, so a table-search descriptor
+    access can be singled out from ordinary traffic at the same address.
+    """
+
+    def __init__(self, dut, memory, fault_addr, fault_fc=FC_SUPERVISOR_DATA,
+                 times=1, fault_reads=True, fault_writes=False, **kwargs):
+        super().__init__(dut, memory, **kwargs)
+        self.fault_addr = fault_addr & ~3
+        self.fault_fc = fault_fc
+        self.faults_left = times
+        self.fault_count = 0
+        self.faulted = []
+        self.fault_reads = fault_reads
+        self.fault_writes = fault_writes
+
+    def _cycle_matches(self):
+        try:
+            addr = int(self.dut.ADR_OUT.value)
+            fc = int(self.dut.FC_OUT.value)
+            rw_n = int(self.dut.RWn.value)
+        except ValueError:
+            return False
+        if (addr & ~3) != self.fault_addr or fc != self.fault_fc:
+            return False
+        return self.fault_reads if rw_n == 1 else self.fault_writes
+
+    def _assert_term(self, dsack):
+        if self.faults_left > 0 and self._cycle_matches():
+            self.faults_left -= 1
+            self.fault_count += 1
+            self.faulted.append((
+                int(self.dut.ADR_OUT.value),
+                int(self.dut.FC_OUT.value),
+                int(self.dut.RWn.value),
+            ))
+            self.dut.BERRn.value = 0
+            return
+        super()._assert_term(dsack)
+
+    def _negate_term(self):
+        self.dut.BERRn.value = 1
+        super()._negate_term()
+
+
+class TableDmaBusModel(BusModel):
+    """Writes a descriptor tree into memory behind the CPU's back.
+
+    The rewrite fires when the CPU's own store to `trigger_addr` completes, so
+    the resulting table was never built by CPU stores and was never snooped --
+    it is only reachable by reading memory.
+    """
+
+    def __init__(self, dut, memory, trigger_addr, dma_writes, **kwargs):
+        super().__init__(dut, memory, **kwargs)
+        self.trigger_addr = trigger_addr & ~3
+        self.dma_writes = dma_writes
+        self.fired = False
+
+    def _assert_term(self, dsack):
+        super()._assert_term(dsack)
+        if self.fired:
+            return
+        try:
+            addr = int(self.dut.ADR_OUT.value)
+            rw_n = int(self.dut.RWn.value)
+        except ValueError:
+            return
+        if rw_n == 0 and (addr & ~3) == self.trigger_addr:
+            self.fired = True
+            for target, value in self.dma_writes:
+                self.memory.load_long(target, value)
+
+
+async def _setup_with_bus(h, program, bus):
+    """CPUTestHarness.setup() with a caller-supplied bus responder."""
+    clock = Clock(h.dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    h._init_idle_inputs()
+    if h.trap_detect:
+        h._install_trap_stubs()
+    h._load_memory(program)
+    await RisingEdge(h.dut.CLK)
+    await RisingEdge(h.dut.CLK)
+    h.dut.RESET_INn.value = 0
+    h.dut.HALT_INn.value = 0
+    await ClockCycles(h.dut.CLK, 20)
+    h.bus = bus
+    await bus.start()
+    h.dut.RESET_INn.value = 1
+    h.dut.HALT_INn.value = 1
+    await ClockCycles(h.dut.CLK, 4)
+
+
+def _mmu_enable_words(s, a_tt0=6, a_tt1=7):
+    """PMOVE sequence installing TT0/TT1, then CRP and TC (which enables the MMU)."""
+    return [
+        *movea(LONG, SPECIAL, IMMEDIATE, a_tt0),
+        *imm_long(s["tt0_src"]),
+        0xF010 | a_tt0, 0x0800,               # PMOVE (An),TT0
+        *movea(LONG, SPECIAL, IMMEDIATE, a_tt1),
+        *imm_long(s["tt1_src"]),
+        0xF010 | a_tt1, 0x0C00,               # PMOVE (An),TT1
+        *movea(LONG, SPECIAL, IMMEDIATE, 1),
+        *imm_long(s["crp_src"]),
+        0xF011, 0x4C00,                       # PMOVE (A1),CRP
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(s["tc_src"]),
+        0xF012, 0x4000,                       # PMOVE (A2),TC
+    ]
+
+
+def _load_short_tree(h, s, page_base):
+    """Place the standard short-format three-level tree in memory."""
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    h.mem.load_long(desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002)
+    h.mem.load_long(desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+    return desc_a_addr, desc_b_addr, desc_c_addr
+
+
+@cocotb.test()
+async def test_mmu_walk_fetches_descriptors_over_the_bus(dut):
+    """A table the CPU has never touched must be searched over the bus.
+
+    UM 9.5.2: "The table search procedure uses physical addresses to access the
+    translation tables... The read-modify-write (RMC) signal is asserted on the
+    first bus cycle of the search and remains asserted throughout". UM 7.3.7
+    list: "Table search accesses required for the MMU are always read-modify-
+    write cycles to the supervisor data space."
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xD00)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x1BADF00D
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    cycles = _start_cycle_log(dut)
+    desc_a_addr, desc_b_addr, desc_c_addr = _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "Unprimed table search did not complete"
+
+    got = h.read_result_long(0)
+    assert got == expected_value, (
+        f"Expected translated value 0x{expected_value:08X}, got 0x{got:08X}"
+    )
+
+    for name, addr in (("root", desc_a_addr), ("level B", desc_b_addr),
+                       ("page", desc_c_addr)):
+        hits = [c for c in cycles if c[0] == addr and c[2] == 1]
+        assert hits, (
+            f"No bus read cycle at the {name} descriptor address 0x{addr:08X}; "
+            f"the search did not fetch it from memory"
+        )
+        for _, fc, _, rmc_n in hits:
+            assert fc == FC_SUPERVISOR_DATA, (
+                f"{name} descriptor fetched with FC={fc}, expected "
+                f"{FC_SUPERVISOR_DATA} (supervisor data)"
+            )
+            assert rmc_n == 0, (
+                f"{name} descriptor fetched with RMCn negated; UM 9.5.2 requires "
+                f"RMC asserted throughout the search"
+            )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_walk_table_written_by_dma_not_by_cpu_stores(dut):
+    """A tree placed in memory by another master must still be searchable.
+
+    The program first zeroes all three descriptors with its own stores, which is
+    what any snoop-fed shadow would record (DT=0, invalid). A DMA master then
+    writes the real tree straight into memory. A search that reads memory
+    translates; one that reads snooped state would take a bus error.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xD40)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0xD1A9D1A9
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    program = [
+        # CPU stores that poison every snoopable copy of the tree with DT=0.
+        *moveq(0x00, 0),
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_a_addr),
+        *move(LONG, DN, 0, AN_IND, 3),
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(desc_b_addr),
+        *move(LONG, DN, 0, AN_IND, 4),
+        *movea(LONG, SPECIAL, IMMEDIATE, 5),
+        *imm_long(desc_c_addr),
+        *move(LONG, DN, 0, AN_IND, 5),        # DMA rewrite fires here.
+
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    dma_writes = [
+        (desc_a_addr, (s["lvlb_tbl"] & 0xFFFFFFF0) | 0x00000002),
+        (desc_b_addr, (s["page_tbl"] & 0xFFFFFFF0) | 0x00000002),
+        (desc_c_addr, (page_base & 0xFFFFFF00) | 0x00000001),
+    ]
+    bus = TableDmaBusModel(dut, h.mem, desc_c_addr, dma_writes)
+    await _setup_with_bus(h, program, bus)
+
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    h.mem.load_long(s["tt0_src"], s["tt0_prog"])
+    h.mem.load_long(s["tt1_src"], s["tt1_prog"])
+    h.mem.load_long(s["crp_src"] + 0, 0x7FFF0002)
+    h.mem.load_long(s["crp_src"] + 4, s["root_tbl"])
+    h.mem.load_long(s["tc_src"], s["tc_val"])
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert bus.fired, "DMA rewrite never fired; the trigger store was not seen"
+    assert found, "DMA-built table search did not complete"
+
+    got = h.read_result_long(0)
+    assert got == expected_value, (
+        f"Expected translated value 0x{expected_value:08X}, got 0x{got:08X}; "
+        f"the search did not read the DMA-written tree"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_walk_survives_descriptor_shadow_pressure(dut):
+    """Conflicting data traffic must not turn a resident table into a fault.
+
+    Five longwords at a 256-byte stride from the page descriptor land in the same
+    descriptor-shadow set. With the search reading memory the traffic is
+    irrelevant; while it read a 64-set shadow this evicted the tree and reported
+    a translation fault on a perfectly valid resident table.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xD80)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x7E577E57
+
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    pressure = [desc_c_addr + 0x100 * k for k in range(1, 6)]
+
+    pressure_words = []
+    for addr in pressure:
+        pressure_words += [
+            *movea(LONG, SPECIAL, IMMEDIATE, 3),
+            *imm_long(addr),
+            *move(LONG, AN_IND, 3, DN, 3),
+            *move(LONG, DN, 3, AN_IND, 3),
+        ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE + 0),
+
+        # Evict everything a shadow could be holding, then force a fresh search.
+        *pressure_words,
+        0xF000, 0x2400,                       # PFLUSHA
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 2),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE + 4),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+    for k, addr in enumerate(pressure):
+        h.mem.load_long(addr, 0xAA000000 | k)
+
+    found = await h.run_until_sentinel(max_cycles=90000)
+    assert found, "Shadow-pressure table search did not complete"
+
+    assert h.read_result_long(0) == expected_value, (
+        f"First translation returned 0x{h.read_result_long(0):08X}, "
+        f"expected 0x{expected_value:08X}"
+    )
+    assert h.read_result_long(4) == expected_value, (
+        f"Translation after conflicting traffic returned "
+        f"0x{h.read_result_long(4):08X}, expected 0x{expected_value:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_berr_on_descriptor_fetch_faults_the_access(dut):
+    """BERR on a descriptor fetch is a bus error for the original access.
+
+    UM 8.1.2: "A bus error exception also occurs when the MMU detects that a
+    successful address translation is not possible... The problem encountered
+    could be a limit violation, an invalid descriptor, or the assertion of the
+    BERR signal during a bus cycle used to access the translation tables."
+    UM 9.4: such a search leaves the ATC entry B-marked.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xDC0)
+    handler_addr = 0x000B00
+    mmusr_dst = h.DATA_BASE + 0xDA0
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    handler_code = [
+        *moveq(0x02, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_dst),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),        # Descriptor fetch bus-errors here.
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    bus = BerrOnAddressBusModel(dut, h.mem, desc_c_addr, times=1)
+    await _setup_with_bus(h, program, bus)
+
+    h.mem.load_long(2 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0xFEEDFACE)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, (
+        f"Descriptor-fetch bus error did not reach the handler "
+        f"(BERRn asserted {bus.fault_count} times)"
+    )
+    assert bus.fault_count == 1, (
+        f"BERRn asserted on {bus.fault_count} descriptor accesses (expected 1); "
+        f"faulted cycles: {[(hex(a), f, r) for a, f, r in bus.faulted]}"
+    )
+    marker = h.read_result_long(0)
+    assert marker == 0x02, (
+        f"Expected the vector-2 handler marker 0x02, got 0x{marker:08X}; "
+        f"0xFEEDFACE means the faulted descriptor fetch was ignored"
+    )
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_B) != 0, (
+        f"Search that bus-errored must leave B set in the ATC entry, got 0x{mmusr:04X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_u_and_m_history_bits_reach_memory(dut):
+    """U on every descriptor and M on a written page must land in memory.
+
+    UM 9.5.2: "During a table search, the U bit in each descriptor that is
+    encountered is checked and set if it is not already set. Similarly, when the
+    table search is for a write access and the M bit of the page descriptor is
+    clear, the processor sets the bit." UM 9.6.1 on the U bit: "Updates of the U
+    bit are performed before the MC68030 allows a page to be accessed."
+
+    Read back through the CPU, so it is the content of memory being asserted on
+    and not any internal copy. U is bit 3 and M is bit 4 of the descriptor
+    status (UM Figures 9-10..9-14).
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xE40)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+
+    desc_a_addr = s["root_tbl"] + (0x12 << 2)
+    desc_b_addr = s["lvlb_tbl"] + (0x34 << 2)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    DESC_U = 1 << 3
+    DESC_M = 1 << 4
+
+    def read_back(addr, result_offset):
+        """CPU read of a descriptor (transparent via TT1) into RESULT_BASE."""
+        return [
+            *movea(LONG, SPECIAL, IMMEDIATE, 3),
+            *imm_long(addr),
+            *move(LONG, AN_IND, 3, DN, 4),
+            *move_to_abs_long(LONG, DN, 4, h.RESULT_BASE + result_offset),
+        ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+
+        # Read access: sets U in all three descriptors, must not set M.
+        *move(LONG, AN_IND, 0, DN, 1),
+        *read_back(desc_a_addr, 0x00),
+        *read_back(desc_b_addr, 0x04),
+        *read_back(desc_c_addr, 0x08),
+
+        # Write access with no resident entry: the search must set M as well.
+        0xF000, 0x2400,                       # PFLUSHA
+        *move(LONG, DN, 1, AN_IND, 0),
+        *read_back(desc_a_addr, 0x0C),
+        *read_back(desc_c_addr, 0x10),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0x11223344)
+
+    found = await h.run_until_sentinel(max_cycles=120000)
+    assert found, "History-bit write-back test did not complete"
+
+    after_read_a = h.read_result_long(0x00)
+    after_read_b = h.read_result_long(0x04)
+    after_read_c = h.read_result_long(0x08)
+    after_write_a = h.read_result_long(0x0C)
+    after_write_c = h.read_result_long(0x10)
+
+    for name, value in (("root", after_read_a), ("level B", after_read_b),
+                        ("page", after_read_c)):
+        assert value & DESC_U, (
+            f"U bit not set in the {name} descriptor in memory after a read "
+            f"(read back 0x{value:08X})"
+        )
+    assert not (after_read_c & DESC_M), (
+        f"A read set M in the page descriptor in memory (read back "
+        f"0x{after_read_c:08X})"
+    )
+    assert after_write_c & DESC_M, (
+        f"M bit not set in the page descriptor in memory after a write "
+        f"(read back 0x{after_write_c:08X})"
+    )
+    assert not (after_write_a & DESC_M), (
+        f"M must only be set in the page descriptor, but the root descriptor "
+        f"read back 0x{after_write_a:08X}"
+    )
+
+    # And the same values are what a bus master would see, not just what the
+    # CPU's own read path returns.
+    assert h.mem.read(desc_c_addr, 4) & (DESC_U | DESC_M) == (DESC_U | DESC_M), (
+        f"Memory holds 0x{h.mem.read(desc_c_addr, 4):08X}; U and M expected"
+    )
+    assert h.mem.read(desc_a_addr, 4) & DESC_U, (
+        f"Memory holds 0x{h.mem.read(desc_a_addr, 4):08X}; U expected"
+    )
+    assert h.mem.read(desc_b_addr, 4) & DESC_U, (
+        f"Memory holds 0x{h.mem.read(desc_b_addr, 4):08X}; U expected"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_berr_on_descriptor_update_faults_the_access(dut):
+    """BERR on the descriptor update write is a bus error for the access.
+
+    UM 8.1.2 makes no distinction between the read and the write half of a table
+    search: any BERR "during a bus cycle used to access the translation tables"
+    faults the original access.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xEC0)
+    handler_addr = 0x000B00
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+
+    handler_code = [
+        *moveq(0x02, 1),
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 1),        # U update write bus-errors here.
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    bus = BerrOnAddressBusModel(dut, h.mem, desc_c_addr, times=1,
+                                fault_reads=False, fault_writes=True)
+    await _setup_with_bus(h, program, bus)
+
+    h.mem.load_long(2 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0xFEEDFACE)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, (
+        f"Descriptor-update bus error did not reach the handler "
+        f"(BERRn asserted {bus.fault_count} times)"
+    )
+    assert bus.fault_count == 1, (
+        f"BERRn asserted on {bus.fault_count} descriptor writes (expected 1); "
+        f"0 means the search never wrote the U bit back to memory"
+    )
+    marker = h.read_result_long(0)
+    assert marker == 0x02, (
+        f"Expected the vector-2 handler marker 0x02, got 0x{marker:08X}; "
+        f"0xFEEDFACE means the faulted descriptor update was ignored"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_demand_paging_read_fault_completes_after_rte(dut):
+    """Demand paging on a read: invalid page, handler maps it, RTE, access lands.
+
+    UM 8.1.2: a table search that meets an invalid descriptor takes a bus error
+    on the retried access. The handler writes a valid page descriptor into the
+    table in memory, flushes the B-marked ATC entry, and returns; the access
+    then has to complete with the mapped page's data.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xE00)
+    handler_addr = 0x000B80
+    counter_addr = h.DATA_BASE + 0xE80
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    expected_value = 0x9A6E1400
+
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    valid_desc = (page_base & 0xFFFFFF00) | 0x00000001
+
+    handler_code = [
+        # Count the entries so a livelock or a silent second fault is visible.
+        *move(LONG, SPECIAL, ABS_L, DN, 0),
+        *imm_long(counter_addr),
+        *addq(LONG, 1, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, counter_addr),
+
+        # Page the descriptor in.
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 1),
+        *imm_long(valid_desc),
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_c_addr),
+        *move(LONG, DN, 1, AN_IND, 2),
+
+        0xF000, 0x2400,                       # PFLUSHA: drop the B-marked entry.
+        *rte(),
+    ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, AN_IND, 0, DN, 3),        # Faults, then reruns after RTE.
+        *move_to_abs_long(LONG, DN, 3, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(2 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(desc_c_addr, 0x00000000)   # DT=0: page not resident.
+    h.mem.load_long(counter_addr, 0)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, expected_value)
+
+    found = await h.run_until_sentinel(max_cycles=120000)
+    entries = h.mem.read(counter_addr, 4)
+    assert found, (
+        f"Demand-paged read did not complete after RTE (handler entries={entries}, "
+        f"descriptor now 0x{h.mem.read(desc_c_addr, 4):08X})"
+    )
+    assert entries == 1, (
+        f"Bus-error handler ran {entries} times, expected exactly 1"
+    )
+    assert (h.mem.read(desc_c_addr, 4) & 0x3) == 0x1, (
+        "Handler did not leave a valid page descriptor in memory"
+    )
+    got = h.read_result_long(0)
+    assert got == expected_value, (
+        f"Reran access returned 0x{got:08X}, expected 0x{expected_value:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_demand_paging_write_fault_completes_after_rte(dut):
+    """Demand paging on a write: invalid page, handler maps it, RTE, store lands.
+
+    KNOWN DEFECT ELSEWHERE, deliberately left failing-but-skipped.
+
+    Same shape as the read case, but the faulting access is a store. Everything
+    the MMU owes is done: the search reports the invalid page, the handler is
+    entered exactly once, it writes a valid page descriptor into the table in
+    memory, PFLUSHA drops the B-marked entry and RTE returns. The program then
+    runs to completion. What never happens is the store: the paged-in page still
+    reads 0x00000000.
+
+    That is the open defect recorded in notes/AUDIT_2026-07.md under "Known open
+    defects" and reproduced by
+    tb/test_berr_probe.py::test_berr_on_store_stacks_the_storing_instruction --
+    a store whose acknowledge arrives after the next instruction is dispatched
+    stacks the following instruction's address, so RTE resumes past the store and
+    its write is discarded. It needs a PC carried alongside the writeback stage,
+    which nothing in the design tracks; it is not reachable from the table-search
+    path. Unskip once that is fixed.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xF00)
+    handler_addr = 0x000B80
+    counter_addr = h.DATA_BASE + 0xF80
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    stored_value = 0x5100EDA7
+
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    valid_desc = (page_base & 0xFFFFFF00) | 0x00000001
+
+    handler_code = [
+        *move(LONG, SPECIAL, ABS_L, DN, 0),
+        *imm_long(counter_addr),
+        *addq(LONG, 1, DN, 0),
+        *move_to_abs_long(LONG, DN, 0, counter_addr),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 1),
+        *imm_long(valid_desc),
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),
+        *imm_long(desc_c_addr),
+        *move(LONG, DN, 1, AN_IND, 2),
+        0xF000, 0x2400,                       # PFLUSHA
+        *rte(),
+    ]
+
+    program = [
+        *_mmu_enable_words(s),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 3),
+        *imm_long(stored_value),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        *move(LONG, DN, 3, AN_IND, 0),        # Faults, then reruns after RTE.
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(2 * 4, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(desc_c_addr, 0x00000000)   # DT=0: page not resident.
+    h.mem.load_long(counter_addr, 0)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0)
+
+    found = await h.run_until_sentinel(max_cycles=120000)
+    entries = h.mem.read(counter_addr, 4)
+    assert found, (
+        f"Demand-paged write did not complete after RTE (handler entries={entries})"
+    )
+    assert entries == 1, f"Bus-error handler ran {entries} times, expected exactly 1"
+    got = h.mem.read(expected_phys_addr & 0xFFFFF, 4)
+    assert got == stored_value, (
+        f"Reran store wrote 0x{got:08X} to the paged-in page, expected "
+        f"0x{stored_value:08X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_pload_search_completes_before_the_next_instruction(dut):
+    """PLOAD must not retire before its table search has loaded the ATC.
+
+    UM 9.8: "The PLOAD instruction performs a table search operation for a
+    specified function code and logical address and then loads the translation
+    for the address into the ATC."
+
+    The probe reads the ATC in the instruction immediately after PLOADR, with no
+    filler at all, on a tree that needs three levels of real descriptor bus
+    cycles. While PLOAD completed asynchronously this reported a miss.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xF40)
+    mmusr_dst = h.DATA_BASE + 0xFC0
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+
+        0xF010, 0x2215,                       # PLOADR #5,(A0)
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0 -- next instruction
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_dst),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    _load_short_tree(h, s, page_base)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "PLOAD handshake test did not complete"
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_I) == 0, (
+        f"ATC probe in the instruction after PLOADR reported a miss "
+        f"(MMUSR 0x{mmusr:04X}); the search had not finished when PLOAD retired"
+    )
+    assert (mmusr & MMUSR_B) == 0, (
+        f"PLOADR left a bus-error-marked entry (MMUSR 0x{mmusr:04X})"
+    )
+    assert (mmusr & MMUSR_M) == 0, (
+        f"PLOADR (read form) must leave M clear, got MMUSR 0x{mmusr:04X}"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_write_to_m_clear_entry_researches_the_table(dut):
+    """A write to a resident M-clear page must re-search, not just set M in the ATC.
+
+    UM 9.4: "If the M bit is clear and a write access to this logical address is
+    attempted, the MC68030 aborts the access and initiates a table search,
+    setting the M bit in the page descriptor, invalidating the old ATC entry,
+    and creating a new entry with the M bit set. The MMU then allows the original
+    write access to be performed."
+
+    A read first creates the entry with M clear. The write that follows has a
+    perfectly good translation available, so nothing forces a search except that
+    rule -- and without the search the descriptor in memory would keep M clear
+    forever, which is what happened while M was set in the entry alone. There is
+    no PFLUSH anywhere in this program.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xFC0)
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+    expected_phys_addr = page_base + (logical_addr & 0xFFF)
+    stored_value = 0x4D0DEF17
+
+    desc_c_addr = s["page_tbl"] + (0x5 << 2)
+    DESC_M = 1 << 4
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+
+        *move(LONG, AN_IND, 0, DN, 1),        # Read: entry created with M clear.
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(desc_c_addr),
+        *move(LONG, AN_IND, 3, DN, 4),
+        *move_to_abs_long(LONG, DN, 4, h.RESULT_BASE + 0),
+
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(stored_value),
+        *move(LONG, DN, 2, AN_IND, 0),        # Write hit on an M-clear entry.
+        *move(LONG, AN_IND, 3, DN, 5),
+        *move_to_abs_long(LONG, DN, 5, h.RESULT_BASE + 4),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    _load_short_tree(h, s, page_base)
+    h.mem.load_long(expected_phys_addr & 0xFFFFF, 0)
+
+    found = await h.run_until_sentinel(max_cycles=90000)
+    assert found, "M-clear write re-search test did not complete"
+
+    after_read = h.read_result_long(0)
+    after_write = h.read_result_long(4)
+    assert not (after_read & DESC_M), (
+        f"A read set M in the page descriptor (0x{after_read:08X})"
+    )
+    assert after_write & DESC_M, (
+        f"The write did not re-search: the page descriptor in memory still reads "
+        f"0x{after_write:08X} with M clear"
+    )
+    # UM 9.4: "The MMU then allows the original write access to be performed."
+    got = h.mem.read(expected_phys_addr & 0xFFFFF, 4)
+    assert got == stored_value, (
+        f"The re-searched write did not land: page holds 0x{got:08X}, expected "
+        f"0x{stored_value:08X}"
+    )
     h.cleanup()

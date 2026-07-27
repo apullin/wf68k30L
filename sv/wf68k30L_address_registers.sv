@@ -141,7 +141,6 @@ logic [3:0] AR_USED_1;
 logic [3:0] AR_USED_2;
 logic B_S; // Base register suppress.
 logic [1:0] BD_SIZE; // Indexed / Indirect.
-logic [2:0] DFC_REG_sig; // Special function code registers.
 logic F_E; // Full extension word.
 logic [2:0] I_IS; // Indexed / Indirect.
 logic I_S; // Index suppress.
@@ -150,7 +149,6 @@ logic [1:0] MSBIT;
 logic [31:0] MSP_REG; // Master stack pointer (refers to A7' in the supervisor mode).
 logic [31:0] PC_I; // Active program counter.
 logic [1:0] SCALE; // Scale information for the index.
-logic [2:0] SFC_REG_sig; // Special function code registers.
 logic [31:0] USP_REG; // User stack pointer (refers to A7 in the user mode.).
 logic [31:0] ADR_EFF_TMP_REG;
 
@@ -369,9 +367,9 @@ always_comb begin : adr_eff_calc
     PCVAR_comb = PC_I + {28'd0, PC_EW_OFFSET}; // Address of the extension word.
 
     // Address mux: select base register
-    if (ADR_MODE == ADR_AN_IDX && FETCH_MEM_ADR && F_E && B_S)
+    if (ADR_MODE == ADR_AN_IDX && F_E && B_S)
         ADR_MUX_comb = 32'h0; // Base register suppress.
-    else if (ADR_MODE == ADR_SPECIAL && FETCH_MEM_ADR && AMODE_SEL == 3'b011 && F_E && B_S)
+    else if (ADR_MODE == ADR_SPECIAL && AMODE_SEL == 3'b011 && F_E && B_S)
         ADR_MUX_comb = 32'h0; // Base register suppress.
     else if (USE_DREG)
         ADR_MUX_comb = AR_IN_1;
@@ -397,8 +395,10 @@ always_comb begin : adr_eff_calc
                 ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + index_scaled_comb;
             end else begin // Full extension word
                 case (I_S_IS_comb)
-                    4'b0000, 4'b1000: // No memory indirect
+                    4'b0000: // No memory indirect
                         ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG + index_scaled_comb;
+                    4'b1000: // No memory indirect, index suppressed
+                        ADR_EFF_VAR_comb = ADR_MUX_comb + BASE_DISPL_REG;
                     4'b0001, 4'b0010, 4'b0011: // Preindexed
                         ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
                             (ADR_MUX_comb + BASE_DISPL_REG + index_scaled_comb) :
@@ -428,8 +428,10 @@ always_comb begin : adr_eff_calc
                         ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + index_scaled_comb;
                     end else begin
                         case (I_S_IS_comb)
-                            4'b0000, 4'b1000:
+                            4'b0000:
                                 ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG + index_scaled_comb;
+                            4'b1000: // Index suppressed.
+                                ADR_EFF_VAR_comb = PCVAR_comb + BASE_DISPL_REG;
                             4'b0001, 4'b0010, 4'b0011:
                                 ADR_EFF_VAR_comb = FETCH_MEM_ADR ?
                                     (PCVAR_comb + BASE_DISPL_REG + index_scaled_comb) :
@@ -529,7 +531,10 @@ always_ff @(posedge CLK) begin : stack_pointers
         endcase
     end
 
-    if (AR_DEC && AR_PNTR_1 == 7 && SBIT && MBIT) begin
+    // ISP_DEC is the exception handler's frame push. It must move whichever
+    // supervisor stack pointer the frame write address is taken from, which
+    // the exception handler forces to S=1 and therefore selects with M alone.
+    if ((ISP_DEC && MBIT) || (AR_DEC && AR_PNTR_1 == 7 && SBIT && MBIT)) begin
         case (OP_SIZE)
             BYTE:    MSP_REG <= MSP_REG - 32'd2; // Stack: byte decrements by two.
             WORD:    MSP_REG <= MSP_REG - 32'd2;
@@ -558,7 +563,7 @@ always_ff @(posedge CLK) begin : stack_pointers
         endcase
     end
 
-    if (ISP_DEC || (AR_DEC && AR_PNTR_1 == 7 && SBIT && !MBIT)) begin
+    if ((ISP_DEC && !MBIT) || (AR_DEC && AR_PNTR_1 == 7 && SBIT && !MBIT)) begin
         case (OP_SIZE)
             BYTE:    ISP_REG <= ISP_REG - 32'd2; // Stack: byte decrements by two.
             WORD:    ISP_REG <= ISP_REG - 32'd2;
@@ -760,13 +765,10 @@ end
 always_ff @(posedge CLK) begin : fcodes
     // Alternate function code registers.
     if (DFC_WR)
-        DFC_REG_sig <= AR_IN_1[2:0];
+        DFC <= AR_IN_1[2:0];
 
     if (SFC_WR)
-        SFC_REG_sig <= AR_IN_1[2:0];
-
-    DFC <= DFC_REG_sig;
-    SFC <= SFC_REG_sig;
+        SFC <= AR_IN_1[2:0];
 end
 
 endmodule

@@ -1751,6 +1751,46 @@ async def test_rte_format_a_rerun_ssw_uses_refill_path(dut):
     h.cleanup()
 
 
+@cocotb.test()
+async def test_rte_format_9_deallocates_twenty_bytes(dut):
+    """UM 8.1.13/Table 8-6: format $9 is a 10-word frame, so RTE must
+    deallocate 0x14 bytes - matching the ten words the builder pushes."""
+    h = CPUTestHarness(dut)
+    frame_sp = 0x00001C00
+    target_pc = 0x00000500
+    instr_adr = 0x00000100
+
+    target_code = _handler_code_read_sp(h, 0x5F)
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 7),
+        *imm_long(frame_sp),
+        *rte(),
+        *nop(), *nop(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_words(target_pc, target_code)
+    frame = [0x0000] * 10
+    frame[0x00 // 2] = 0x2700
+    frame[0x02 // 2] = (target_pc >> 16) & 0xFFFF
+    frame[0x04 // 2] = target_pc & 0xFFFF
+    frame[0x06 // 2] = 0x9000 | 0x034        # format 9, vector offset 0x34 (vector 13)
+    frame[0x08 // 2] = (instr_adr >> 16) & 0xFFFF
+    frame[0x0A // 2] = instr_adr & 0xFFFF
+    h.mem.load_words(frame_sp, frame)
+
+    found = await h.run_until_sentinel(max_cycles=6000)
+    marker = h.read_result_long(0)
+    sp_after = h.read_result_long(4)
+    assert found, f"Sentinel not reached after format-9 RTE (marker=0x{marker:08X})"
+    assert marker == 0x5F, f"Format-9 RTE reached the wrong code: 0x{marker:08X}"
+    assert sp_after == frame_sp + 0x14, (
+        f"SP after format-9 RTE = 0x{sp_after:08X}; expected 0x{frame_sp + 0x14:08X} "
+        f"(ten-word frame = 0x14 bytes)"
+    )
+    h.cleanup()
+
+
 # =========================================================================
 # TRAP with RTE: verify we can return from a trap handler
 # =========================================================================
@@ -1868,3 +1908,221 @@ async def test_divu_divide_by_zero_vector_offset(dut):
         f"Div-by-zero vector offset should be 0x014 (vector 5): got 0x{vec_offset:03X}"
     )
     h.cleanup()
+
+
+# =========================================================================
+# MMU configuration exception (vector 56) - post-instruction, format $2
+# =========================================================================
+
+@cocotb.test()
+async def test_mmu_config_exception_is_post_instruction_format_2(dut):
+    """UM 8.1.10: the MMU configuration exception is a post-instruction
+    exception. It builds a format-$2 frame whose stacked PC is the scanPC
+    (next instruction), so a handler that RTEs resumes past the PMOVE."""
+    h = CPUTestHarness(dut)
+    handler_addr = 0x000680
+    vector_addr = 56 * 4
+    tc_src = h.DATA_BASE + 0x200
+    invalid_tc = 0x80700000   # E=1, PS=0x7 reserved -> configuration exception
+
+    handler_code = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(h.RESULT_BASE),
+        *moveq(0x38, 1),
+        *move(LONG, DN, 1, AN_IND, 0),         # [RESULT+0] = 0x38
+        *addq(LONG, 4, AN, 0),
+        *moveq(0, 2),
+        *move(WORD, AN_DISP, 7, DN, 2),        # D2 = [SP+6] format/vector word
+        *disp16(6),
+        *move(LONG, DN, 2, AN_IND, 0),         # [RESULT+4]
+        *addq(LONG, 4, AN, 0),
+        *moveq(0, 3),
+        *move(WORD, AN_DISP, 7, DN, 3),        # D3 = [SP+4] low word of stacked PC
+        *disp16(4),
+        *move(LONG, DN, 3, AN_IND, 0),         # [RESULT+8]
+        *rte(),
+    ]
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),   # 0x100: A0 = TC source (6 bytes)
+        *imm_long(tc_src),
+        0xF010, 0x4000,                        # 0x106: PMOVE (A0),TC -> next = 0x10A
+        *moveq(0x11, 1),                       # 0x10A: only runs if RTE resumes past PMOVE
+        *move_to_abs_long(LONG, DN, 1, h.RESULT_BASE + 0x10),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(vector_addr, handler_addr)
+    h.mem.load_words(handler_addr, handler_code)
+    h.mem.load_long(tc_src, invalid_tc)
+
+    found = await h.run_until_sentinel(max_cycles=14000)
+    marker = h.read_result_long(0)
+    fmt_vec = h.read_result_long(4)
+    stacked_pc_lo = h.read_result_long(8)
+    resumed = h.mem.read(h.RESULT_BASE + 0x10, 4)
+    assert marker == 0x38, (
+        f"MMU configuration handler did not run: marker=0x{marker:08X}"
+    )
+    assert (fmt_vec >> 12) == 0x2, (
+        f"MMU configuration frame format = 0x{fmt_vec >> 12:X}; expected 0x2 "
+        f"(six-word post-instruction frame); full word 0x{fmt_vec:04X}"
+    )
+    assert (fmt_vec & 0xFFF) == 0x0E0, (
+        f"Vector offset = 0x{fmt_vec & 0xFFF:03X}; expected 0x0E0 (vector 56)"
+    )
+    assert stacked_pc_lo == 0x010A, (
+        f"Stacked PC = 0x....{stacked_pc_lo:04X}; expected 0x010A (the scanPC, "
+        f"i.e. the instruction after the 4-byte PMOVE at 0x106)"
+    )
+    assert found, "Sentinel not reached: RTE re-executed the faulting PMOVE"
+    assert resumed == 0x11, (
+        f"Code after the PMOVE did not run: marker=0x{resumed:08X}"
+    )
+    h.cleanup()
+
+
+# =========================================================================
+# Harness trap-detection self-tests
+#
+# These two tests are a matched pair. They exist because the hole they cover
+# was invisible for the life of the suite: with an exception vector left at
+# zero the CPU jumps to PC=0, where the zero-filled reset vectors decode as
+# ORI.B #0,D0 and slide it straight back into the program at PROGRAM_BASE. A
+# deterministic test then re-runs, recomputes the same results, writes the
+# sentinel and passes -- having taken an exception nobody asked for.
+#
+# The program below is the smallest faithful reproduction: it faults exactly
+# once, so the re-run takes the non-faulting path and produces the expected
+# result. The first test proves the harness now catches it; the second turns
+# the detection off and shows the false pass it used to produce, so a
+# regression in the detector cannot go unnoticed.
+# =========================================================================
+
+def _fault_once_program(h):
+    """Program that takes an unhandled ILLEGAL on its first pass only.
+
+    Layout (PROGRAM_BASE = 0x100):
+      MOVE.L (flag).L,D1     ; D1 = pass marker
+      BNE.S  skip            ; second pass: jump over the fault
+      MOVEQ  #1,D1
+      MOVE.L D1,(flag).L     ; remember that pass 1 happened
+      ILLEGAL                ; unhandled -> vector 4
+    skip:
+      MOVEQ  #42,D2
+      MOVE.L D2,(RESULT_BASE).L
+      <sentinel>
+    """
+    flag = h.DATA_BASE + 0x40
+    tail = [
+        *moveq(42, 2),
+        *move_to_abs_long(LONG, DN, 2, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+    skipped = [
+        *moveq(1, 1),
+        *move_to_abs_long(LONG, DN, 1, flag),
+        *illegal(),
+    ]
+    # BNE.S displacement is relative to PC+2 of the branch word.
+    return [
+        *move(LONG, SPECIAL, ABS_L, DN, 1), *abs_long(flag),
+        0x6600 | (len(skipped) * 2),           # BNE.S skip
+        *skipped,
+        *tail,
+    ]
+
+
+@cocotb.test()
+async def test_harness_detects_unhandled_exception(dut):
+    """An exception with no installed handler must fail the run, not slide."""
+    h = CPUTestHarness(dut)
+    program = _fault_once_program(h)
+
+    await h.setup(program)
+    try:
+        await h.run_until_sentinel(max_cycles=6000)
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        report = h.trap_report()
+        h.cleanup()
+        raise AssertionError(
+            "Unhandled ILLEGAL did not fail the run. The harness fail stubs "
+            f"are not catching spurious exceptions (trap_report={report}); "
+            f"result=0x{h.read_result_long(0):08X}"
+        )
+    h.cleanup()
+
+    assert "vector 4" in message, (
+        f"Detection fired but did not name vector 4: {message}"
+    )
+    report = h.trap_report()
+    assert report is not None and report["vector"] == 4, (
+        f"Trap report missing or wrong vector: {report}"
+    )
+    assert (report["format_vector"] & 0xFFF) == 0x010, (
+        f"Recorded frame vector offset 0x{report['format_vector'] & 0xFFF:03X}, "
+        f"expected 0x010 (vector 4)"
+    )
+    assert report["pc"] == 0x00000110, (
+        f"Recorded stacked PC 0x{report['pc']:08X}, expected 0x00000110 "
+        f"(the address of the ILLEGAL)"
+    )
+
+
+@cocotb.test()
+async def test_harness_trap_detect_off_reproduces_false_pass(dut):
+    """With detection off the same program passes -- the hole being closed.
+
+    Kept as a live demonstration that the detection in the test above is doing
+    real work: the identical program, differing only in trap_detect, writes the
+    expected result and the sentinel while having taken an unhandled exception.
+    """
+    h = CPUTestHarness(dut, trap_detect=False)
+    program = _fault_once_program(h)
+
+    await h.setup(program)
+    assert h.mem.read(4 * 4, 4) == 0, "trap_detect=False must leave vectors alone"
+    found = await h.run_until_sentinel(max_cycles=6000)
+    h.cleanup()
+
+    assert found, (
+        "Expected the pre-detection slide (PC=0 -> ORI.B sled -> PROGRAM_BASE) "
+        "to re-enter the program and reach the sentinel"
+    )
+    assert h.read_result_long(0) == 42, (
+        f"Slide re-run produced 0x{h.read_result_long(0):08X}, expected 42"
+    )
+    assert h.trap_report() is None, "No stub is installed when trap_detect=False"
+
+
+@cocotb.test()
+async def test_harness_expect_exception_opts_out(dut):
+    """expect_exception() suppresses detection and leaves the vector as found.
+
+    Note the difference between the two opt-outs. expect_exception(v) clears
+    only vector v, so the CPU still jumps to PC=0 but the sled it lands in now
+    contains the other vectors' stub addresses (0x000Dxxxx decodes as an
+    illegal ORI.B #imm,An) -- it does not slide back into the program.
+    trap_detect=False is the opt-out for a test that needs the old
+    all-zero-table behavior.
+    """
+    h = CPUTestHarness(dut)
+    h.expect_exception(4)
+    program = _fault_once_program(h)
+
+    await h.setup(program)
+    assert h.mem.read(4 * 4, 4) == 0, (
+        "expect_exception(4) must leave vector 4 exactly as the test found it"
+    )
+    assert h.mem.read(5 * 4, 4) != 0, (
+        "expect_exception(4) must not disturb the other vectors"
+    )
+    # Must complete without raising: the run simply does not reach the sentinel.
+    await h.run_until_sentinel(max_cycles=3000)
+    h.cleanup()
+    assert h.trap_report() is None, (
+        f"No stub should have run for an expected vector: {h.trap_report()}"
+    )

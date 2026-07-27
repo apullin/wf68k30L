@@ -28,6 +28,7 @@ module WF68K30L_CTRL_COMB #(
     input  logic [15:0] BIW_2,
     input  logic [11:0] BIW_0_WB,
     input  logic [15:0] BIW_1_WB,
+    input  logic [15:0] EXT_WORD,
 
     // Data availability
     input  logic        OPD_ACK,
@@ -38,6 +39,7 @@ module WF68K30L_CTRL_COMB #(
     input  logic        DATA_RDY,
     input  logic        DATA_VALID,
     input  logic        MEMADR_RDY,
+    input  logic        MEMADR_ADR_RDY,
     input  logic        READ_CYCLE,
     input  logic        WRITE_CYCLE,
 
@@ -322,7 +324,13 @@ assign DATA_RD_I = (DATA_WR_I && !READ_CYCLE && !WRITE_CYCLE) ? 1'b0 : // Write 
                    (WRITE_CYCLE) ? 1'b0 : // Do not read during a write cycle.
                    (ADR_IN_USE) ? 1'b0 : // Avoid data hazards.
                    (DATA_RDY || MEMADR_RDY) ? 1'b0 :
-                   (FETCH_STATE == FETCH_MEMADR) ? 1'b1 :
+                   // The intermediate address only reaches ADR_EFF_I one cycle
+                   // after FETCH_MEM_ADR is asserted (PRM 2.2 / Table 2-4: the
+                   // intermediate address is bd + An + Xn.SIZE*SCALE, a sum the
+                   // address section selects only while FETCH_MEM_ADR is high).
+                   // Issuing the read on the entry cycle sends it to whatever
+                   // ADR_EFF_I held before, so wait for MEMADR_ADR_RDY.
+                   (FETCH_STATE == FETCH_MEMADR) ? MEMADR_ADR_RDY :
                    (FETCH_STATE == FETCH_OPERAND) ? 1'b1 : 1'b0;
 
 assign DATA_WR = DATA_WR_I;
@@ -368,7 +376,16 @@ assign STORE_IDATA_B1 = (FETCH_STATE == FETCH_IDATA_B1 && EW_ACK) ? 1'b1 : 1'b0;
 // LOAD_OP1 / LOAD_OP2 / LOAD_OP3
 // ====================================================================
 
-assign LOAD_OP1 = (OP == BFINS && INIT_ENTRY) ? 1'b1 : // Load insertion pattern.
+// Load the BFINS insertion pattern while read port 2 selects it; see the BFINS
+// arms of DR_SEL_RD_2 in wf68k30L_ctrl_regsel.sv.  A register destination is
+// decided in START_OP, so INIT_ENTRY is inside the insert window there.  A
+// memory destination reads its operand in FETCH_OPERAND, whose acknowledge
+// cycle needs port 2 back on the width register to restore BF_BYTES, so the
+// pattern is loaded during the read instead -- OP1_BUFFER holds it until
+// ALU_INIT.  RD_RDY cannot be asserted on the first FETCH_OPERAND cycle
+// (READ_CYCLE is registered from DATA_RD), so the window is never empty.
+assign LOAD_OP1 = (OP == BFINS && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 : // Load insertion pattern.
+                  (OP == BFINS && FETCH_STATE == FETCH_OPERAND && !RD_RDY) ? 1'b1 : // Load insertion pattern.
                   ((OP == CHK2 || OP == CMP2) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && !PHASE2) ? 1'b1 :
                   (OP == CMPM && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && PHASE2) ? 1'b1 :
                   (OP == MOVE && BIW_0[8:6] == 3'b100 && BIW_0[5:3] == 3'b001 && BIW_0[11:9] == BIW_0[2:0] && INIT_ENTRY) ? 1'b1 : // Load early to write the undecremented Register for Ax, -(Ax).
@@ -400,7 +417,7 @@ assign LOAD_OP2 = (OP == PMOVE && !BIW_1[9] && (PMOVE_SRP_SEL || PMOVE_CRP_SEL) 
 assign LOAD_OP3 = ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 :
                   ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 :
                   ((OP == BFCHG || OP == BFCLR) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
-                  ((OP == BFINS || OP == BSET) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
+                  ((OP == BFINS || OP == BFSET) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   ((OP == BFEXTS || OP == BFEXTU) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   ((OP == BFFFO || OP == BFTST) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && BF_HILOn) ? 1'b1 :
                   (OP == CAS2 && INIT_ENTRY && !PHASE2) ? 1'b1 : // Memory operand 2.
@@ -452,8 +469,8 @@ assign OP_SIZE_I = (FETCH_STATE == FETCH_MEMADR && !RD_RDY) ? LONG : // (RD_RDY:
                    ((OP == BCHG || OP == BCLR || OP == BTST || OP == BSET) && BIW_0[5:3] == 3'b000) ? LONG :
                    ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BIW_0[5:3] == 3'b000) ? LONG :
                    ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BIW_0[5:3] == 3'b000) ? LONG :
-                   ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BF_BYTES > 2) ? LONG :
-                   ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BF_BYTES > 2) ? LONG :
+                   ((OP == BFCHG || OP == BFCLR || OP == BFINS || OP == BFSET) && BF_BYTES > 0 && BF_HILOn) ? LONG :
+                   ((OP == BFEXTS || OP == BFEXTU || OP == BFFFO || OP == BFTST) && BF_BYTES > 0 && BF_HILOn) ? LONG :
                    (OP == EXT && BIW_0[8:6] == 3'b011) ? LONG :
                    (OP == BSR || OP == EXG || OP == EXTB || OP == JSR || OP == LEA || OP == LINK || OP == PEA || OP == SWAP || OP == UNLK) ? LONG :
                    ((OP == CAS || OP == CAS2) && BIW_0[10:9] == 2'b11) ? LONG :
@@ -487,7 +504,8 @@ assign OP_SIZE_I = (FETCH_STATE == FETCH_MEMADR && !RD_RDY) ? LONG : // (RD_RDY:
                    (OP == PMOVE && BIW_1[15:13] == 3'b011 && BIW_1[12:10] == 3'b000) ? WORD : // MMUSR
                    (OP == MOVEM || OP == RTR) ? WORD :
                    (OP == DIVS || OP == DIVU || OP == MULS || OP == MULU) ? WORD :
-                   (OP == PACK && (NEXT_FETCH_STATE == FETCH_OPERAND || FETCH_STATE == FETCH_OPERAND) && !INIT_ENTRY) ? WORD : // Read data is word wide.
+                   (OP == PACK && (NEXT_FETCH_STATE == FETCH_OPERAND || FETCH_STATE == FETCH_OPERAND ||
+                                   NEXT_FETCH_STATE == CALC_AEFF) && !INIT_ENTRY) ? WORD : // Read data is word wide.
                    ((OP == ROTL || OP == ROTR) && BIW_0[7:6] == 2'b11) ? WORD : // Memory shifts.
                    ((OP == ROXL || OP == ROXR) && BIW_0[7:6] == 2'b11) ? WORD : // Memory shifts.
                    (OP == UNPK && (INIT_ENTRY || FETCH_STATE == INIT_EXEC_WB)) ? WORD : // Writeback data is a word.
@@ -514,15 +532,27 @@ assign BKPT_CYCLE = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && DATA_RD_I) ? 
 assign BKPT_INSERT = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID) ? 1'b1 : 1'b0;
 
 // All traps must be modeled as strobes.
-assign TRAP_ILLEGAL = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && !DATA_VALID) ? 1'b1 : 1'b0;
+// Reserved full format extension word encodings, PRM Table 2-1 and Table 2-2:
+// BD SIZE = 00, plus I/IS = 100 with IS = 0 and I/IS = 100..111 with IS = 1.
+// Must stay identical to EXWORD_RESERVED in wf68k30L_ctrl_fetch_other.sv,
+// which abandons the effective address in the same cycle.
+assign TRAP_ILLEGAL = (OP == BKPT && FETCH_STATE == FETCH_OPERAND && RD_RDY && !DATA_VALID) ? 1'b1 :
+                      (FETCH_STATE == FETCH_EXWORD_1 && EW_ACK && EXT_WORD[8] &&
+                       ((EXT_WORD[5:4] == 2'b00) ||
+                        (EXT_WORD[2] && (EXT_WORD[6] || EXT_WORD[1:0] == 2'b00)))) ? 1'b1 : 1'b0;
 
 assign TRAP_cc = (OP == TRAPcc && ALU_COND && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
 assign TRAP_V = (OP == TRAPV && ALU_COND && FETCH_STATE == SLEEP && NEXT_FETCH_STATE == START_OP) ? 1'b1 : 1'b0;
 
-assign BERR = (FETCH_STATE == START_OP && EXEC_WB_STATE == IDLE) ? 1'b0 : // Disable when controller is not active.
-              (OP == BKPT) ? 1'b0 : // No bus error during breakpoint cycle.
-              (DATA_RDY && !DATA_VALID) ? 1'b1 :
+// OW_VALID covers only the pipe stages the acknowledged instruction actually
+// uses, so a faulted opcode word reaches this term only when the instruction
+// needing it is being started; speculative prefetch faults never do. The
+// acknowledge arrives while the controller still sits in START_OP, so this
+// term must be evaluated ahead of the idle mask.
+assign BERR = (OP == BKPT) ? 1'b0 : // No bus error during breakpoint cycle.
               (OPD_ACK && !OW_VALID) ? 1'b1 :
+              (FETCH_STATE == START_OP && EXEC_WB_STATE == IDLE) ? 1'b0 : // Disable when controller is not active.
+              (DATA_RDY && !DATA_VALID) ? 1'b1 :
               (EW_ACK && !OW_VALID) ? 1'b1 : 1'b0;
 
 // ====================================================================
@@ -615,7 +645,9 @@ assign SP_ADD_DISPL = (OP == LINK && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) ? 
 // ====================================================================
 
 assign ALU_TRIG = (ALU_BSY || FETCH_STATE != INIT_EXEC_WB) ? 1'b0 :
-                  ((OP == CHK2 || OP == CMP2 || OP == CMPM) && PHASE2) ? 1'b0 :
+                  // Two-operand fetches: trigger only on the second pass, once
+                  // both memory operands and the tested register are loaded.
+                  ((OP == CHK2 || OP == CMP2 || OP == CMPM) && !PHASE2) ? 1'b0 :
                   (OP == MOVE && PHASE2) ? 1'b0 : // no ALU required after second portion of address calculation.
                   (OP == MOVEM && !MOVEM_COND) ? 1'b0 :
                   (OP == MOVEM && BIW_0[10] && !MOVEM_FIRST_RD) ? 1'b0 : // Do not load before the first read access.
@@ -696,6 +728,7 @@ assign AR_MARK_USED = (OP == UNLK && FETCH_STATE != SWITCH_STATE && NEXT_FETCH_S
                       (OP == MOVEA) ? 1'b1 :
                       (OP == MOVEC && !BIW_0[0] && BIW_1[15]) ? 1'b1 : // Destination is Ax.
                       (OP == MOVES && BIW_1[15] && !BIW_1[11]) ? 1'b1 :
+                      (OP == PTEST && BIW_1[8]) ? 1'b1 : // Descriptor address to An.
                       (OP == UNLK) ? 1'b1 : 1'b0;
 
 assign DR_MARK_USED = (OP_WB_I == CAS && EXEC_WB_STATE == EXECUTE && !ALU_COND) ? 1'b1 :

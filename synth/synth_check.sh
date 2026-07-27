@@ -4,39 +4,32 @@
 # Usage: ./synth_check.sh [--ecp5]
 #
 # Baseline values (from reference synthesis):
-#   LUT4:       19205
-#   TRELLIS_FF: 2534
+#   LUT4:       40610
+#   TRELLIS_FF: 6864
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Baseline
-BASELINE_LUT4=19205
-BASELINE_FF=2534
+# Baseline. These are a regression tripwire, not a target: they correspond to
+# plain `synth_ecp5` defaults on the whole sv/ tree (no ABC9 flags, no
+# -noflatten). They are much larger than the pre-2026 figures because the MMU
+# and cache subsystems did not exist then. Re-measure and update deliberately.
+BASELINE_LUT4=40610
+BASELINE_FF=6864
 TOLERANCE_PCT=10  # Allow +/- 10% deviation
 
 # Source files
 SV_DIR="$REPO_DIR/sv"
 SV_PKG="$SV_DIR/wf68k30L_pkg.sv"
-SV_FILES=(
-    "$SV_DIR/wf68k30L_address_registers.sv"
-    "$SV_DIR/wf68k30L_data_registers.sv"
-    "$SV_DIR/wf68k30L_alu.sv"
-    "$SV_DIR/wf68k30L_bus_interface.sv"
-    "$SV_DIR/wf68k30L_opcode_decoder.sv"
-    "$SV_DIR/wf68k30L_exception_handler.sv"
-    "$SV_DIR/wf68k30L_control.sv"
-    "$SV_DIR/wf68k30L_cpu_wrapper.sv"
-    "$SV_DIR/wf68k30L_top_desc_shadow_lookup.sv"
-    "$SV_DIR/wf68k30L_top_desc_shadow_port.sv"
-    "$SV_DIR/wf68k30L_top_cache_state.sv"
-    "$SV_DIR/wf68k30L_top_mmu_ptest.sv"
-    "$SV_DIR/wf68k30L_top_mmu_ptest_stage.sv"
-    "$SV_DIR/wf68k30L_top_mmu_state.sv"
-    "$SV_DIR/wf68k30L_top.sv"
-)
+# Read every module in sv/ so the list cannot go stale as modules are added.
+# (Matches the direct Yosys command documented in README.md.)
+SV_FILES=()
+while IFS= read -r f; do
+    [ "$f" = "$SV_PKG" ] && continue
+    SV_FILES+=("$f")
+done < <(ls "$SV_DIR"/wf68k30L_*.sv | sort)
 
 TOP=WF68K30L_TOP
 TMPLOG=$(mktemp /tmp/synth_check_XXXXXX.log)
@@ -49,7 +42,7 @@ echo "Running Yosys ECP5 synthesis..."
 # (Falls back to GHDL+VHDL if SV read fails)
 YOSYS_SCRIPT="
 read_verilog -sv -I${REPO_DIR} -I${SV_DIR} ${SV_PKG} ${SV_FILES[*]};
-synth_ecp5 -top ${TOP} -noflatten;
+synth_ecp5 -top ${TOP};
 stat;
 "
 
@@ -60,8 +53,10 @@ else
 fi
 
 # Extract counts from stat output
-LUT4=$(grep -oE 'LUT4[[:space:]]+[0-9]+' "$TMPLOG" | grep -oE '[0-9]+$' | tail -1 || echo "0")
-FF=$(grep -oE 'TRELLIS_FF[[:space:]]+[0-9]+' "$TMPLOG" | grep -oE '[0-9]+$' | tail -1 || echo "0")
+# Read the design-wide totals from the hierarchy summary, not a per-module line.
+HIER=$(awk '/^=== design hierarchy ===/,0' "$TMPLOG")
+LUT4=$(echo "$HIER" | grep -oE '[0-9]+[[:space:]]+LUT4$' | grep -oE '^[0-9]+' | tail -1 || echo "0")
+FF=$(echo "$HIER" | grep -oE '[0-9]+[[:space:]]+TRELLIS_FF$' | grep -oE '^[0-9]+' | tail -1 || echo "0")
 
 if [ -z "$LUT4" ] || [ "$LUT4" = "0" ]; then
     echo "FAIL: Could not extract LUT4 count from synthesis output"

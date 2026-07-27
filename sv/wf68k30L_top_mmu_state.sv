@@ -27,6 +27,7 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic        MMU_RUNTIME_ATC_B,
     input  logic        MMU_RUNTIME_ATC_W,
     input  logic        MMU_RUNTIME_ATC_M,
+    input  logic        MMU_RUNTIME_ATC_CI,
     input  logic [15:0] BIW_1,
     input  logic [31:0] DR_OUT_1,
     input  logic [2:0]  SFC,
@@ -34,7 +35,17 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic [31:0] ADR_EFF,
     input  logic        PTEST_WALK_START,
     input  logic [15:0] PTEST_WALK_MMUSR,
+    input  logic        MMU_PLOAD_DONE,
+    input  logic [35:0] MMU_PLOAD_RESULT,
+    input  logic        MMU_PLOAD_REQ,
+    input  logic        MMU_PLOAD_CONSUME,
 
+    output logic        MMU_PLOAD_BUSY,
+    output logic        MMU_PLOAD_READY,
+    output logic        MMU_PLOAD_START,
+    output logic [2:0]  MMU_PLOAD_FC,
+    output logic [31:0] MMU_PLOAD_LOGICAL,
+    output logic        MMU_PLOAD_WRITE,
     output logic [63:0] MMU_SRP,
     output logic [63:0] MMU_CRP,
     output logic [31:0] MMU_TC,
@@ -47,6 +58,7 @@ module WF68K30L_TOP_MMU_STATE #(
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_B_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_W_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_M_FLAT,
+    output logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_CI_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS*3-1:0] MMU_ATC_FC_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT,
     output logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT
@@ -65,6 +77,7 @@ logic [MMU_ATC_WAYS-1:0] MMU_ATC_V [0:MMU_ATC_SETS-1];
 logic [MMU_ATC_WAYS-1:0] MMU_ATC_B [0:MMU_ATC_SETS-1];
 logic [MMU_ATC_WAYS-1:0] MMU_ATC_W [0:MMU_ATC_SETS-1];
 logic [MMU_ATC_WAYS-1:0] MMU_ATC_M [0:MMU_ATC_SETS-1];
+logic [MMU_ATC_WAYS-1:0] MMU_ATC_CI [0:MMU_ATC_SETS-1];
 logic [2:0]  MMU_ATC_FC [0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [31:0] MMU_ATC_TAG[0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
 logic [31:0] MMU_ATC_PTAG[0:MMU_ATC_SETS-1][0:MMU_ATC_WAYS-1];
@@ -78,6 +91,7 @@ for (genvar set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin : gen_pack
         assign MMU_ATC_B_FLAT[IDX] = MMU_ATC_B[set_i][way_i];
         assign MMU_ATC_W_FLAT[IDX] = MMU_ATC_W[set_i][way_i];
         assign MMU_ATC_M_FLAT[IDX] = MMU_ATC_M[set_i][way_i];
+        assign MMU_ATC_CI_FLAT[IDX] = MMU_ATC_CI[set_i][way_i];
         assign MMU_ATC_FC_FLAT[(IDX*3) +: 3] = MMU_ATC_FC[set_i][way_i];
         assign MMU_ATC_TAG_FLAT[(IDX*32) +: 32] = MMU_ATC_TAG[set_i][way_i];
         assign MMU_ATC_PTAG_FLAT[(IDX*32) +: 32] = MMU_ATC_PTAG[set_i][way_i];
@@ -233,6 +247,7 @@ always_ff @(posedge CLK) begin : mmu_registers
     logic        atc_b_result;
     logic        atc_w_result;
     logic        atc_m_result;
+    logic        atc_ci_result;
     logic        atc_rmw;
     logic [31:0] atc_phys;
     logic [35:0] atc_lookup;
@@ -252,12 +267,19 @@ always_ff @(posedge CLK) begin : mmu_registers
         MMU_MMUSR <= 32'h0;
         PTEST_WALK_PENDING <= 1'b0;
         TRAP_MMU_CFG <= 1'b0;
+        MMU_PLOAD_START <= 1'b0;
+        MMU_PLOAD_BUSY <= 1'b0;
+        MMU_PLOAD_READY <= 1'b0;
+        MMU_PLOAD_FC <= 3'b000;
+        MMU_PLOAD_LOGICAL <= 32'h0;
+        MMU_PLOAD_WRITE <= 1'b0;
         MMU_ATC_FLUSH_COUNT <= 32'h0;
         for (set_i = 0; set_i < MMU_ATC_SETS; set_i = set_i + 1) begin
             MMU_ATC_V[set_i] <= '0;
             MMU_ATC_B[set_i] <= '0;
             MMU_ATC_W[set_i] <= '0;
             MMU_ATC_M[set_i] <= '0;
+            MMU_ATC_CI[set_i] <= '0;
             MMU_ATC_REPL_PTR[set_i] <= '0;
             for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
                 MMU_ATC_FC[set_i][way_i] <= 3'b000;
@@ -268,13 +290,20 @@ always_ff @(posedge CLK) begin : mmu_registers
     end else begin
         tc_cfg_err = mmu_tc_cfg_error(ALU_RESULT[31:0]);
         ptest_exec = ALU_ACK && (OP_WB == PTEST);
-        pload_exec = ALU_ACK && (OP_WB == PLOAD);
+        // PLOAD is a synchronous handshake: the search starts while the
+        // instruction is still in its execute state and the instruction does not
+        // retire until MMU_PLOAD_READY comes back, so an ATC read placed
+        // immediately after it observes the loaded entry (UM 9.8).
+        pload_exec = MMU_PLOAD_REQ;
         pmove_flush_exec = MMU_ATC_FLUSH &&
                            (MMU_TC_WR || MMU_SRP_WR || MMU_CRP_WR || MMU_TT0_WR || MMU_TT1_WR);
         pflush_exec = MMU_ATC_FLUSH && !pmove_flush_exec;
+        // Vector 56 is reserved for PMOVE configuration errors (UM 9.7).
+        // Translation faults are delivered as bus errors (UM 8.1.2).
         TRAP_MMU_CFG <= 1'b0;
-        if (MMU_RUNTIME_REQ && MMU_RUNTIME_FAULT)
-            TRAP_MMU_CFG <= 1'b1;
+        MMU_PLOAD_START <= 1'b0;
+        if (MMU_PLOAD_CONSUME)
+            MMU_PLOAD_READY <= 1'b0;
         if (MMU_ATC_FLUSH)
             MMU_ATC_FLUSH_COUNT <= MMU_ATC_FLUSH_COUNT + 32'd1;
         if (MMU_SRP_WR) begin
@@ -340,6 +369,9 @@ always_ff @(posedge CLK) begin : mmu_registers
             endcase
         end
 
+        // PLOAD performs a table search for the specified function code and
+        // logical address and loads the translation into the ATC; any existing
+        // entry for that address is flushed first (UM 9.8).
         if (pload_exec) begin
             atc_fc = mmu_fc_decode(BIW_1[4:0], DR_OUT_1, SFC, DFC);
             atc_logical = ADR_EFF;
@@ -348,50 +380,56 @@ always_ff @(posedge CLK) begin : mmu_registers
 
             tt_hit = mmu_tt_match(MMU_TT0, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw) ||
                      mmu_tt_match(MMU_TT1, atc_fc, atc_logical, BIW_1[9], !BIW_1[9], atc_rmw);
-            root_ptr = (MMU_TC[25] && atc_fc[2]) ? MMU_SRP : MMU_CRP;
-            root_offs = {root_ptr[31:4], 4'b0000};
-            atc_valid_result = (!tt_hit) && (atc_fc != FC_CPU_SPACE) && (root_ptr[33:32] == 2'b01);
-            atc_phys = atc_valid_result ? (atc_logical + root_offs) : 32'h0;
-            atc_ptag = mmu_page_tag(MMU_TC, atc_phys);
-            atc_b_result = !atc_valid_result;
-            atc_w_result = 1'b0;
-            atc_m_result = !BIW_1[9];
 
             atc_set_idx = mmu_atc_set_idx(atc_fc, atc_tag);
-            atc_probe = mmu_atc_probe_set(atc_set_idx, atc_fc, atc_tag);
-            atc_hit = atc_probe[2*MMU_ATC_WAY_BITS+1];
-            atc_free = atc_probe[2*MMU_ATC_WAY_BITS];
-            atc_hit_way = atc_probe[2*MMU_ATC_WAY_BITS-1:MMU_ATC_WAY_BITS];
-            atc_free_way = atc_probe[MMU_ATC_WAY_BITS-1:0];
+            for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
+                if (MMU_ATC_V[atc_set_idx][way_i] &&
+                    MMU_ATC_FC[atc_set_idx][way_i] == atc_fc &&
+                    MMU_ATC_TAG[atc_set_idx][way_i] == atc_tag)
+                    MMU_ATC_V[atc_set_idx][way_i] <= 1'b0;
+            end
 
-            atc_ins_way = atc_hit ? atc_hit_way : (atc_free ? atc_free_way : MMU_ATC_REPL_PTR[atc_set_idx]);
-
-            if (!tt_hit) begin
-                for (way_i = 0; way_i < MMU_ATC_WAYS; way_i = way_i + 1) begin
-                    if (MMU_ATC_V[atc_set_idx][way_i] &&
-                        MMU_ATC_FC[atc_set_idx][way_i] == atc_fc &&
-                        MMU_ATC_TAG[atc_set_idx][way_i] == atc_tag)
-                        MMU_ATC_V[atc_set_idx][way_i] <= 1'b0;
-                end
-                MMU_ATC_V[atc_set_idx][atc_ins_way] <= 1'b1;
-                MMU_ATC_B[atc_set_idx][atc_ins_way] <= atc_b_result;
-                MMU_ATC_W[atc_set_idx][atc_ins_way] <= atc_w_result;
-                MMU_ATC_M[atc_set_idx][atc_ins_way] <= atc_m_result;
-                MMU_ATC_FC[atc_set_idx][atc_ins_way] <= atc_fc;
-                MMU_ATC_TAG[atc_set_idx][atc_ins_way] <= atc_tag;
-                MMU_ATC_PTAG[atc_set_idx][atc_ins_way] <= atc_ptag;
-                if (!atc_hit && !atc_free)
-                    MMU_ATC_REPL_PTR[atc_set_idx] <= MMU_ATC_REPL_PTR[atc_set_idx] + 1'b1;
+            if (!tt_hit && atc_fc != FC_CPU_SPACE) begin
+                MMU_PLOAD_START <= 1'b1;
+                MMU_PLOAD_BUSY <= 1'b1;
+                MMU_PLOAD_FC <= atc_fc;
+                MMU_PLOAD_LOGICAL <= atc_logical;
+                MMU_PLOAD_WRITE <= !BIW_1[9];
+            end else begin
+                // A transparent or CPU-space address needs no search, so the
+                // instruction may retire at once.
+                MMU_PLOAD_READY <= 1'b1;
             end
         end
 
-        if (MMU_RUNTIME_ATC_REFILL) begin
-            atc_fc = MMU_RUNTIME_ATC_FC;
-            atc_tag = MMU_RUNTIME_ATC_TAG;
-            atc_ptag = MMU_RUNTIME_ATC_PTAG;
-            atc_b_result = MMU_RUNTIME_ATC_B;
-            atc_w_result = MMU_RUNTIME_ATC_W;
-            atc_m_result = MMU_RUNTIME_ATC_M;
+        if (MMU_PLOAD_DONE) begin
+            MMU_PLOAD_BUSY <= 1'b0;
+            MMU_PLOAD_READY <= 1'b1;
+        end
+
+        // A write to a page whose entry has M clear no longer sets M in the
+        // entry on its own. UM 9.4 requires the access to be aborted and the
+        // table searched again, so the descriptor in memory gets the bit too;
+        // the translate module routes such a write through the search and the
+        // refill below replaces the entry with M set.
+        if (MMU_RUNTIME_ATC_REFILL || MMU_PLOAD_DONE) begin
+            if (MMU_PLOAD_DONE) begin
+                atc_fc = MMU_PLOAD_FC;
+                atc_tag = mmu_page_tag(MMU_TC, MMU_PLOAD_LOGICAL);
+                atc_b_result = MMU_PLOAD_RESULT[32];
+                atc_ptag = atc_b_result ? 32'h0 : mmu_page_tag(MMU_TC, MMU_PLOAD_RESULT[31:0]);
+                atc_w_result = MMU_PLOAD_RESULT[34];
+                atc_m_result = MMU_PLOAD_RESULT[35];
+                atc_ci_result = MMU_PLOAD_RESULT[33];
+            end else begin
+                atc_fc = MMU_RUNTIME_ATC_FC;
+                atc_tag = MMU_RUNTIME_ATC_TAG;
+                atc_ptag = MMU_RUNTIME_ATC_PTAG;
+                atc_b_result = MMU_RUNTIME_ATC_B;
+                atc_w_result = MMU_RUNTIME_ATC_W;
+                atc_m_result = MMU_RUNTIME_ATC_M;
+                atc_ci_result = MMU_RUNTIME_ATC_CI;
+            end
 
             atc_set_idx = mmu_atc_set_idx(atc_fc, atc_tag);
             atc_probe = mmu_atc_probe_set(atc_set_idx, atc_fc, atc_tag);
@@ -412,6 +450,7 @@ always_ff @(posedge CLK) begin : mmu_registers
             MMU_ATC_B[atc_set_idx][atc_ins_way] <= atc_b_result;
             MMU_ATC_W[atc_set_idx][atc_ins_way] <= atc_w_result;
             MMU_ATC_M[atc_set_idx][atc_ins_way] <= atc_m_result;
+            MMU_ATC_CI[atc_set_idx][atc_ins_way] <= atc_ci_result;
             MMU_ATC_FC[atc_set_idx][atc_ins_way] <= atc_fc;
             MMU_ATC_TAG[atc_set_idx][atc_ins_way] <= atc_tag;
             MMU_ATC_PTAG[atc_set_idx][atc_ins_way] <= atc_ptag;

@@ -6,7 +6,7 @@ read and write cycles using the memory model.
 
 The MC68030 bus protocol:
   - Read cycle:  ASn goes low, RWn stays high.  Slave drives DATA_IN and
-                 asserts DSACKn (00 = 32-bit port acknowledge).
+                 asserts DSACKn (00 = 32-bit port, 01 = 16-bit, 10 = 8-bit).
   - Write cycle: ASn goes low, RWn goes low.  Slave captures DATA_OUT when
                  DSn goes low, then asserts DSACKn.
 
@@ -20,22 +20,75 @@ SIZE[1:0] encoding (active-low in real 68030, but this core uses active-high enc
 import os
 
 import cocotb
-from cocotb.triggers import RisingEdge, FallingEdge, Timer
+from cocotb.triggers import RisingEdge, FallingEdge, Timer, ClockCycles
 
 
 class BusModel:
     """Async bus responder that connects to WF68K30L_TOP signals."""
 
-    def __init__(self, dut, memory, wait_states=0):
+    # DSACKn code acknowledging a port of the given width in bytes.
+    DSACK_FOR_WIDTH = {4: 0b00, 2: 0b01, 1: 0b10}
+
+    # Driven on data bus lanes that a narrow port does not physically
+    # connect, so that latching them shows up as corruption.
+    POISON_BYTE = 0xA5
+
+    # Long words in a cache line, and so the longest burst (UM 6.1.3.2).
+    BURST_BEATS = 4
+
+    def __init__(self, dut, memory, wait_states=0, port_width=4, sync_term=False,
+                 cback=False, cback_beats=BURST_BEATS, cback_drop_after=None,
+                 ciin_on_beat=None):
         """
         Args:
             dut: cocotb handle to the DUT (WF68K30L_TOP).
             memory: Memory instance for read/write data.
             wait_states: Number of extra clock cycles before asserting DSACKn.
+            port_width: Responding port width in bytes (4, 2 or 1).
+            sync_term: Terminate with STERMn instead of DSACKn. STERM implies a
+                32-bit port, and the two must never be asserted together.
+            cback: Answer a burst request by asserting CBACKn alongside the
+                cycle's termination. With sync_term this is the legal burst
+                handshake of MC68030UM 6.1.3.2 and the device then streams
+                successive long words; without it, it is the case the UM says
+                the processor must ignore ("The MC68030 ignores the assertion
+                of CBACK during cycles terminated with DSACKx").
+            cback_beats: Long words this device is willing to supply, 1..4.
+            cback_drop_after: Negate CBACKn once this many beats have been
+                supplied, modelling a burst cut short by the device.
+            ciin_on_beat: Assert CIINn while supplying this beat (2..4),
+                modelling a non-cachable long word part-way through a burst.
         """
+        assert port_width in self.DSACK_FOR_WIDTH, f"bad port_width {port_width}"
+        assert not (sync_term and port_width != 4), "STERM requires a 32-bit port"
+        assert 1 <= cback_beats <= self.BURST_BEATS, "a cache line is four long words"
+        # Burst beats are paced by STERM on consecutive clocks, so this model
+        # only streams on a zero-wait-state port: with wait states it cannot
+        # tell the first cycle's acknowledge edge from a burst beat.
+        assert not (cback and sync_term and wait_states), \
+            "burst streaming needs wait_states=0"
+        assert ciin_on_beat is None or 2 <= ciin_on_beat <= self.BURST_BEATS, \
+            "ciin_on_beat names a burst fill beat, which is the second or later"
         self.dut = dut
         self.memory = memory
         self.wait_states = wait_states
+        self.port_width = port_width
+        self.sync_term = sync_term
+        # Arbitration hook -- see "Bus arbitration support" below.
+        self.bus_owner = None
+        self.foreign_cycle_starts = []
+        self.cback = cback
+        self.cback_beats = cback_beats
+        self.cback_drop_after = cback_drop_after
+        self.ciin_on_beat = ciin_on_beat
+        # One (addr, size_code, is_write) record per sub-cycle served, in order.
+        # Lets a test assert what the bus actually did rather than only what
+        # ended up in a register.
+        self.sub_cycles = []
+        # One record per cycle on which this device acknowledged a burst
+        # request: {'base', 'beats', 'cback_dropped', 'ciin'}. beats == 1 means
+        # the processor did not hold the bus, so no burst fill happened.
+        self.bursts = []
         self._running = False
         self._trace = os.environ.get("BUS_TRACE", "0") not in ("", "0", "false", "False")
         self._trace_min = int(os.environ.get("BUS_TRACE_MIN", "0"), 0)
@@ -67,32 +120,141 @@ class BusModel:
         except ValueError:
             return 0
 
+    def _port_width_for(self, addr):
+        """Width in bytes of the port responding at addr.
+
+        Override to model a system that mixes port widths.
+        """
+        return self.port_width
+
+    # -- Bus arbitration support (MC68030UM 7.7) -------------------------
+    # The responder body needs exactly one line of arbitration awareness,
+    # and it calls this predicate.  Everything else about arbitration lives
+    # in AlternateBusMaster at the bottom of this module.
+    def _bus_yielded(self):
+        """True while an alternate bus master owns the bus.
+
+        UM 7.7.3: bus mastership belongs to the device holding BGACK, so the
+        slave model must be off the bus entirely -- it neither samples nor
+        terminates anything the core may still be driving.
+        """
+        return self.bus_owner is not None and self.bus_owner.owns_bus
+
+    def _note_foreign_cycle(self, addr, rw_n):
+        """Record a core-driven cycle seen while the bus was handed away."""
+        if len(self.foreign_cycle_starts) < 32:
+            self.foreign_cycle_starts.append((addr, rw_n))
+    # -- end bus arbitration support -------------------------------------
+
+    def _assert_term(self, dsack):
+        """Terminate the current cycle, synchronously or asynchronously."""
+        if self.sync_term:
+            self.dut.STERMn.value = 0
+        else:
+            self.dut.DSACKn.value = dsack
+
+    def _negate_term(self):
+        if self.sync_term:
+            self.dut.STERMn.value = 1
+        self.dut.DSACKn.value = 0b11
+        if self.cback:
+            self.dut.CBACKn.value = 1
+            self.dut.CIINn.value = 1
+
+    def _long_at(self, addr):
+        """The aligned long word covering addr, packed MSB-first on D31:0."""
+        base = addr & ~3
+        data = 0
+        for i in range(4):
+            data |= (self.memory.read(base + i, 1) & 0xFF) << ((3 - i) * 8)
+        return data
+
+    def _burst_acknowledged(self, rw_n, width):
+        """True when this device answers the burst the processor is requesting.
+
+        UM 6.1.3.2: burst filling only happens on a 32-bit read, and a device
+        that supports it answers CBREQ with CBACK -- one that does not simply
+        never asserts CBACK. Keying off the CBREQn pin is what a real device
+        does, so this model never acknowledges a burst nobody asked for.
+        """
+        if not self.cback or rw_n != 1 or width != 4:
+            return False
+        try:
+            return int(self.dut.CBREQn.value) == 0
+        except ValueError:
+            return False
+
+    async def _stream_burst(self, addr):
+        """Supply the rest of the cache line while the processor holds the bus.
+
+        UM 6.1.3.2: "CBACK causes the processor to continue driving the address
+        and bus control signals and to latch a new data value for the next cache
+        entry at the completion of each subsequent cycle (as defined by STERM),
+        for a total of up to four cycles", and "The MC68030 holds the entire
+        address bus constant for the duration of the burst cycle" -- so the
+        device is what advances A3:A2, wrapping inside the line (UM Figure 6-12).
+
+        The edge that acknowledges the first cycle is skipped, so a processor
+        that releases AS after one long word leaves this loop having supplied
+        exactly one beat and is never shown a second long word at all.
+        """
+        line = addr & ~0xF
+        sel = addr & 0xC
+        beats = 1
+        dropped = False
+        ciin = False
+
+        await RisingEdge(self.dut.CLK)  # Acknowledge edge of the first cycle.
+        while self._running and self.sync_term and beats < self.cback_beats:
+            await RisingEdge(self.dut.CLK)
+            try:
+                if int(self.dut.ASn.value) != 0:
+                    break  # Bus released: the burst is over.
+                if int(self.dut.ADR_OUT.value) != addr:
+                    break  # Address re-driven: this is a new cycle, not a beat.
+            except ValueError:
+                break
+
+            sel = (sel + 4) & 0xC
+            self.dut.DATA_IN.value = self._long_at(line | sel)
+            beats += 1
+            if self._trace_enabled(addr):
+                self.dut._log.warning(
+                    "bus burst beat %d addr=0x%08X", beats, line | sel
+                )
+
+            if self.ciin_on_beat == beats:
+                self.dut.CIINn.value = 0
+                ciin = True
+            if self.cback_drop_after is not None and beats >= self.cback_drop_after:
+                self.dut.CBACKn.value = 1
+                dropped = True
+                break
+
+        self.bursts.append({
+            "base": addr,
+            "beats": beats,
+            "cback_dropped": dropped,
+            "ciin": ciin,
+        })
+
     def _cycle_layout(self, addr, size_code, *, is_write=False):
         """Return (start_lane, byte_count) for this bus cycle.
 
         Lane 0 is DATA[31:24], lane 1 is DATA[23:16], lane 2 is DATA[15:8],
         lane 3 is DATA[7:0].
 
-        This matches the WF68K30L bus-interface alignment behavior for
-        split transfers (e.g., unaligned long reads/writes).
+        Lanes are address-matched in both directions, as MC68030UM
+        Tables 7-4 and 7-5 require: the first byte of the transfer appears
+        on the lane selected by A1:A0, and a port only transfers as many
+        bytes as fit between that lane and the end of the port.
         """
-        a = addr & 0x3
-        if size_code == 0:  # long
-            # WF68K30L read cycles consume long data from the top lanes and
-            # shift by cycle boundaries, while write cycles source valid bytes
-            # starting at A1:A0 for misaligned stores.
-            if is_write:
-                return a, 4 - a
-            return 0, 4 - a
-        if size_code == 1:  # byte
-            return a, 1
-        if size_code == 2:  # word
-            return a, 1 if a == 3 else 2
-        # three-byte transfer
-        count = 3 - a
-        if count <= 0:
-            count = 1
-        return a, count
+        want = {0: 4, 1: 1, 2: 2, 3: 3}[size_code]
+        width = self._port_width_for(addr)
+        # A narrow port is aliased across the long word, so only the low
+        # log2(width) address bits select a lane within it.
+        lane = addr & (width - 1)
+        return lane, min(want, width - lane)
 
     async def _responder(self):
         """Main bus responder loop -- runs as a cocotb coroutine.
@@ -112,7 +274,18 @@ class BusModel:
                 as_n = int(self.dut.ASn.value)
             except ValueError:
                 # ASn is X or Z during reset
-                self.dut.DSACKn.value = 0b11  # Deassert
+                self._negate_term()  # Deassert
+                continue
+
+            if self._bus_yielded():
+                # An alternate bus master holds BGACK: stay off the bus.
+                self._negate_term()
+                if as_n == 0:
+                    try:
+                        self._note_foreign_cycle(int(self.dut.ADR_OUT.value),
+                                                 int(self.dut.RWn.value))
+                    except ValueError:
+                        self._note_foreign_cycle(None, None)
                 continue
 
             if as_n == 0:
@@ -120,7 +293,7 @@ class BusModel:
                 try:
                     rw_n = int(self.dut.RWn.value)
                 except ValueError:
-                    self.dut.DSACKn.value = 0b11
+                    self._negate_term()
                     continue
 
                 try:
@@ -132,6 +305,9 @@ class BusModel:
                 start_lane, byte_count = self._cycle_layout(
                     addr, size_code, is_write=(rw_n == 0)
                 )
+                width = self._port_width_for(addr)
+                dsack = self.DSACK_FOR_WIDTH[width]
+                self.sub_cycles.append((addr, size_code, rw_n == 0))
 
                 # Insert wait states
                 for _ in range(self.wait_states):
@@ -142,6 +318,8 @@ class BusModel:
                     # Pack bytes into the exact bus lanes expected by the
                     # core's SIZE/ADR transfer semantics.
                     data = 0
+                    for lane in range(width, 4):
+                        data |= self.POISON_BYTE << ((3 - lane) * 8)
                     for i in range(byte_count):
                         b = self.memory.read(addr + i, 1) & 0xFF
                         lane = start_lane + i
@@ -159,7 +337,15 @@ class BusModel:
                             byte_count,
                             data,
                         )
-                    self.dut.DSACKn.value = 0b00  # 32-bit port ack
+                    burst = self._burst_acknowledged(rw_n, width)
+                    if burst:
+                        # UM 6.1.3.2: "The device must also assert CBACK (at the
+                        # same time as STERM) at the end of the cycle in which
+                        # the MC68030 asserts CBREQ."
+                        self.dut.CBACKn.value = 0
+                    self._assert_term(dsack)
+                    if burst:
+                        await self._stream_burst(addr)
 
                 else:
                     # WRITE cycle: capture DATA_OUT
@@ -185,7 +371,7 @@ class BusModel:
                             data,
                         )
 
-                    self.dut.DSACKn.value = 0b00  # 32-bit port ack
+                    self._assert_term(dsack)
 
                 # Wait for bus cycle to complete: ASn goes high
                 # This prevents responding to the same cycle twice when
@@ -199,9 +385,261 @@ class BusModel:
                     if as_n == 1:
                         break
 
-                # Deassert DSACKn after the bus cycle completes
-                self.dut.DSACKn.value = 0b11
+                # Deassert the termination signal after the cycle completes
+                self._negate_term()
 
             else:
-                # No bus cycle active -- deassert DSACKn
-                self.dut.DSACKn.value = 0b11
+                # No bus cycle active -- deassert
+                self._negate_term()
+
+
+# =========================================================================
+# Bus arbitration: alternate bus master model (MC68030UM 7.7)
+#
+# Self-contained addition -- nothing above this line depends on it except
+# BusModel._bus_yielded(), which is the single hook that keeps the slave
+# responder off the bus while an alternate master owns it.
+# =========================================================================
+
+
+class AlternateBusMaster:
+    """External device that arbitrates the bus away from the processor.
+
+    Implements both arbitration protocols the MC68030 supports:
+
+      Three-wire (UM 7.7, steps 1-3): assert BR, wait for BG, wait for the
+      bus to go free (UM 7.7.3: AS and DSACKx/STERM negated, BGACK inactive),
+      assert BGACK, run for a while, negate BGACK.
+
+      Single-wire (UM 7.7.4): assert BGACK alone with no BR and no BG.  "An
+      alternate master forces the MC68030 to release the bus by asserting
+      BGACK and waits for AS to negate before taking the bus... Note that for
+      the method to operate properly, AS must be observed to be negated
+      (high) on two consecutive clock edges before the alternate bus master
+      takes the bus."
+
+    While this model owns the bus it also acts as the contention checker.
+    UM 7.7.4 makes the processor's three-state control (T) part of the
+    arbitration state machine, so once BGACK is acknowledged the core must
+    have released the bus: BUS_EN low (which is what the CPU wrapper uses to
+    three-state A/FC/SIZE/AS/DS/RW/RMC/DBEN/CIOUT/CBREQ per UM Table 5-2) and
+    no new AS assertion.  Both are recorded rather than raised so a test can
+    report a precise diagnosis.
+    """
+
+    def __init__(self, dut, responder=None, release_grace=4):
+        """
+        Args:
+            dut: cocotb handle to WF68K30L_TOP.
+            responder: BusModel to hand the bus back and forth with.  Wiring
+                it up makes the slave model go quiet while this master owns
+                the bus, and makes it record any cycle the core still starts.
+            release_grace: Clocks allowed between BGACK assertion and BUS_EN
+                going low.  UM 7.7.4 synchronizes BGACK in at most two clocks
+                and changes state on the next rising edge.
+        """
+        self.dut = dut
+        self.responder = responder
+        self.release_grace = release_grace
+
+        self.owns_bus = False
+
+        # Grant observations.
+        self.grant_seen = False
+        self.grant_latency = None       # clocks from BR assertion to BG low
+        self.as_low_at_request = None   # was a cycle in progress at BR time?
+        self.as_low_at_grant = None     # UM 7.7.2: BG may overlap that cycle
+        self.cycle_starts_before_grant = 0
+
+        # Ownership observations.
+        self.bus_en_release_clocks = None  # clocks until BUS_EN went low
+        self.bus_en_high_clocks = 0        # clocks BUS_EN stayed high past grace
+        self.as_low_clocks = 0             # clocks the core drove AS at us
+        self.owned_clocks = 0
+        self.violations = []
+
+        self._monitor_task = None
+        self._monitoring = False
+
+    # ---- signal helpers ------------------------------------------------
+
+    def _rd(self, name, default=None):
+        """Read an integer DUT signal, tolerating X/Z during reset."""
+        try:
+            return int(getattr(self.dut, name).value)
+        except (ValueError, AttributeError):
+            return default
+
+    def _note(self, text):
+        if len(self.violations) < 32:
+            self.violations.append(text)
+
+    # ---- three-wire arbitration ---------------------------------------
+
+    async def assert_br(self):
+        """UM 7.7.1: request the bus.  BR may be issued at any time."""
+        self.as_low_at_request = self._rd("ASn")
+        self.dut.BRn.value = 0
+
+    def negate_br(self):
+        self.dut.BRn.value = 1
+
+    async def wait_for_grant(self, timeout=256):
+        """Wait for BG, recording how long it took and what the bus was doing.
+
+        UM 7.7.2: "The processor asserts BG as soon as possible after receipt
+        of BR.  This is immediately following internal synchronization except
+        during a read-modify-write cycle or following an internal decision to
+        execute a bus cycle."  A grant is therefore allowed to overlap a cycle
+        that is already running, so as_low_at_grant records whether it did.
+        """
+        prev_as = self._rd("ASn", 1)
+        for n in range(1, timeout + 1):
+            await RisingEdge(self.dut.CLK)
+            as_n = self._rd("ASn", 1)
+            if prev_as == 1 and as_n == 0:
+                self.cycle_starts_before_grant += 1
+            prev_as = as_n
+            if self._rd("BGn", 1) == 0:
+                self.grant_seen = True
+                self.grant_latency = n
+                self.as_low_at_grant = as_n
+                return True
+        return False
+
+    async def wait_bus_free(self, timeout=256, settled=2):
+        """UM 7.7.3 / 7.7.4: wait until the bus is safe to take.
+
+        Requires AS negated on `settled` consecutive rising edges (the UM asks
+        for two), the termination signals negated, and BGACK inactive.
+        """
+        high = 0
+        for _ in range(timeout):
+            await RisingEdge(self.dut.CLK)
+            free = (
+                self._rd("ASn", 0) == 1
+                and self._rd("DSACKn", 0) == 0b11
+                and self._rd("STERMn", 0) == 1
+                and self._rd("BGACKn", 0) == 1
+            )
+            high = high + 1 if free else 0
+            if high >= settled:
+                return True
+        return False
+
+    async def assert_bgack(self, negate_br=True):
+        """Assume bus mastership (UM 7.7.3) and start the contention check.
+
+        UM 7.7.3: "The BR from the granted device should be negated after
+        BGACK is asserted."
+        """
+        self.dut.BGACKn.value = 0
+        if negate_br:
+            self.negate_br()
+        self.owns_bus = True
+        if self.responder is not None:
+            self.responder.bus_owner = self
+        self._monitoring = True
+        self._monitor_task = cocotb.start_soon(self._ownership_monitor())
+
+    async def hold(self, clocks):
+        """Stay bus master for a while, standing in for the master's cycles."""
+        await ClockCycles(self.dut.CLK, clocks)
+
+    async def release(self, settle=2):
+        """UM 7.7.3: bus mastership terminates at the negation of BGACK."""
+        self._monitoring = False
+        self.owns_bus = False
+        self.dut.BGACKn.value = 1
+        if self.responder is not None:
+            self.responder.bus_owner = None
+        await ClockCycles(self.dut.CLK, settle)
+
+    async def acquire(self, hold_clocks=16, timeout=256):
+        """Full three-wire sequence.  Returns False if BG never arrived."""
+        await self.assert_br()
+        if not await self.wait_for_grant(timeout=timeout):
+            self.negate_br()
+            return False
+        if not await self.wait_bus_free(timeout=timeout):
+            self.negate_br()
+            return False
+        await self.assert_bgack()
+        await self.hold(hold_clocks)
+        return True
+
+    # ---- single-wire arbitration (UM 7.7.4) ---------------------------
+
+    async def acquire_single_wire(self, hold_clocks=16, timeout=256,
+                                  settled=2):
+        """Take the bus with BGACK alone: no BR, no BG, state 0 -> state 4.
+
+        UM 7.7.4: "As shown by the path from state 0 to state 4, BGACK alone
+        can be used to place the processor's external bus buffers in the
+        high-impedance state, providing single-wire arbitration capability."
+        """
+        if not await self.wait_bus_free(timeout=timeout, settled=settled):
+            return False
+        await self.assert_bgack(negate_br=False)
+        await self.hold(hold_clocks)
+        return True
+
+    async def force_release_now(self, hold_clocks=16):
+        """Assert BGACK immediately, without waiting for the bus to go free.
+
+        For probing the forced-release path in situations where the core never
+        lets the bus go idle on its own (a locked read-modify-write sequence,
+        for instance).  The AS-negated precondition of UM 7.7.4 is deliberately
+        not applied, so the contention checks are advisory here.
+        """
+        await self.assert_bgack(negate_br=False)
+        await self.hold(hold_clocks)
+
+    # ---- ownership monitor --------------------------------------------
+
+    async def _ownership_monitor(self):
+        """Check the core really is off the bus for as long as we own it."""
+        clk = 0
+        while self._monitoring:
+            await RisingEdge(self.dut.CLK)
+            clk += 1
+            self.owned_clocks = clk
+
+            bus_en = self._rd("BUS_EN")
+            if bus_en == 0 and self.bus_en_release_clocks is None:
+                self.bus_en_release_clocks = clk
+            if clk > self.release_grace and bus_en == 1:
+                self.bus_en_high_clocks += 1
+                if self.bus_en_high_clocks == 1:
+                    self._note(
+                        f"BUS_EN still asserted {clk} clocks after BGACK: the "
+                        f"core has not three-stated the bus (UM 7.7.4 signal T)"
+                    )
+
+            if self._rd("ASn", 1) == 0:
+                self.as_low_clocks += 1
+                if self.as_low_clocks == 1:
+                    addr = self._rd("ADR_OUT")
+                    rw_n = self._rd("RWn")
+                    self._note(
+                        f"core asserted AS at clock {clk} of alternate-master "
+                        f"ownership (addr="
+                        f"{'?' if addr is None else format(addr, '#010x')}, "
+                        f"RWn={rw_n}): bus contention"
+                    )
+
+    # ---- reporting -----------------------------------------------------
+
+    def report(self):
+        """One-line summary, for assertion messages."""
+        return (
+            f"grant_seen={self.grant_seen} grant_latency={self.grant_latency} "
+            f"as_low_at_request={self.as_low_at_request} "
+            f"as_low_at_grant={self.as_low_at_grant} "
+            f"cycle_starts_before_grant={self.cycle_starts_before_grant} "
+            f"owned_clocks={self.owned_clocks} "
+            f"bus_en_release_clocks={self.bus_en_release_clocks} "
+            f"bus_en_high_clocks={self.bus_en_high_clocks} "
+            f"as_low_clocks={self.as_low_clocks} "
+            f"violations={self.violations}"
+        )

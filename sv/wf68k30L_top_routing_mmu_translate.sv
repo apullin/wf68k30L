@@ -32,6 +32,7 @@ module WF68K30L_TOP_ROUTING_MMU_TRANSLATE #(
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_B_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_W_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_M_FLAT,
+    input  logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_CI_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*3-1:0] MMU_ATC_FC_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT,
     input  logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT,
@@ -49,6 +50,7 @@ module WF68K30L_TOP_ROUTING_MMU_TRANSLATE #(
     output logic        MMU_RUNTIME_ATC_B,
     output logic        MMU_RUNTIME_ATC_W,
     output logic        MMU_RUNTIME_ATC_M,
+    output logic        MMU_RUNTIME_ATC_CI,
     output logic        MMU_RUNTIME_STALL,
     output logic        MMU_TWALK_START
 );
@@ -72,6 +74,9 @@ always_comb begin : mmu_address_translate
     logic        atc_b;
     logic        atc_w;
     logic        atc_m;
+    logic        atc_m_stored;
+    logic        atc_m_research;
+    logic        atc_ci;
     logic        root_valid;
     logic        root_short_table;
     logic        root_long_table;
@@ -109,8 +114,10 @@ always_comb begin : mmu_address_translate
         first_index = {29'h0, FC_I};
     else
         first_index = mmu_index_extract(ADR_P, MMU_TC[19:16], 6'd0, MMU_TC[15:12]);
-    root_limit_fault = (root_limit_lower && first_index[14:0] < root_limit) ||
-                       (!root_limit_lower && first_index[14:0] > root_limit);
+    // UM 9.5.1.2: with TC.FCL set, the root pointer L/U and LIMIT fields are unused.
+    root_limit_fault = !MMU_TC[24] &&
+                       ((root_limit_lower && first_index[14:0] < root_limit) ||
+                        (!root_limit_lower && first_index[14:0] > root_limit));
 
     atc_fc = FC_I;
     atc_logical = ADR_P;
@@ -123,6 +130,9 @@ always_comb begin : mmu_address_translate
     atc_b = 1'b0;
     atc_w = 1'b0;
     atc_m = write_access;
+    atc_m_stored = 1'b0;
+    atc_m_research = 1'b0;
+    atc_ci = 1'b0;
 
     atc_set_idx = atc_tag[MMU_ATC_SET_BITS-1:0] ^ atc_fc[MMU_ATC_SET_BITS-1:0];
     for (way = 0; way < MMU_ATC_WAYS; way = way + 1) begin
@@ -138,13 +148,24 @@ always_comb begin : mmu_address_translate
             atc_ptag = atc_way_ptag;
             atc_b = MMU_ATC_B_FLAT[atc_way_idx];
             atc_w = MMU_ATC_W_FLAT[atc_way_idx];
-            atc_m = MMU_ATC_M_FLAT[atc_way_idx] || write_access;
+            atc_m_stored = MMU_ATC_M_FLAT[atc_way_idx];
+            atc_m = atc_m_stored || write_access;
+            atc_ci = MMU_ATC_CI_FLAT[atc_way_idx];
         end
     end
 
     if (atc_hit) begin
         atc_fault = atc_b || (write_access && atc_w);
         atc_phys = mmu_page_compose_addr(MMU_TC, atc_ptag, atc_logical);
+        // UM 9.4: "If the M bit is clear and a write access to this logical
+        // address is attempted, the MC68030 aborts the access and initiates a
+        // table search, setting the M bit in the page descriptor, invalidating
+        // the old ATC entry, and creating a new entry with the M bit set. The
+        // MMU then allows the original write access to be performed." So a
+        // write to an M-clear entry is routed through the search rather than
+        // setting M in the entry alone -- the descriptor in memory has to move
+        // too, and only the search can write it.
+        atc_m_research = !atc_fault && write_access && !atc_m_stored;
     end
 
     tt_hit = mmu_tt_match(MMU_TT0, FC_I, ADR_P, read_access, write_access, rmw_access) ||
@@ -159,23 +180,31 @@ always_comb begin : mmu_address_translate
     MMU_RUNTIME_ATC_B = 1'b0;
     MMU_RUNTIME_ATC_W = 1'b0;
     MMU_RUNTIME_ATC_M = write_access;
+    // Only an access the ATC (or a completed walk) resolved may report CI; a
+    // TT hit bypasses translation and must not see a stale entry's CI bit.
+    MMU_RUNTIME_ATC_CI = 1'b0;
     MMU_RUNTIME_STALL = 1'b0;
     MMU_TWALK_START = 1'b0;
 
     if (tt_hit) begin
         ADR_P_PHYS_CALC = ADR_P;
     end else if (MMU_TC[31] && FC_I != FC_CPU_SPACE) begin
-        if (atc_hit && !atc_fault) begin
+        // UM 9.4: a bus error, invalid descriptor, supervisor violation or limit
+        // violation during a search loads an entry with the B bit set, which
+        // stays until a PFLUSH or PLOAD replaces the entry.
+        if (atc_hit && !atc_fault && !atc_m_research) begin
             ADR_P_PHYS_CALC = atc_phys;
             MMU_RUNTIME_ATC_M = atc_m;
+            MMU_RUNTIME_ATC_CI = atc_ci;
         end else if (atc_hit && atc_fault) begin
             ADR_P_PHYS_CALC = ADR_P;
             MMU_RUNTIME_FAULT = mmu_req_now;
         end else if (root_valid) begin
-            // Root DT=1 direct mapping still applies root limit checks (FCL-independent).
             if (root_limit_fault) begin
                 ADR_P_PHYS_CALC = ADR_P;
                 MMU_RUNTIME_FAULT = mmu_req_now;
+                MMU_RUNTIME_ATC_REFILL = mmu_req_now;
+                MMU_RUNTIME_ATC_B = 1'b1;
             end else begin
                 ADR_P_PHYS_CALC = ADR_P + root_offs;
                 MMU_RUNTIME_ATC_REFILL = mmu_req_now;
@@ -194,16 +223,22 @@ always_comb begin : mmu_address_translate
             end else if (MMU_TWALK_RESULT[32]) begin
                 ADR_P_PHYS_CALC = ADR_P;
                 MMU_RUNTIME_FAULT = mmu_req_now;
+                MMU_RUNTIME_ATC_REFILL = mmu_req_now;
+                MMU_RUNTIME_ATC_B = 1'b1;
+                MMU_RUNTIME_ATC_W = MMU_TWALK_RESULT[34];
             end else begin
                 ADR_P_PHYS_CALC = MMU_TWALK_RESULT[31:0];
                 MMU_RUNTIME_ATC_REFILL = mmu_req_now;
                 MMU_RUNTIME_ATC_PTAG = mmu_page_tag(MMU_TC, MMU_TWALK_RESULT[31:0]);
                 MMU_RUNTIME_ATC_W = MMU_TWALK_RESULT[34];
                 MMU_RUNTIME_ATC_M = MMU_TWALK_RESULT[35];
+                MMU_RUNTIME_ATC_CI = MMU_TWALK_RESULT[33];
             end
         end else begin
             ADR_P_PHYS_CALC = ADR_P;
             MMU_RUNTIME_FAULT = mmu_req_now;
+            MMU_RUNTIME_ATC_REFILL = mmu_req_now;
+            MMU_RUNTIME_ATC_B = 1'b1;
         end
     end else begin
         ADR_P_PHYS_CALC = ADR_P;

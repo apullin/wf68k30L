@@ -353,6 +353,7 @@ logic           EW_RDY;
 logic           INIT_ENTRY;
 logic           MEM_INDIRECT;
 logic           MEMADR_RDY;
+logic           MEMADR_ADR_RDY;
 logic           MOVEM_ADn_I;
 logic           MOVEM_ADn_WB;
 logic           MOVEM_COND;
@@ -393,6 +394,7 @@ WF68K30L_CTRL_COMB #(
     .BIW_2              (BIW_2),
     .BIW_0_WB           (BIW_0_WB),
     .BIW_1_WB           (BIW_1_WB),
+    .EXT_WORD           (EXT_WORD),
     .OPD_ACK            (OPD_ACK),
     .OW_VALID           (OW_VALID),
     .OW_RDY             (OW_RDY),
@@ -401,6 +403,7 @@ WF68K30L_CTRL_COMB #(
     .DATA_RDY            (DATA_RDY),
     .DATA_VALID          (DATA_VALID),
     .MEMADR_RDY          (MEMADR_RDY),
+    .MEMADR_ADR_RDY      (MEMADR_ADR_RDY),
     .READ_CYCLE          (READ_CYCLE),
     .WRITE_CYCLE         (WRITE_CYCLE),
     .ADR_IN_USE          (ADR_IN_USE),
@@ -564,6 +567,28 @@ always_ff @(posedge CLK) begin : data_available
     end
 end
 
+// The intermediate address of a memory indirect effective address is
+// ADR_MUX + bd (+ index for the preindexed forms), and the address register
+// section only selects that sum while FETCH_MEM_ADR is asserted -- see the
+// I_S_IS arms in wf68k30L_address_registers.sv.  ADR_EFF_I is registered from
+// that mux, so FETCH_MEM_ADR has to have been high for a whole cycle before
+// ADR_EFF_I holds the intermediate address; on the entry cycle of FETCH_MEMADR
+// it still holds the previous state's selection (MEM_ADR_REG + od, i.e. 0 on a
+// first pass).  This flag marks the cycles in which ADR_EFF_I is valid so the
+// intermediate read is not issued against the stale value.
+//
+// It cannot deadlock: it is an unconditional one-cycle delay of the state
+// itself, so it rises on the second FETCH_MEMADR cycle regardless of the bus,
+// the writeback pipeline or any register mark, and it stays high for as long as
+// the state is held.
+always_ff @(posedge CLK) begin : memadr_adr_valid
+    if (RESET_CPU) begin
+        MEMADR_ADR_RDY <= 1'b0;
+    end else begin
+        MEMADR_ADR_RDY <= (FETCH_STATE == FETCH_MEMADR);
+    end
+end
+
 always_ff @(posedge CLK) begin : branch_atn_hold
     if (RESET_CPU) begin
         BRANCH_ATN_HOLD <= 1'b0;
@@ -664,7 +689,7 @@ end
             end
 
             MOVEM_ADn_WB <= MOVEM_ADn_I;
-            OP_WB_I <= OP;
+            OP_WB_I <= OP_68K'(OP);
             BIW_0_WB <= BIW_0[11:0];
             BIW_1_WB <= BIW_1;
         end
@@ -718,7 +743,9 @@ end
         endcase
         //
         case (OP)
-            LINK, MOVEP: DISPLACEMENT <= DISPL_VAR;
+            // The +2 is the PC relative correction required by Bcc, BRA, BSR
+            // and DBcc only. LINK, MOVEP and RTD use the raw displacement.
+            LINK, MOVEP, RTD: DISPLACEMENT <= DISPL_VAR;
             default: DISPLACEMENT <= DISPL_VAR + 32'd2;
         endcase
     end

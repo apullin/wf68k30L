@@ -6,11 +6,12 @@ function automatic logic mmu_cache_inhibit(
     input logic        write_access,
     input logic        rmw_access,
     input logic [31:0] tt0,
-    input logic [31:0] tt1
+    input logic [31:0] tt1,
+    input logic        atc_ci
 );
     logic ci_out;
 begin
-    ci_out = mmu_ci_out(fc, addr, read_access, write_access, rmw_access, tt0, tt1);
+    ci_out = mmu_ci_out(fc, addr, read_access, write_access, rmw_access, tt0, tt1, atc_ci);
     if (fc == FC_CPU_SPACE)
         mmu_cache_inhibit = 1'b1;
     else
@@ -25,14 +26,16 @@ function automatic logic mmu_ci_out(
     input logic        write_access,
     input logic        rmw_access,
     input logic [31:0] tt0,
-    input logic [31:0] tt1
+    input logic [31:0] tt1,
+    input logic        atc_ci
 );
     logic tt0_hit;
     logic tt1_hit;
 begin
     tt0_hit = mmu_tt_match(tt0, fc, addr, read_access, write_access, rmw_access);
     tt1_hit = mmu_tt_match(tt1, fc, addr, read_access, write_access, rmw_access);
-    mmu_ci_out = (tt0_hit && tt0[10]) || (tt1_hit && tt1[10]); // CI bit.
+    // CI bit, from a matching TTx register or from the ATC entry (UM 9.2.1).
+    mmu_ci_out = (tt0_hit && tt0[10]) || (tt1_hit && tt1[10]) || atc_ci;
 end
 endfunction
 
@@ -47,6 +50,19 @@ begin
         WORD: dcache_access_supported = !a10[0];
         LONG: dcache_access_supported = (a10 == 2'b00);
         default: dcache_access_supported = 1'b0;
+    endcase
+end
+endfunction
+
+function automatic logic [1:0] dcache_size_last_byte(
+    input OP_SIZETYPE  size_in
+);
+begin
+    case (size_in)
+        BYTE: dcache_size_last_byte = 2'd0;
+        WORD: dcache_size_last_byte = 2'd1;
+        LONG: dcache_size_last_byte = 2'd3;
+        default: dcache_size_last_byte = 2'd0;
     endcase
 end
 endfunction

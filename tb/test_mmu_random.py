@@ -4,7 +4,8 @@ Randomized MMU runtime translation campaign against a local reference expectatio
 This is a lightweight differential-style check:
   - Randomizes descriptor format mix (short/long), FCL on/off, and indirection.
   - Generates expected "success vs fault" outcomes from the generated descriptors.
-  - Verifies the RTL returns translated data on success or vectors through 56 on fault.
+  - Verifies the RTL returns translated data on success or raises a bus error
+    (vector 2, UM 8.1.2) on a translation fault.
 """
 
 import random
@@ -239,9 +240,9 @@ async def test_mmu_runtime_random_descriptor_campaign(dut):
     rng = random.Random(0x68030)
 
     handler_addr = 0x0009C0
-    vector_addr = 56 * 4
+    vector_addr = 2 * 4
     handler_code = [
-        *moveq(0x38, 1),
+        *moveq(0x02, 1),
         *move_to_abs_long(LONG, DN, 1, 0x00020000),
         *_sentinel_program(),
     ]
@@ -262,8 +263,8 @@ async def test_mmu_runtime_random_descriptor_campaign(dut):
 
         got = h.read_result_long(0)
         if case["expect_fault"]:
-            assert got == 0x38, (
-                f"Random MMU case {case_idx} expected vector56 marker, got 0x{got:08X}; "
+            assert got == 0x02, (
+                f"Random MMU case {case_idx} expected bus-error marker, got 0x{got:08X}; "
                 f"params={case['params']}"
             )
         else:

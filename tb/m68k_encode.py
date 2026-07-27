@@ -952,6 +952,15 @@ def rte():
     return [0x4E73]
 
 
+def rtd(disp):
+    """RTD #<displacement> - Return and Deallocate.
+
+    Encoding: 0100 1110 0111 0100 = 0x4E74, then a 16-bit displacement.
+    Operation: (SP) -> PC; SP + 4 + dn -> SP.
+    """
+    return [0x4E74, _w(disp)]
+
+
 def rtr():
     """RTR - Return and Restore Condition Codes.
 
@@ -1050,6 +1059,324 @@ def bclr_imm(ea_mode, ea_reg, bitnum):
 
 
 # ---------------------------------------------------------------------------
+# Bit field instructions (MC68020+)
+#
+# PRM Section 8 instruction format summary:
+#   opcode word: 1110 1ooo 11 <ea>    (ooo selects the operation)
+#   extension:   bit 15    = 0
+#                bits 14-12 = Dn register (BFEXTU/BFEXTS/BFFFO/BFINS only,
+#                             zero for the read-modify-write forms)
+#                bit 11    = Do  (0 = offset immediate, 1 = offset in Dn)
+#                bits 10-6 = OFFSET (immediate value, or Dn number in 8-6)
+#                bit 5     = Dw  (0 = width immediate, 1 = width in Dn)
+#                bits 4-0  = WIDTH (immediate value, or Dn number in 2-0)
+#
+# PRM (BFCHG Dw field): "If Dw = 0 ... an operand value in the range 1-31
+# specifies a field width of 1-31, and a value of zero specifies a width of 32."
+# ---------------------------------------------------------------------------
+
+BFTST_OP  = 0b000
+BFEXTU_OP = 0b001
+BFCHG_OP  = 0b010
+BFEXTS_OP = 0b011
+BFCLR_OP  = 0b100
+BFFFO_OP  = 0b101
+BFSET_OP  = 0b110
+BFINS_OP  = 0b111
+
+
+def _bf_ext(dn, offset, width, do, dw):
+    """Build the bit-field extension word.
+
+    Args:
+        dn: Dn register field (bits 14-12); 0 for BFTST/BFCHG/BFCLR/BFSET.
+        offset: Immediate offset 0-31 (do=0) or Dn number 0-7 (do=1).
+        width: Immediate width 0-31 where 0 means 32 (dw=0), or Dn number (dw=1).
+        do: 0 = offset is immediate, 1 = offset comes from a data register.
+        dw: 0 = width is immediate, 1 = width comes from a data register.
+    """
+    return _w((_mask(dn, 3) << 12) |
+              (_mask(do, 1) << 11) |
+              (_mask(offset, 5) << 6) |
+              (_mask(dw, 1) << 5) |
+              _mask(width, 5))
+
+
+def _bf_op(op3, ea_mode, ea_reg, dn, offset, width, do, dw):
+    opcode = (0xE8C0 |
+              (_mask(op3, 3) << 8) |
+              (_mask(ea_mode, 3) << 3) |
+              _mask(ea_reg, 3))
+    return [_w(opcode), _bf_ext(dn, offset, width, do, dw)]
+
+
+def bftst(ea_mode, ea_reg, offset, width, do=0, dw=0):
+    """BFTST <ea>{offset:width} - Test Bit Field. Opcode base 0xE8C0."""
+    return _bf_op(BFTST_OP, ea_mode, ea_reg, 0, offset, width, do, dw)
+
+
+def bfchg(ea_mode, ea_reg, offset, width, do=0, dw=0):
+    """BFCHG <ea>{offset:width} - Test Bit Field and Change. Base 0xEAC0."""
+    return _bf_op(BFCHG_OP, ea_mode, ea_reg, 0, offset, width, do, dw)
+
+
+def bfclr(ea_mode, ea_reg, offset, width, do=0, dw=0):
+    """BFCLR <ea>{offset:width} - Test Bit Field and Clear. Base 0xECC0."""
+    return _bf_op(BFCLR_OP, ea_mode, ea_reg, 0, offset, width, do, dw)
+
+
+def bfset(ea_mode, ea_reg, offset, width, do=0, dw=0):
+    """BFSET <ea>{offset:width} - Test Bit Field and Set. Base 0xEEC0."""
+    return _bf_op(BFSET_OP, ea_mode, ea_reg, 0, offset, width, do, dw)
+
+
+def bfextu(ea_mode, ea_reg, offset, width, dn, do=0, dw=0):
+    """BFEXTU <ea>{offset:width},Dn - Extract Bit Field Unsigned. Base 0xE9C0."""
+    return _bf_op(BFEXTU_OP, ea_mode, ea_reg, dn, offset, width, do, dw)
+
+
+def bfexts(ea_mode, ea_reg, offset, width, dn, do=0, dw=0):
+    """BFEXTS <ea>{offset:width},Dn - Extract Bit Field Signed. Base 0xEBC0."""
+    return _bf_op(BFEXTS_OP, ea_mode, ea_reg, dn, offset, width, do, dw)
+
+
+def bfffo(ea_mode, ea_reg, offset, width, dn, do=0, dw=0):
+    """BFFFO <ea>{offset:width},Dn - Find First One in Bit Field. Base 0xEDC0."""
+    return _bf_op(BFFFO_OP, ea_mode, ea_reg, dn, offset, width, do, dw)
+
+
+def bfins(dn, ea_mode, ea_reg, offset, width, do=0, dw=0):
+    """BFINS Dn,<ea>{offset:width} - Insert Bit Field. Base 0xEFC0."""
+    return _bf_op(BFINS_OP, ea_mode, ea_reg, dn, offset, width, do, dw)
+
+
+# ---------------------------------------------------------------------------
+# BCD instructions
+# ---------------------------------------------------------------------------
+
+def abcd(rx, ry, rm=0):
+    """ABCD - Add Decimal with Extend.
+
+    Encoding: 1100 Rx 10000 R/M Ry  (PRM: base 0xC100)
+      rm=0: ABCD Dy,Dx   (Rx = destination Dx, Ry = source Dy)
+      rm=1: ABCD -(Ay),-(Ax)
+    """
+    return [_w(0xC100 | (_mask(rx, 3) << 9) | (_mask(rm, 1) << 3) | _mask(ry, 3))]
+
+
+def sbcd(ry, rx, rm=0):
+    """SBCD - Subtract Decimal with Extend.
+
+    Encoding: 1000 Dy/Ay 10000 R/M Dx/Ax  (PRM: base 0x8100)
+    PRM operation: Destination10 - Source10 - X -> Destination, where the
+    bits 11-9 register (ry here) is the DESTINATION and bits 2-0 (rx) the source.
+      rm=0: SBCD Dx,Dy   (Dy = destination)
+      rm=1: SBCD -(Ax),-(Ay)
+    """
+    return [_w(0x8100 | (_mask(ry, 3) << 9) | (_mask(rm, 1) << 3) | _mask(rx, 3))]
+
+
+def nbcd(ea_mode, ea_reg):
+    """NBCD <ea> - Negate Decimal with Extend.
+
+    Encoding: 0100 1000 00 ea_mode ea_reg  (PRM: base 0x4800)
+    """
+    return [_w(0x4800 | (_mask(ea_mode, 3) << 3) | _mask(ea_reg, 3))]
+
+
+def pack(ry, rx, adjustment, rm=0):
+    """PACK - Pack BCD.
+
+    Encoding: 1000 Dy/Ay 10100 R/M Dx/Ax + 16-bit adjustment (base 0x8140)
+      rm=0: PACK Dx,Dy,#adj
+      rm=1: PACK -(Ax),-(Ay),#adj
+    """
+    return [_w(0x8140 | (_mask(ry, 3) << 9) | (_mask(rm, 1) << 3) | _mask(rx, 3)),
+            _w(adjustment)]
+
+
+def unpk(ry, rx, adjustment, rm=0):
+    """UNPK - Unpack BCD.
+
+    Encoding: 1000 Dy/Ay 11000 R/M Dx/Ax + 16-bit adjustment (base 0x8180)
+      rm=0: UNPK Dx,Dy,#adj
+      rm=1: UNPK -(Ax),-(Ay),#adj
+    """
+    return [_w(0x8180 | (_mask(ry, 3) << 9) | (_mask(rm, 1) << 3) | _mask(rx, 3)),
+            _w(adjustment)]
+
+
+# ---------------------------------------------------------------------------
+# Extended-precision add/subtract and memory compare
+# ---------------------------------------------------------------------------
+
+def addx(size, rx, ry, rm=0):
+    """ADDX - Add Extended.
+
+    Encoding: 1101 Rx 1 SIZE 00 R/M Ry  (PRM: base 0xD100)
+      rm=0: ADDX Dy,Dx  (Rx = destination)
+      rm=1: ADDX -(Ay),-(Ax)
+    """
+    return [_w(0xD100 |
+               (_mask(rx, 3) << 9) |
+               (_size_field(size) << 6) |
+               (_mask(rm, 1) << 3) |
+               _mask(ry, 3))]
+
+
+def subx(size, ry, rx, rm=0):
+    """SUBX - Subtract with Extend.
+
+    Encoding: 1001 Dy/Ay 1 SIZE 00 R/M Dx/Ax  (PRM: base 0x9100)
+    PRM operation: Destination - Source - X -> Destination, where bits 11-9
+    (ry) is the destination and bits 2-0 (rx) the source.
+      rm=0: SUBX Dx,Dy   (Dy = destination)
+      rm=1: SUBX -(Ax),-(Ay)
+    """
+    return [_w(0x9100 |
+               (_mask(ry, 3) << 9) |
+               (_size_field(size) << 6) |
+               (_mask(rm, 1) << 3) |
+               _mask(rx, 3))]
+
+
+def cmpm(size, ax, ay):
+    """CMPM (Ay)+,(Ax)+ - Compare Memory.
+
+    Encoding: 1011 Ax 1 SIZE 001 Ay  (PRM: base 0xB108)
+    Ax is always the destination, Ay always the source.
+    """
+    return [_w(0xB108 |
+               (_mask(ax, 3) << 9) |
+               (_size_field(size) << 6) |
+               _mask(ay, 3))]
+
+
+# ---------------------------------------------------------------------------
+# Compare and swap (MC68020+)
+# ---------------------------------------------------------------------------
+
+def _cas_size(size):
+    """CAS/CAS2 use a distinct size field: 01=byte, 10=word, 11=long."""
+    if size == BYTE:
+        return 0b01
+    if size == WORD:
+        return 0b10
+    if size == LONG:
+        return 0b11
+    raise ValueError(f"Invalid CAS size: {size}")
+
+
+def cas(size, dc, du, ea_mode, ea_reg):
+    """CAS Dc,Du,<ea> - Compare and Swap with Operand.
+
+    Encoding: 0000 1 SIZE 011 ea_mode ea_reg  (base 0x08C0, SIZE in bits 10-9)
+    Extension: 0000000 Du 000 Dc
+    """
+    opcode = (0x08C0 |
+              (_cas_size(size) << 9) |
+              (_mask(ea_mode, 3) << 3) |
+              _mask(ea_reg, 3))
+    return [_w(opcode), _w((_mask(du, 3) << 6) | _mask(dc, 3))]
+
+
+def cas2(size, dc1, du1, rn1, da1, dc2, du2, rn2, da2):
+    """CAS2 Dc1:Dc2,Du1:Du2,(Rn1):(Rn2) - Compare and Swap with Two Operands.
+
+    Encoding: 0000 1 SIZE 0 1111 1100  (base 0x08FC, SIZE in bits 10-9)
+    Two extension words, each: D/A Rn 000 Du 000 Dc
+    da1/da2: 0 = Rn is a data register, 1 = Rn is an address register.
+    CAS2 cannot use byte operands (PRM footnote).
+    """
+    if size == BYTE:
+        raise ValueError("CAS2 cannot use byte operands")
+    opcode = 0x08FC | (_cas_size(size) << 9)
+    ext1 = ((_mask(da1, 1) << 15) | (_mask(rn1, 3) << 12) |
+            (_mask(du1, 3) << 6) | _mask(dc1, 3))
+    ext2 = ((_mask(da2, 1) << 15) | (_mask(rn2, 3) << 12) |
+            (_mask(du2, 3) << 6) | _mask(dc2, 3))
+    return [_w(opcode), _w(ext1), _w(ext2)]
+
+
+# ---------------------------------------------------------------------------
+# MOVEP / MOVES / MOVEC
+# ---------------------------------------------------------------------------
+
+MOVEP_W_TO_REG = 0b100
+MOVEP_L_TO_REG = 0b101
+MOVEP_W_TO_MEM = 0b110
+MOVEP_L_TO_MEM = 0b111
+
+
+def movep(opmode, dx, ay, disp):
+    """MOVEP - Move Peripheral Data.
+
+    Encoding: 0000 Dx OPMODE 001 Ay + 16-bit displacement  (base 0x0008)
+    opmode: 100 = word mem->reg, 101 = long mem->reg,
+            110 = word reg->mem, 111 = long reg->mem
+    """
+    return [_w(0x0008 |
+               (_mask(dx, 3) << 9) |
+               (_mask(opmode, 3) << 6) |
+               _mask(ay, 3)),
+            _w(disp)]
+
+
+def movep_to_mem(size, dx, ay, disp):
+    """MOVEP Dx,(d16,Ay) - register to alternate memory bytes."""
+    opmode = MOVEP_L_TO_MEM if size == LONG else MOVEP_W_TO_MEM
+    return movep(opmode, dx, ay, disp)
+
+
+def movep_to_reg(size, dx, ay, disp):
+    """MOVEP (d16,Ay),Dx - alternate memory bytes to register."""
+    opmode = MOVEP_L_TO_REG if size == LONG else MOVEP_W_TO_REG
+    return movep(opmode, dx, ay, disp)
+
+
+def moves(size, rn, ad, dr, ea_mode, ea_reg):
+    """MOVES - Move Address Space (privileged, MC68010+).
+
+    Encoding: 0000 1110 SIZE ea_mode ea_reg  (base 0x0E00)
+    Extension: A/D REGISTER dr 00000000000
+      ad: 0 = data register, 1 = address register
+      dr: 0 = <ea> to general register, 1 = general register to <ea>
+    """
+    opcode = (0x0E00 |
+              (_size_field(size) << 6) |
+              (_mask(ea_mode, 3) << 3) |
+              _mask(ea_reg, 3))
+    ext = (_mask(ad, 1) << 15) | (_mask(rn, 3) << 12) | (_mask(dr, 1) << 11)
+    return [_w(opcode), _w(ext)]
+
+
+# MOVEC control-register selector codes (MC68030 UM Table 10-5)
+CR_SFC  = 0x000
+CR_DFC  = 0x001
+CR_CACR = 0x002
+CR_USP  = 0x800
+CR_VBR  = 0x801
+CR_CAAR = 0x802
+CR_MSP  = 0x803
+CR_ISP  = 0x804
+
+
+def movec_to_cr(rn, cr_sel, ad=0):
+    """MOVEC Rn,Cr - move general register to control register (privileged).
+
+    Encoding: 0x4E7B + extension (A/D | register | 0 | control code).
+    """
+    ext = (_mask(ad, 1) << 15) | (_mask(rn, 3) << 12) | (cr_sel & 0x0FFF)
+    return [0x4E7B, _w(ext)]
+
+
+def movec_from_cr(cr_sel, rn, ad=0):
+    """MOVEC Cr,Rn - move control register to general register (privileged)."""
+    ext = (_mask(ad, 1) << 15) | (_mask(rn, 3) << 12) | (cr_sel & 0x0FFF)
+    return [0x4E7A, _w(ext)]
+
+
+# ---------------------------------------------------------------------------
 # Multiply / Divide (word forms)
 # ---------------------------------------------------------------------------
 
@@ -1102,6 +1429,65 @@ def divu_w(ea_mode, ea_reg, dn):
 
 
 # ---------------------------------------------------------------------------
+# Multiply / Divide (long forms, MC68020+)
+#
+# PRM: MUL opcode word 0100 1100 00 <ea> (0x4C00), DIV 0100 1100 01 <ea>
+# (0x4C40). Both take one extension word:
+#     bit 15    = 0
+#     bits 14-12 = Dl (MUL) / Dq (DIV) -- low product / quotient register
+#     bit 11    = 1 for the signed form (MULS/DIVS), 0 for unsigned
+#     bit 10    = SIZE: 0 = 32-bit result, 1 = 64-bit product / 64-bit dividend
+#     bits 9-3  = 0
+#     bits 2-0  = Dh (MUL) / Dr (DIV) -- high product / remainder register
+# ---------------------------------------------------------------------------
+
+def _muldiv_l(base, ea_mode, ea_reg, dl, dh, signed, size64):
+    opcode = base | (_mask(ea_mode, 3) << 3) | _mask(ea_reg, 3)
+    ext = ((_mask(dl, 3) << 12) |
+           (_mask(signed, 1) << 11) |
+           (_mask(size64, 1) << 10) |
+           _mask(dh, 3))
+    return [_w(opcode), _w(ext)]
+
+
+def mulu_l(ea_mode, ea_reg, dl, dh=None):
+    """MULU.L <ea>,Dl  (32x32->32) or MULU.L <ea>,Dh:Dl  (32x32->64).
+
+    Pass dh to select the 64-bit form; the high 32 bits land in Dh.
+    """
+    if dh is None:
+        return _muldiv_l(0x4C00, ea_mode, ea_reg, dl, 0, 0, 0)
+    return _muldiv_l(0x4C00, ea_mode, ea_reg, dl, dh, 0, 1)
+
+
+def muls_l(ea_mode, ea_reg, dl, dh=None):
+    """MULS.L <ea>,Dl  (32x32->32) or MULS.L <ea>,Dh:Dl  (32x32->64)."""
+    if dh is None:
+        return _muldiv_l(0x4C00, ea_mode, ea_reg, dl, 0, 1, 0)
+    return _muldiv_l(0x4C00, ea_mode, ea_reg, dl, dh, 1, 1)
+
+
+def divu_l(ea_mode, ea_reg, dq, dr=None, size64=False):
+    """DIVU.L / DIVUL.L <ea>,... - unsigned long divide.
+
+    dr is None                -> DIVU.L  <ea>,Dq       32/32 -> 32q
+    dr given, size64 is False  -> DIVUL.L <ea>,Dr:Dq    32/32 -> 32r:32q
+    dr given, size64 is True   -> DIVU.L  <ea>,Dr:Dq    64/32 -> 32r:32q
+    """
+    if dr is None:
+        # PRM: "If Dr and Dq are the same register, only the quotient is returned."
+        return _muldiv_l(0x4C40, ea_mode, ea_reg, dq, dq, 0, 0)
+    return _muldiv_l(0x4C40, ea_mode, ea_reg, dq, dr, 0, 1 if size64 else 0)
+
+
+def divs_l(ea_mode, ea_reg, dq, dr=None, size64=False):
+    """DIVS.L / DIVSL.L <ea>,... - signed long divide (see divu_l)."""
+    if dr is None:
+        return _muldiv_l(0x4C40, ea_mode, ea_reg, dq, dq, 1, 0)
+    return _muldiv_l(0x4C40, ea_mode, ea_reg, dq, dr, 1, 1 if size64 else 0)
+
+
+# ---------------------------------------------------------------------------
 # Miscellaneous instructions
 # ---------------------------------------------------------------------------
 
@@ -1112,6 +1498,24 @@ def trap(vector):
     vector: 0-15
     """
     return [_w(0x4E40 | _mask(vector, 4))]
+
+
+def trapcc(condition, operand=None, size=None):
+    """TRAPcc [#<operand>] - Trap on Condition.
+
+    Encoding: 0101 condition 11111 opmode
+    opmode 100 = no operand, 010 = word operand, 011 = long operand.
+    Pass size="W" or "L" with an operand; omit both for the no-operand form.
+    """
+    if size is None:
+        assert operand is None, "an operand requires size='W' or 'L'"
+        return [_w(0x50FC | (_mask(condition, 4) << 8))]
+    if size == "W":
+        return [_w(0x50FA | (_mask(condition, 4) << 8)), _w(operand)]
+    if size == "L":
+        return ([_w(0x50FB | (_mask(condition, 4) << 8))] +
+                [(operand >> 16) & 0xFFFF, operand & 0xFFFF])
+    raise ValueError(f"bad TRAPcc size {size!r}")
 
 
 def trapv():
@@ -1412,6 +1816,81 @@ def _self_test():
 
     # EXG D0,D1 = 1100 000 1 01000 001 = 0xC141
     check("EXG D0,D1", exg(0, 1, EXG_DD), [0xC141])
+
+    # -----------------------------------------------------------------------
+    # Encodings below were cross-checked against `m68k-elf-as -m68030`
+    # (GNU as 2.x) as well as the PRM opcode maps.
+    # -----------------------------------------------------------------------
+
+    # BCD: ABCD D3,D5 = 0xCB03; memory form sets R/M -> 0xCB0B
+    check("ABCD D3,D5", abcd(5, 3), [0xCB03])
+    check("ABCD -(A3),-(A5)", abcd(5, 3, rm=1), [0xCB0B])
+    check("SBCD D3,D5", sbcd(5, 3), [0x8B03])
+    check("SBCD -(A3),-(A5)", sbcd(5, 3, rm=1), [0x8B0B])
+    check("NBCD D4", nbcd(DN, 4), [0x4804])
+    check("NBCD -(A2)", nbcd(AN_PREDEC, 2), [0x4822])
+
+    # PACK / UNPK
+    check("PACK D1,D2,#$1234", pack(2, 1, 0x1234), [0x8541, 0x1234])
+    check("PACK -(A1),-(A2),#0", pack(2, 1, 0, rm=1), [0x8549, 0x0000])
+    check("UNPK D1,D2,#$3030", unpk(2, 1, 0x3030), [0x8581, 0x3030])
+    check("UNPK -(A1),-(A2),#$3030", unpk(2, 1, 0x3030, rm=1), [0x8589, 0x3030])
+
+    # ADDX / SUBX / CMPM
+    check("ADDX.B D3,D5", addx(BYTE, 5, 3), [0xDB03])
+    check("ADDX.L D3,D5", addx(LONG, 5, 3), [0xDB83])
+    check("ADDX.L -(A3),-(A5)", addx(LONG, 5, 3, rm=1), [0xDB8B])
+    check("SUBX.W D3,D5", subx(WORD, 5, 3), [0x9B43])
+    check("SUBX.L -(A3),-(A5)", subx(LONG, 5, 3, rm=1), [0x9B8B])
+    check("CMPM.B (A1)+,(A2)+", cmpm(BYTE, 2, 1), [0xB509])
+    check("CMPM.W (A1)+,(A2)+", cmpm(WORD, 2, 1), [0xB549])
+    check("CMPM.L (A1)+,(A2)+", cmpm(LONG, 2, 1), [0xB589])
+
+    # Bit fields (all eight, plus register-sourced offset/width)
+    check("BFTST D0{2:5}", bftst(DN, 0, 2, 5), [0xE8C0, 0x0085])
+    check("BFTST (A1){0:32}", bftst(AN_IND, 1, 0, 0), [0xE8D1, 0x0000])
+    check("BFTST (A1){D2:D3}", bftst(AN_IND, 1, 2, 3, do=1, dw=1),
+          [0xE8D1, 0x08A3])
+    check("BFEXTU D0{2:5},D7", bfextu(DN, 0, 2, 5, 7), [0xE9C0, 0x7085])
+    check("BFCHG D0{4:8}", bfchg(DN, 0, 4, 8), [0xEAC0, 0x0108])
+    check("BFEXTS (A1){7:13},D4", bfexts(AN_IND, 1, 7, 13, 4), [0xEBD1, 0x41CD])
+    check("BFCLR (A1){3:9}", bfclr(AN_IND, 1, 3, 9), [0xECD1, 0x00C9])
+    check("BFFFO D0{0:32},D1", bfffo(DN, 0, 0, 0, 1), [0xEDC0, 0x1000])
+    check("BFSET (A1){31:1}", bfset(AN_IND, 1, 31, 1), [0xEED1, 0x07C1])
+    check("BFINS D5,D0{2:5}", bfins(5, DN, 0, 2, 5), [0xEFC0, 0x5085])
+
+    # CAS / CAS2
+    check("CAS.B D1,D2,(A3)", cas(BYTE, 1, 2, AN_IND, 3), [0x0AD3, 0x0081])
+    check("CAS.W D1,D2,(A3)", cas(WORD, 1, 2, AN_IND, 3), [0x0CD3, 0x0081])
+    check("CAS.L D1,D2,(A3)", cas(LONG, 1, 2, AN_IND, 3), [0x0ED3, 0x0081])
+    check("CAS2.L D1:D2,D3:D4,(A5):(A6)",
+          cas2(LONG, 1, 3, 5, 1, 2, 4, 6, 1), [0x0EFC, 0xD0C1, 0xE102])
+    check("CAS2.W D1:D2,D3:D4,(D5):(D6)",
+          cas2(WORD, 1, 3, 5, 0, 2, 4, 6, 0), [0x0CFC, 0x50C1, 0x6102])
+
+    # MOVEP / MOVES / MOVEC
+    check("MOVEP.W D3,$10(A2)", movep_to_mem(WORD, 3, 2, 0x10), [0x078A, 0x0010])
+    check("MOVEP.L D3,$10(A2)", movep_to_mem(LONG, 3, 2, 0x10), [0x07CA, 0x0010])
+    check("MOVEP.W $10(A2),D3", movep_to_reg(WORD, 3, 2, 0x10), [0x070A, 0x0010])
+    check("MOVEP.L $10(A2),D3", movep_to_reg(LONG, 3, 2, 0x10), [0x074A, 0x0010])
+    check("MOVES.L D3,(A2)", moves(LONG, 3, 0, 1, AN_IND, 2), [0x0E92, 0x3800])
+    check("MOVES.L (A2),D3", moves(LONG, 3, 0, 0, AN_IND, 2), [0x0E92, 0x3000])
+    check("MOVES.B D3,(A2)", moves(BYTE, 3, 0, 1, AN_IND, 2), [0x0E12, 0x3800])
+    check("MOVEC D0,SFC", movec_to_cr(0, CR_SFC), [0x4E7B, 0x0000])
+    check("MOVEC D1,DFC", movec_to_cr(1, CR_DFC), [0x4E7B, 0x1001])
+    check("MOVEC SFC,D2", movec_from_cr(CR_SFC, 2), [0x4E7A, 0x2000])
+
+    # Long multiply / divide (MC68020+)
+    check("MULU.L D2,D0", mulu_l(DN, 2, 0), [0x4C02, 0x0000])
+    check("MULS.L D2,D0", muls_l(DN, 2, 0), [0x4C02, 0x0800])
+    check("MULU.L D2,D3:D0", mulu_l(DN, 2, 0, 3), [0x4C02, 0x0403])
+    check("MULS.L D2,D3:D0", muls_l(DN, 2, 0, 3), [0x4C02, 0x0C03])
+    check("DIVU.L D2,D0", divu_l(DN, 2, 0), [0x4C42, 0x0000])
+    check("DIVS.L D2,D0", divs_l(DN, 2, 0), [0x4C42, 0x0800])
+    check("DIVU.L D2,D1:D0", divu_l(DN, 2, 0, 1, size64=True), [0x4C42, 0x0401])
+    check("DIVS.L D2,D1:D0", divs_l(DN, 2, 0, 1, size64=True), [0x4C42, 0x0C01])
+    check("DIVUL.L D2,D1:D0", divu_l(DN, 2, 0, 1), [0x4C42, 0x0001])
+    check("DIVSL.L D2,D1:D0", divs_l(DN, 2, 0, 1), [0x4C42, 0x0801])
 
     if errors:
         print(f"FAIL: {len(errors)} encoding error(s):")

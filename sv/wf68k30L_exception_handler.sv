@@ -263,6 +263,8 @@ logic [15:0] rte_bf_ssw;
 logic        rte_bf_c_fault_restore;
 logic        rte_bf_b_fault_restore;
 logic        rte_bf_need_rerun;
+logic        rte_pc_odd;
+logic        rte_aerr_hold;
 
 // True when any exception pending flag is asserted.
 logic        any_exception_pending;
@@ -358,15 +360,15 @@ always_ff @(posedge CLK) begin : pending_system_faults
     // Bus error
     if (TRAP_BERR)
         EX_P_BERR <= 1'b1;
-    else if (EX_STATE != EXS_IDLE && DATA_RDY && !DATA_VALID)
-        EX_P_BERR <= 1'b1;
+    else if (EX_STATE != EXS_IDLE && EX_STATE != EXS_GET_VECTOR && DATA_RDY && !DATA_VALID)
+        EX_P_BERR <= 1'b1; // A faulted IACK is a spurious interrupt, not a bus error.
     else if (EX_STATE == EXS_INIT && EXCEPTION == EX_BERR)
         EX_P_BERR <= 1'b0; // Reset in the beginning to enable retriggering.
     else if (SYS_INIT)
         EX_P_BERR <= 1'b0;
 
     // Address error
-    if (TRAP_AERR)
+    if (TRAP_AERR || rte_pc_odd)
         EX_P_AERR <= 1'b1;
     else if (EX_STATE == EXS_BUILD_STACK && EXCEPTION == EX_AERR)
         EX_P_AERR <= 1'b0;
@@ -444,8 +446,24 @@ always_comb begin : decode_instruction_trap_source
     else if ((EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE) ||
              (EX_STATE == EXS_EXAMINE_VERSION && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE))
         trap_source = TRAP_SRC_FORMAT;
-    else if (TRAP_CODE_OPC == T_RTE)
+    else if (TRAP_CODE_OPC == T_RTE && !rte_pc_odd && !rte_aerr_hold)
         trap_source = TRAP_SRC_RTE;
+end
+
+// An odd return PC in the frame abandons the RTE and raises an address error.
+// The opword trap code is only cleared by IPIPE_FLUSH, which does not happen
+// on the abort, so the RTE source stays suppressed until the address error has
+// refilled the pipe - otherwise the same RTE would immediately re-arm.
+assign rte_pc_odd = (EXCEPTION == EX_RTE && EX_STATE == EXS_RESTORE_PC &&
+                     DATA_RDY && DATA_VALID && DATA_0);
+
+always_ff @(posedge CLK) begin : rte_odd_pc_abort
+    if (SYS_INIT)
+        rte_aerr_hold <= 1'b0;
+    else if (rte_pc_odd)
+        rte_aerr_hold <= 1'b1;
+    else if (EX_STATE == EXS_REFILL_PIPE && NEXT_EX_STATE != EXS_REFILL_PIPE)
+        rte_aerr_hold <= 1'b0;
 end
 
 always_comb begin : decode_instruction_trap_clear
@@ -459,6 +477,8 @@ always_comb begin : decode_instruction_trap_clear
 		        clear_instruction_traps = 1'b1;
         else if (EXCEPTION == EX_RTE && EX_STATE == EXS_RESTORE_STATUS && DATA_RDY && DATA_VALID &&
                  NEXT_EX_STATE == EXS_IDLE)
+                clear_instruction_traps = 1'b1;
+        else if (rte_pc_odd)
                 clear_instruction_traps = 1'b1;
 end
 
@@ -585,10 +605,12 @@ end
 
 // ---- Exception priority encoder (registered) ----
 // Latches the highest-priority pending exception when entering from idle.
+// TRAP_BERR is folded in live because entry happens in the same cycle it
+// strobes, one cycle before EX_P_BERR registers.
 always_ff @(posedge CLK) begin : store_current_exception
     if (EX_STATE == EXS_IDLE)
         EXCEPTION <= resolve_exception_priority(
-            EX_P_RESET, EX_P_AERR, EX_P_BERR,
+            EX_P_RESET, EX_P_AERR, EX_P_BERR | TRAP_BERR,
             EX_P_CP_PRE, EX_P_CP_MID, EX_P_CP_POST,
             EX_P_CHK, EX_P_TRAPcc, EX_P_DIVZERO, EX_P_TRAP, EX_P_TRAPV, EX_P_MMU_CFG, EX_P_FORMAT,
             EX_P_ILLEGAL, EX_P_RTE, EX_P_1010, EX_P_1111, EX_P_PRIV, EX_P_TRACE,
@@ -628,7 +650,7 @@ always_comb begin : stack_frame_displacement
     case (STACK_FORMAT_I)
         4'h0, 4'h1: DISPLACEMENT = 8'h08; // Format 0/1: 4-word frame.
         4'h2:       DISPLACEMENT = 8'h0C; // Format 2: 6-word frame.
-        4'h9:       DISPLACEMENT = 8'h12; // Format 9: coprocessor mid-instruction.
+        4'h9:       DISPLACEMENT = 8'h14; // Format 9: 10-word coprocessor mid-instruction.
         4'hA:       DISPLACEMENT = 8'h20; // Format A: short bus/address error.
         default:    DISPLACEMENT = 8'h5C; // Format B: long bus/address error.
     endcase
@@ -676,6 +698,7 @@ assign IPIPE_FILL = (EX_STATE == EXS_REFILL_PIPE);
 assign PC_INC = (EX_STATE != EXS_BUILD_STACK && NEXT_EX_STATE == EXS_BUILD_STACK) &&
                 (EXCEPTION == EX_CHK || EXCEPTION == EX_DIVZERO || EXCEPTION == EX_INT ||
                  EXCEPTION == EX_TRAP || EXCEPTION == EX_TRAPcc || EXCEPTION == EX_TRAPV ||
+                 EXCEPTION == EX_TRACE || EXCEPTION == EX_MMU_CFG ||
                  EXCEPTION == EX_CP_POST);
 
 assign ISP_DEC = (EX_STATE == EXS_INIT && EXCEPTION != EX_RESET_EX && EXCEPTION != EX_RTE) ||
@@ -744,11 +767,11 @@ always_ff @(posedge CLK) begin : stack_ctrl
         STACK_FORMAT_I <= 4'h1; // Throwaway frame (format 1).
     end else if (EX_STATE != EXS_BUILD_STACK && NEXT_EX_STATE == EXS_BUILD_STACK) begin
         case (EXCEPTION)
-            EX_INT, EX_ILLEGAL, EX_1010, EX_1111, EX_MMU_CFG, EX_FORMAT, EX_PRIV, EX_TRAP, EX_CP_PRE: begin
+            EX_INT, EX_ILLEGAL, EX_1010, EX_1111, EX_FORMAT, EX_PRIV, EX_TRAP, EX_CP_PRE: begin
                 STACK_POS_VAR = 6'd4;   // Format 0: 4-word stack frame.
                 STACK_FORMAT_I <= 4'h0;
             end
-            EX_CHK, EX_TRAPcc, EX_TRAPV, EX_TRACE, EX_DIVZERO, EX_CP_POST: begin
+            EX_CHK, EX_TRAPcc, EX_TRAPV, EX_TRACE, EX_DIVZERO, EX_MMU_CFG, EX_CP_POST: begin
                 STACK_POS_VAR = 6'd6;   // Format 2: 6-word stack frame.
                 STACK_FORMAT_I <= 4'h2;
             end
@@ -859,7 +882,14 @@ end
 always_comb begin : exception_handler_dec
     case (EX_STATE)
         EXS_IDLE: begin
-            if ((BUSY_MAIN || BUSY_OPD) && !EX_P_RESET)
+            // A bus error aborts the instruction, so entry must not wait for
+            // the pipeline. Waiting also lets the next prefetch re-capture the
+            // bus interface's fault info (SSW, data buffers), which only
+            // freezes on BUSY_EXH - the format A/B frame would then describe
+            // the prefetch instead of the faulted access.
+            if (TRAP_BERR)
+                NEXT_EX_STATE = EXS_INIT;
+            else if ((BUSY_MAIN || BUSY_OPD) && !EX_P_RESET)
                 NEXT_EX_STATE = EXS_IDLE; // Wait until the pipeline is idle.
             else if (any_exception_pending)
                 NEXT_EX_STATE = EXS_INIT;

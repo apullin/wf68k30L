@@ -100,6 +100,7 @@ module WF68K30L_TOP #(
 
     // Synchronous bus control:
     input  logic        CBACKn,
+    input  logic        CIINn,
     input  logic        STERMn,
 
     // Status controls:

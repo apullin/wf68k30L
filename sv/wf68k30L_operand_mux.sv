@@ -51,6 +51,7 @@ module WF68K30L_OPERAND_MUX (
     input  logic [31:0] MMU_TT0,
     input  logic [31:0] MMU_TT1,
     input  logic [31:0] MMU_MMUSR,
+    input  logic [31:0] MMU_PTEST_DESC_ADDR,
     input  logic [63:0] ALU_RESULT,
 
     // --- Immediate data buffer inputs ---
@@ -171,6 +172,8 @@ end
 always_comb begin : ar_in_1_mux
     if (BUSY_EXH)
         AR_IN_1 = DATA_TO_CORE;
+    else if (ALU_BSY && AR_WR_1 && OP_WB == PTEST)
+        AR_IN_1 = MMU_PTEST_DESC_ADDR; // PTEST: last descriptor address to An.
     else if (ALU_BSY && AR_WR_1)
         AR_IN_1 = ALU_RESULT[31:0];
     else if (ALU_BSY && (DFC_WR || SFC_WR || ISP_WR || MSP_WR || USP_WR))
@@ -447,8 +450,13 @@ assign ALU_OP3_IN = ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU
 
 // The bit field offset is bit-wise.
 assign BF_OFFSET = !BIW_1[11] ? {24'h0, 3'b000, BIW_1[10:6]} : DR_OUT_1;
+// A register width always comes from port 2, whose selector is the width
+// register field BIW_1[2:0].  BFINS shares that port with its insert value:
+// wf68k30L_ctrl_regsel.sv keeps the width selected in every cycle in which
+// BF_WIDTH is consumed and switches to the insert register only while LOAD_OP1
+// captures it into the ALU's OP1_BUFFER.
 assign BF_WIDTH = (BIW_1[4:0] != 5'b00000 && !BIW_1[5]) ? {1'b0, BIW_1[4:0]} :
-                   (DR_OUT_1[4:0] != 5'b00000 && BIW_1[5]) ? {1'b0, DR_OUT_1[4:0]} : 6'b100000;
+                   (DR_OUT_2[4:0] != 5'b00000 && BIW_1[5]) ? {1'b0, DR_OUT_2[4:0]} : 6'b100000;
 
 // BITPOS spans 0-31 for register direct mode, modulo-8 for memory mode.
 // For bit field operations in memory, values are 0-7 (byte-aligned loads).

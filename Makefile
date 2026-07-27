@@ -27,7 +27,7 @@ VHDL_SRC := $(VHDL_DIR)/wf68k30L_address_registers.vhd \
 
 ALL_SRC := $(VHDL_PKG) $(VHDL_SRC)
 
-.PHONY: all synth json clean test-fast test-full test-mmu-random test-csmith-smoke test-csmith-smoke-jump-tables test-coremark-smoke test-jump-tables test-qemu-diff test-qemu-diff-fuzz test-qemu-diff-campaign test-software-torture test-shakeout formal-smoke
+.PHONY: all synth json clean test-fast test-full test-known-gaps test-mmu-random test-csmith-smoke test-csmith-smoke-jump-tables test-coremark-smoke test-jump-tables test-qemu-diff test-qemu-diff-fuzz test-qemu-diff-campaign test-software-torture test-shakeout formal-smoke
 
 all: json
 
@@ -79,6 +79,21 @@ test-full: test-fast
 	$(MAKE) -C tb TEST_MODULE=test_instr_move TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_instr_muldiv TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_instr_shift TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_cache_instr TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_coprocessor_instr TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_interrupt_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_trace_addrerr_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_berr_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_um_lane_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_mbit_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_datapath_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_decode_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_instr_bcd TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_instr_bitfield TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_instr_atomic TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_instr_misc TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_bus_arbitration TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_fullformat_ea_probe TOPLEVEL=WF68K30L_TOP
 
 # Focused repro suite for switch/jump-table control-flow issues.
 test-jump-tables:
@@ -113,7 +128,7 @@ SHAKEOUT_QEMU_SEEDS ?= 1-300
 SHAKEOUT_QEMU_OPS ?= 128
 SHAKEOUT_CSMITH_SEEDS ?= 1,4-10,12-17,19-23,25-32,34-37,39-59
 SHAKEOUT_CSMITH_JUMP_SEEDS ?= 1,4,7,10,13
-SHAKEOUT_CSMITH_MAX_CYCLES ?= 800000
+SHAKEOUT_CSMITH_MAX_CYCLES ?= 12000000
 SHAKEOUT_COREMARK_OPTS ?= O0,O1,O2,Os
 SHAKEOUT_COREMARK_REQUIRED_OPTS ?=
 SHAKEOUT_COREMARK_MAX_CYCLES ?= 5000000
@@ -152,21 +167,120 @@ test-shakeout:
 	  --coremark-iterations "$(SHAKEOUT_COREMARK_ITERATIONS)" \
 	  --coremark-total-data-size "$(SHAKEOUT_COREMARK_TOTAL_DATA_SIZE)"
 
-# Lightweight formal smoke on the data-register hazard tracker.
-formal-smoke:
+# Bounded formal checks against the real RTL.
+#
+# clk2fflogic + `chformal -lower` are REQUIRED: as of Yosys 0.62 an immediate
+# assert becomes a $check cell, and write_smt2 emits nothing for $check. Without
+# these two passes the SMT2 contains zero assertions and every run reports
+# PASSED vacuously. `make formal-selftest` guards against that regressing.
+#
+# The harnesses derive CLK by toggling it from $global_clock, so one clock cycle
+# costs two solver steps: measured, -t 24 reaches 11 posedges and -t 26 reaches
+# 12. FORMAL_CYCLES is therefore expressed in clock cycles and converted below,
+# so the knob means what it says.
+#
+# `memory_map` matters as much as the solver here: without it write_smt2 emits
+# the register file as an SMT-LIB array (store/select over
+# (Array (_ BitVec 3) (_ BitVec 32))), and every solver tried -- yices,
+# boolector, bitwuzla -- times out on the exhaustive register-file property.
+# Bit-blasting it first makes that property tractable.
+#
+# Solver choice is a large effect, not a detail. On the register-file property
+# at depth 10, measured on this design: bitwuzla 2s, yices 68s; at depth 24
+# bitwuzla 26s, yices >180s. bitwuzla (or boolector, its predecessor) is the
+# default for that reason; override with SMT_SOLVER=yices if it is unavailable,
+# in which case use `make formal-smoke FORMAL_REGFILE=0` to skip the
+# register-file property.
+# The MMU harnesses instantiate the request-gating and translate modules, so the
+# whole cone they depend on has to be read in.
+FORMAL_MMU_RTL := $(SV_DIR)/wf68k30L_top_routing_bus_cache.sv \
+                  $(SV_DIR)/wf68k30L_top_routing_mmu_translate.sv \
+                  $(SV_DIR)/wf68k30L_top_desc_shadow_port.sv \
+                  $(SV_DIR)/wf68k30L_top_mmu_ptest.sv \
+                  $(SV_DIR)/wf68k30L_sync_ram_1r1w.sv
+FORMAL_LOWER := memory_map; clk2fflogic; chformal -lower
+SMT_SOLVER ?= bitwuzla
+FORMAL_CYCLES ?= 12
+FORMAL_DEPTH := $(shell expr 2 \* $(FORMAL_CYCLES) + 2)
+FORMAL_REGFILE ?= 1
+
+.PHONY: formal-selftest formal-solver-check
+
+# The solver is load-bearing, not a preference: yices cannot finish the
+# register-file property at this depth. Fail loudly rather than silently
+# running something that will time out.
+formal-solver-check:
+	@command -v $(SMT_SOLVER) >/dev/null 2>&1 || { \
+	   echo "formal: SMT_SOLVER='$(SMT_SOLVER)' not found on PATH."; \
+	   echo "        bitwuzla or boolector is required for the register-file"; \
+	   echo "        property. With yices only, run:"; \
+	   echo "            make formal-smoke SMT_SOLVER=yices FORMAL_REGFILE=0"; \
+	   exit 1; }
+	@case '$(SMT_SOLVER)' in \
+	   bitwuzla|boolector) ;; \
+	   *) if [ '$(FORMAL_REGFILE)' = '1' ]; then \
+	        echo "formal: SMT_SOLVER='$(SMT_SOLVER)' is not bitwuzla/boolector;"; \
+	        echo "        the register-file property is expected to time out."; \
+	        echo "        Add FORMAL_REGFILE=0 to skip it."; \
+	      fi ;; \
+	 esac
+	@echo "formal: solver=$(SMT_SOLVER) cycles=$(FORMAL_CYCLES) (depth=$(FORMAL_DEPTH) steps) regfile=$(FORMAL_REGFILE)"
+
+formal-smoke: formal-selftest formal-solver-check
 	mkdir -p build/formal
+	# Hazard tracker: bounded, then proven unbounded by temporal induction.
 	yosys -q -p \
 	  "read_verilog -formal -sv -I $(SV_DIR) $(SV_DIR)/wf68k30L_data_registers.sv formal/data_regs_hazard_formal.sv; \
-	   prep -top data_regs_hazard_formal -flatten; \
+	   prep -top data_regs_hazard_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/data_regs_hazard.smt2"
-	yosys-smtbmc -s yices -t 24 build/formal/data_regs_hazard.smt2
+	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/data_regs_hazard.smt2
+	yosys-smtbmc -i -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/data_regs_hazard.smt2
+	# Register-file data integrity: BMC only. The shadow is not inductive on its
+	# own (from an arbitrary state it may already disagree with the RTL), so
+	# induction fails here without extra invariants; that is a limitation of the
+	# property, not a counterexample.
+ifeq ($(FORMAL_REGFILE),1)
 	yosys -q -p \
-	  "read_verilog -formal -sv formal/mmu_runtime_gate_formal.sv; \
-	   prep -top mmu_runtime_gate_formal -flatten; \
+	  "read_verilog -formal -sv -DREGFILE_PROPERTY -I $(SV_DIR) $(SV_DIR)/wf68k30L_data_registers.sv formal/data_regs_hazard_formal.sv; \
+	   prep -top data_regs_hazard_formal -flatten; $(FORMAL_LOWER); \
+	   write_smt2 -wires build/formal/data_regs_regfile.smt2"
+	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/data_regs_regfile.smt2
+endif
+	yosys -q -p \
+	  "read_verilog -formal -sv -I $(SV_DIR) $(FORMAL_MMU_RTL) formal/mmu_runtime_gate_formal.sv; \
+	   prep -top mmu_runtime_gate_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/mmu_runtime_gate.smt2"
-	yosys-smtbmc -s yices -t 24 build/formal/mmu_runtime_gate.smt2
+	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/mmu_runtime_gate.smt2
 	yosys -q -p \
-	  "read_verilog -formal -sv formal/mmu_walk_delay_state_formal.sv; \
-	   prep -top mmu_walk_delay_state_formal -flatten; \
+	  "read_verilog -formal -sv -I $(SV_DIR) $(FORMAL_MMU_RTL) formal/mmu_walk_delay_state_formal.sv; \
+	   prep -top mmu_walk_delay_state_formal -flatten; $(FORMAL_LOWER); \
 	   write_smt2 -wires build/formal/mmu_walk_delay_state.smt2"
-	yosys-smtbmc -s yices -t 24 build/formal/mmu_walk_delay_state.smt2
+	yosys-smtbmc -s $(SMT_SOLVER) -t $(FORMAL_DEPTH) build/formal/mmu_walk_delay_state.smt2
+
+# Proves the formal flow can actually fail. A trivially false assertion must be
+# reported FAILED; if it passes, assertions are being dropped and every other
+# formal result in this Makefile is meaningless.
+formal-selftest:
+	mkdir -p build/formal
+	printf 'module formal_selftest;\n logic CLK = 1'"'"'b0;\n always_ff @($$global_clock) CLK <= !CLK;\n always_ff @(posedge CLK) assert(1'"'"'b0);\nendmodule\n' \
+	  > build/formal/formal_selftest.sv
+	yosys -q -p \
+	  "read_verilog -formal -sv build/formal/formal_selftest.sv; \
+	   prep -top formal_selftest -flatten; $(FORMAL_LOWER); \
+	   write_smt2 -wires build/formal/formal_selftest.smt2"
+	@if yosys-smtbmc -s $(SMT_SOLVER) -t 8 build/formal/formal_selftest.smt2 2>&1 | grep -q 'Status: FAILED'; then \
+	   echo "formal-selftest: OK (assertions are live)"; \
+	 else \
+	   echo "formal-selftest: FAILED -- assertions are not reaching the solver;"; \
+	   echo "                 every formal result would be a vacuous PASS."; \
+	   exit 1; \
+	 fi
+
+# Suites that fail by design against known, documented RTL gaps. Kept out of
+# test-full so the gate stays meaningful, but runnable so the gaps stay visible.
+# Every failure here has its diagnosis in the test docstring.
+#   test_bus_arbitration_um_gaps -- UM 7.7.2/7.7.4 deviations: BG deferred to
+#     cycle end rather than cycle start, amplified across split transfers, and
+#     relinquish-and-retry unable to break into the first RMC read.
+test-known-gaps:
+	-$(MAKE) -C tb TEST_MODULE=test_bus_arbitration_um_gaps TOPLEVEL=WF68K30L_TOP

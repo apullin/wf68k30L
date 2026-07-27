@@ -13,37 +13,45 @@ module WF68K30L_CPU_WRAPPER #(
     input  logic        CLK,
 
     // CPU-style address/data bus.
-    output logic [31:0] A,
+    output wire  [31:0] A,
     inout  wire  [31:0] D,
 
-    // System control. RESETn is combined into a bidirectional open-drain pin.
+    // System control. RESETn is combined into a bidirectional open-drain pin,
+    // so the net needs the board pull-up to resolve when nobody drives it.
+    // Yosys parses neither tri1 nor the pullup primitive; on real hardware
+    // this is a pad attribute rather than RTL.
     input  logic        BERRn,
+`ifdef YOSYS
     inout  wire         RESETn,
+`else
+    inout  tri1         RESETn,
+`endif
     input  logic        HALTn,
     output logic        HALT_OUTn_DBG,
 
     // Processor status / interrupt control.
-    output logic [2:0]  FC,
+    output wire  [2:0]  FC,
     input  logic        AVECn,
     input  logic [2:0]  IPLn,
     output logic        IPENDn,
 
     // Asynchronous bus control.
     input  logic [1:0]  DSACKn,
-    output logic [1:0]  SIZE,
-    output logic        ASn,
-    output logic        RWn,
-    output logic        RMCn,
-    output logic        DSn,
+    output wire  [1:0]  SIZE,
+    output wire         ASn,
+    output wire         RWn,
+    output wire         RMCn,
+    output wire         DSn,
     output logic        ECSn,
     output logic        OCSn,
-    output logic        CIOUTn,
-    output logic        CBREQn,
-    output logic        DBENn,
+    output wire         CIOUTn,
+    output wire         CBREQn,
+    output wire         DBENn,
     output logic        BUS_EN,
 
     // Synchronous bus control.
     input  logic        CBACKn,
+    input  logic        CIINn,
     input  logic        STERMn,
 
     // Cache/status sideband.
@@ -62,9 +70,37 @@ logic        DATA_EN;
 logic        RESET_OUT;
 logic        HALT_OUTn;
 
+// Core-side bus outputs, ahead of the arbitration three-state.
+logic [31:0] A_CORE;
+logic [2:0]  FC_CORE;
+logic [1:0]  SIZE_CORE;
+logic        ASn_CORE;
+logic        RWn_CORE;
+logic        RMCn_CORE;
+logic        DSn_CORE;
+logic        CIOUTn_CORE;
+logic        CBREQn_CORE;
+logic        DBENn_CORE;
+
 // Drive the bidirectional package-style data bus only on core writes.
+// DATA_EN already accounts for arbitration and reset.
 assign D = DATA_EN ? DATA_OUT : 32'hzzzzzzzz;
 assign DATA_IN = D;
+
+// UM Table 5-2 lists exactly these outputs as three-state, and UM 7.7.4 and
+// 7.8 require them released while the processor is not the bus master and
+// while reset is asserted. BUS_EN is the core's own qualifier for both.
+// ECS, OCS, IPEND and BG are driven at all times per the same table.
+assign A      = BUS_EN ? A_CORE      : 32'hzzzzzzzz;
+assign FC     = BUS_EN ? FC_CORE     : 3'bzzz;
+assign SIZE   = BUS_EN ? SIZE_CORE   : 2'bzz;
+assign ASn    = BUS_EN ? ASn_CORE    : 1'bz;
+assign RWn    = BUS_EN ? RWn_CORE    : 1'bz;
+assign RMCn   = BUS_EN ? RMCn_CORE   : 1'bz;
+assign DSn    = BUS_EN ? DSn_CORE    : 1'bz;
+assign CIOUTn = BUS_EN ? CIOUTn_CORE : 1'bz;
+assign CBREQn = BUS_EN ? CBREQn_CORE : 1'bz;
+assign DBENn  = BUS_EN ? DBENn_CORE  : 1'bz;
 
 // The core exposes RESET request as an active-high open-drain intent.
 assign RESETn = RESET_OUT ? 1'b0 : 1'bz;
@@ -81,7 +117,7 @@ WF68K30L_TOP #(
 ) u_core (
     .CLK(CLK),
 
-    .ADR_OUT(A),
+    .ADR_OUT(A_CORE),
     .DATA_IN(DATA_IN),
     .DATA_OUT(DATA_OUT),
     .DATA_EN(DATA_EN),
@@ -92,26 +128,27 @@ WF68K30L_TOP #(
     .HALT_INn(HALTn),
     .HALT_OUTn(HALT_OUTn),
 
-    .FC_OUT(FC),
+    .FC_OUT(FC_CORE),
 
     .AVECn(AVECn),
     .IPLn(IPLn),
     .IPENDn(IPENDn),
 
     .DSACKn(DSACKn),
-    .SIZE(SIZE),
-    .ASn(ASn),
-    .RWn(RWn),
-    .RMCn(RMCn),
-    .DSn(DSn),
+    .SIZE(SIZE_CORE),
+    .ASn(ASn_CORE),
+    .RWn(RWn_CORE),
+    .RMCn(RMCn_CORE),
+    .DSn(DSn_CORE),
     .ECSn(ECSn),
     .OCSn(OCSn),
-    .CIOUTn(CIOUTn),
-    .CBREQn(CBREQn),
-    .DBENn(DBENn),
+    .CIOUTn(CIOUTn_CORE),
+    .CBREQn(CBREQn_CORE),
+    .DBENn(DBENn_CORE),
     .BUS_EN(BUS_EN),
 
     .CBACKn(CBACKn),
+    .CIINn(CIINn),
     .STERMn(STERMn),
 
     .STATUSn(STATUSn),

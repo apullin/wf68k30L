@@ -98,12 +98,38 @@ logic NO_AR_HAZARD;
 logic NO_DR_HAZARD;
 logic EXWORD_SRC_READY;
 logic MOVE_PHASE2_EXWORD_READY;
+logic EXWORD_RESERVED;
+logic EXWORD_INDEX_IS_DR;
+logic EXWORD_INDEX_READY;
 
 assign EW_SEEN = EW_ACK || EW_RDY;
+// Reserved full format extension word encodings, PRM Table 2-1 and Table 2-2:
+// BD SIZE = 00, plus I/IS = 100 with IS = 0 and I/IS = 100..111 with IS = 1.
+assign EXWORD_RESERVED = (EXT_WORD[5:4] == 2'b00) ||
+                         (EXT_WORD[2] && (EXT_WORD[6] || EXT_WORD[1:0] == 2'b00));
 assign NO_AR_HAZARD = !AR_IN_USE;
 assign NO_DR_HAZARD = !DR_IN_USE;
-assign EXWORD_SRC_READY = NO_AR_HAZARD && (BIW_1[15] || NO_DR_HAZARD);
+// The index register of the just-fetched extension word is an An when its D/A
+// bit is set, so the data register hazard only has to be clear for a Dn index.
+// This is EXT_WORD, not BIW_1: they coincide only for a single-word opcode with
+// one effective address.
+assign EXWORD_SRC_READY = NO_AR_HAZARD && (EXT_WORD[15] || NO_DR_HAZARD);
 assign MOVE_PHASE2_EXWORD_READY = (OP == MOVE) && PHASE2 && EXWORD_SRC_READY;
+
+// The index register is sampled into INDEX_REG by STORE_ADR_FORMAT, which is
+// asserted on the cycle this state is left (see wf68k30L_ctrl_comb.sv), so the
+// index has to be settled before the state is left at all -- not merely before
+// the effective address is consumed. A full format extension word that carries
+// a base or outer displacement leaves for FETCH_D_HI/FETCH_D_LO/FETCH_OD_HI/
+// FETCH_OD_LO/FETCH_MEMADR on EW_ACK alone, so it used to latch the index while
+// a write to it from the preceding instruction was still in flight; the brief
+// format resolves in the arms below and was interlocked by EXWORD_SRC_READY.
+// PRM 2.2 / Table 2-4: the full format address is bd + Xn.SIZE * SCALE (+ An),
+// and Xn must be the post-write value. IS = 1 suppresses the index entirely and
+// D/A = 1 makes it an An, so only a live Dn index needs the data register
+// interlock.
+assign EXWORD_INDEX_IS_DR = !EXT_WORD[15] && !EXT_WORD[6];
+assign EXWORD_INDEX_READY = !EXWORD_INDEX_IS_DR || NO_DR_HAZARD;
 
 always_comb begin : other_states_dec
     case (FETCH_STATE)
@@ -169,17 +195,25 @@ always_comb begin : other_states_dec
         FETCH_EXWORD_1: begin
             // Be aware that the An registers which will be addressed by EXWORD_1 and are used for several addressing modes
             // are valid right after this state (because every address register manipulation requires no more than two clock cycles).
-            if (EW_ACK && EXT_WORD[8] && EXT_WORD[5:4] == 2'b11) begin // 32 bit displacement.
-                NEXT_FETCH_STATE = FETCH_D_HI;
-            end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[5:4] == 2'b10) begin // 16 bit displacement.
-                NEXT_FETCH_STATE = FETCH_D_LO;
-            end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[5:4] == 2'b00) begin // Reserved.
+            if (EW_ACK && EXT_WORD[8] && EXWORD_RESERVED) begin
+                // Abandon the effective address before any bd/od word is
+                // fetched; TRAP_ILLEGAL is raised in the same cycle.
                 NEXT_FETCH_STATE = START_OP;
-            end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[1:0] == 2'b11) begin
+            end else if (EW_SEEN && EXT_WORD[8] && !EXWORD_INDEX_READY) begin
+                // Wait, ADH: hold the extension word until the write to the
+                // index register retires, because leaving this state is what
+                // samples it. EW_RDY keeps EXT_WORD and the seen-flag stable
+                // across the stall, so the arms below still fire afterwards.
+                NEXT_FETCH_STATE = FETCH_EXWORD_1;
+            end else if (EW_SEEN && EXT_WORD[8] && EXT_WORD[5:4] == 2'b11) begin // 32 bit displacement.
+                NEXT_FETCH_STATE = FETCH_D_HI;
+            end else if (EW_SEEN && EXT_WORD[8] && EXT_WORD[5:4] == 2'b10) begin // 16 bit displacement.
+                NEXT_FETCH_STATE = FETCH_D_LO;
+            end else if (EW_SEEN && EXT_WORD[8] && EXT_WORD[1:0] == 2'b11) begin
                 NEXT_FETCH_STATE = FETCH_OD_HI; // Long outer displacement.
-            end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[1:0] == 2'b10) begin
+            end else if (EW_SEEN && EXT_WORD[8] && EXT_WORD[1:0] == 2'b10) begin
                 NEXT_FETCH_STATE = FETCH_OD_LO; // Word outer displacement.
-            end else if (EW_ACK && EXT_WORD[8] && EXT_WORD[1:0] == 2'b01) begin
+            end else if (EW_SEEN && EXT_WORD[8] && EXT_WORD[1:0] == 2'b01) begin
                 NEXT_FETCH_STATE = FETCH_MEMADR; // Null outer displacement, go to intermediate address.
             end else if (EW_SEEN) begin // Null displacement, no outer displacement.
                 case (OP)

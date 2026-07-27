@@ -161,6 +161,9 @@ assign AR_SEL_WR_1 = (OP == ADDQ || OP == SUBQ) ? BIW_0[2:0] :
                      (OP == LINK) ? BIW_0[2:0] :
                      IS_MOVEM ? MOVEM_RD_SEL :
                      (OP == MOVE_USP) ? BIW_0[2:0] :
+                     // Keyed on the fetch stage: AR_MARK_USED latches this selector at
+                     // the end of INIT_EXEC_WB, before PTEST reaches the writeback stage.
+                     (OP == PTEST) ? BIW_1[7:5] :
                      BIW_0[11:9]; // ADDA, EXG, LEA, MOVE, MOVEA, SUBA.
 
 assign AR_WR_1 = AR_WR_I;
@@ -176,7 +179,8 @@ assign AR_WR_I = (OP == LINK && FETCH_STATE == INIT_EXEC_WB && !ALU_BSY) ? 1'b1 
                  (OP_WB_I == MOVEA) ? 1'b1 :
                  (OP_WB_I == MOVEC && BIW_1_WB[15] && !BIW_0_WB[0]) ? 1'b1 : // To general register.
                  (OP_WB_I == MOVES && BIW_1_WB[15]) ? 1'b1 :
-                 (OP_WB_I == MOVEM && MOVEM_ADn_WB) ? 1'b1 : 1'b0;
+                 (OP_WB_I == MOVEM && MOVEM_ADn_WB) ? 1'b1 :
+                 (OP_WB_I == PTEST && BIW_1_WB[8]) ? 1'b1 : 1'b0; // Descriptor address to An.
 
 assign AR_SEL_RD_2 = (OP == CHK2 || OP == CMP2) ? BIW_1[14:12] :
                      IS_MOVEM ? MOVEM_RD_SEL : // This is the non addressing output.
@@ -218,7 +222,8 @@ always_comb begin
     case (OP)
         ABCD, ADD, ADDA, ADDI, ADDQ, ADDX, AND_B, ANDI, ASL, ASR, BCHG, BCLR, BSET, BTST, CHK, CMP, CMPA, CMPI,
         DIVS, DIVU, EOR, EORI, LSL, LSR, MOVE, MOVEA, MOVE_TO_CCR, MOVE_TO_SR, MOVES, MULS, MULU, NBCD, NEG, NEGX,
-        NOT_B, OR_B, ORI, ROTL, ROTR, ROXL, ROXR, SBCD, SUB, SUBA, SUBI, SUBQ, SUBX, TAS, TST:
+        NOT_B, OR_B, ORI, PACK, ROTL, ROTR, ROXL, ROXR, SBCD, SUB, SUBA, SUBI, SUBQ, SUBX, TAS, TST,
+        UNPK:
             AR_DEC_I = 1'b1;
         default:
             AR_DEC_I = 1'b0;
@@ -250,8 +255,8 @@ assign DR_SEL_RD_1 = (FETCH_STATE == FETCH_EXWORD_1) ? EXT_WORD[14:12] : // Inde
                      ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b000) ? BIW_0[2:0] :
                      ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b001) ? BIW_0[2:0] :
                      ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && FETCH_STATE == FETCH_ABS_LO) ? BIW_0[2:0] :
-                     (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? BIW_1[8:6] : // Width value.
-                     (OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) ? BIW_1[8:6] : // Width value.
+                     (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? BIW_1[8:6] : // Offset value.
+                     (OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) ? BIW_1[8:6] : // Offset value.
                      (OP == CAS) ? BIW_1[2:0] : // Compare operand.
                      (OP == CAS2 && FETCH_STATE == START_OP) ? BIW_1[14:12] : // Address operand.
                      (OP == CAS2 && FETCH_STATE == FETCH_OPERAND && !PHASE2) ? BIW_1[14:12] : // Address operand.
@@ -270,7 +275,10 @@ assign DR_SEL_RD_1 = (FETCH_STATE == FETCH_EXWORD_1) ? EXT_WORD[14:12] : // Inde
                      (OP == EXG && BIW_0[7:3] == 5'b10001) ? BIW_0[11:9] : // Data and address register.
                      (OP == DIVS || OP == DIVU || OP == EXG) ? BIW_0[2:0] :
                      (OP == MOVE || OP == MOVEA || OP == MOVE_TO_CCR || OP == MOVE_TO_SR || OP == MULS || OP == MULU || OP == PACK) ? BIW_0[2:0] :
-                     (OP == SBCD || OP == SUBA || OP == SUBX || OP == UNPK) ? BIW_0[2:0] : 3'b000;
+                     (OP == SBCD || OP == SUBA || OP == SUBX || OP == UNPK) ? BIW_0[2:0] :
+                     // FC-from-Dn operand form: PRM PFLUSH/PTEST FC field 01DDD
+                     // takes the function code from bits 2:0 of data register DDD.
+                     (OP == PFLUSH || OP == PLOAD || OP == PTEST) ? BIW_1[2:0] : 3'b000;
 
 assign DR_SEL_WR_1 = (OP == BFEXTS || OP == BFEXTU || OP == BFFFO) ? BIW_1[14:12] :
                      (OP == MOVEC || OP == MOVES) ? BIW_1[14:12] :
@@ -306,9 +314,30 @@ assign DR_SEL_RD_2 = (OP == ABCD || OP == SBCD || OP == ADDX || OP == SUBX) ? BI
                      ((OP == ADD || OP == AND_B || OP == OR_B || OP == SUB) && BIW_0[8]) ? BIW_0[2:0] :
                      (OP == ADD || OP == CMP || OP == SUB || OP == AND_B || OP == OR_B) ? BIW_0[11:9] :
                      (OP == CHK || OP == EXG) ? BIW_0[11:9] :
-                     (OP == BFINS && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b000) ? BIW_1[14:12] :
-                     (OP == BFINS && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b001) ? BIW_1[14:12] :
-                     (OP == BFINS && FETCH_STATE == FETCH_ABS_LO) ? BIW_1[14:12] :
+                     // BFINS needs three register values -- offset BIW_1[8:6] on
+                     // read port 1, width BIW_1[2:0] and insert BIW_1[14:12] --
+                     // and there are two ports.  Port 2 carries the insert value
+                     // only in the cycles in which it is loaded into the ALU, and
+                     // the width in every cycle in which BF_WIDTH is consumed
+                     // (BF_BYTES in START_OP and on the FETCH_OPERAND read
+                     // acknowledge, and the ALU parameter buffer at ALU_INIT in
+                     // INIT_EXEC_WB).  LOAD_OP1 in wf68k30L_ctrl_comb.sv is keyed
+                     // to exactly these two windows and the ALU's OP1_BUFFER is
+                     // the second phase's hold, so no extra register is needed.
+                     //
+                     // A register destination is decided in START_OP and executed
+                     // in INIT_EXEC_WB, so START_OP is the insert window there and
+                     // BF_BYTES takes its register-access constant in that state.
+                     (OP == BFINS && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b000) ? BIW_1[14:12] : // Insert value.
+                     // A memory destination is read in FETCH_OPERAND; the insert
+                     // window is the read itself, and the acknowledge cycle -- the
+                     // one that restores BF_BYTES -- is back on the width.
+                     (OP == BFINS && FETCH_STATE == FETCH_OPERAND && !RD_RDY) ? BIW_1[14:12] : // Insert value.
+                     (OP == BFINS) ? BIW_1[2:0] : // Width value.
+                     // All three states selected the same register; restricting it to
+                     // them left memory destinations reading whatever followed.
+                     (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? BIW_1[2:0] : // Width value.
+                     (OP == BFFFO || OP == BFSET || OP == BFTST) ? BIW_1[2:0] : // Width value.
                      (OP == CAS) ? BIW_1[8:6] : // Update operand.
                      (OP == CAS2 && !PHASE2) ? BIW_1[8:6] : // Update operand.
                      (OP == CAS2) ? BIW_2[8:6] : // Update operand.

@@ -8,20 +8,35 @@ originally written in VHDL by Wolfgang Foerster.
 - **main** — Original VHDL with minor fixes for GHDL/Yosys synthesis compatibility
 - **verilog** — Full SystemVerilog port, synthesizable with Yosys
 
-## Synthesis Results (ECP5 via `synth_ecp5`)
+## Synthesis Results
 
-| Resource   | VHDL   | SystemVerilog | Change |
-|------------|--------|---------------|--------|
-| LUT4       | 26,902 | 19,205        | -29%   |
-| TRELLIS_FF |  2,542 |  2,534        | -0.3%  |
-| CCU2C      |  3,039 |  1,640        | -46%   |
-| PFUMX      |  6,274 |  4,598        | -27%   |
-| L6MUX21    |  2,127 |  1,699        | -20%   |
-| MULT18X18D |      4 |      4        | same   |
+Current tree, plain `synth_ecp5` defaults over all of `sv/` (`bash
+synth/synth_check.sh`, which also checks these as a +/-10% regression tripwire):
 
-The SV port fits in an LFE5U-25F (~77% utilization) or larger. LUT reduction
-comes primarily from replacing VHDL for-loops with direct equality comparisons
-and bitwise mask operations, plus eliminating `async2sync` overhead.
+| Resource   | Count  |
+|------------|--------|
+| LUT4       | 40,544 |
+| TRELLIS_FF |  6,924 |
+| CCU2C      |  2,180 |
+| DP16KD     |     10 |
+| MULT18X18D |      5 |
+
+At ~40.5k LUT4 this no longer fits an LFE5U-25F; it needs an LFE5U-45F (43,848
+LUT4, so tight at ~92%) or an 85F. The older "19,205 LUT4 / fits a 25F" figure
+that used to appear here predates the MMU, cache and coprocessor subsystems and
+is not comparable -- those were added after it was measured, and they dominate
+the growth.
+
+Xilinx, for cross-checking portability (Vivado 2025.2.1, xc7a200tfbg484-2,
+`synth_design -flatten_hierarchy none`): 18,899 LUTs (14.0%) and 6,170
+registers (2.3%), with zero latches, zero combinational loops and zero
+multiply-driven nets. LUT counts are not comparable across vendors -- ECP5 LUT4
+versus Xilinx LUT6.
+
+The original VHDL-vs-SV comparison (26,902 -> 19,205 LUT4) applied to the
+pre-MMU core only. The reduction came from replacing VHDL for-loops with
+equality comparisons and bitwise mask operations, plus dropping `async2sync`
+overhead.
 
 Build commands (repo flow):
 
@@ -44,43 +59,75 @@ Baseline seed sweep command:
 
     ./synth/fpga/run_ecp5_seed_sweep.sh
 
-Representative baseline from 10 seeds (`build/rep_ecp5_seed_sweep_task3/results.csv`):
+### Xilinx KV260 (Kria K26, Zynq UltraScale+) — timing closes
+
+Default target of `synth/vivado/run_vivado.tcl`. Full place-and-route,
+`xck26-sfvc784-2LV-c`, 25 MHz constraint:
 
 | Metric | Value |
 |--------|-------|
-| Fmax min/med/max | 16.131 / 16.481 / 16.898 MHz |
-| TRELLIS_COMB | 18,689 (all 10 seeds) |
-| TRELLIS_FF | 2,522 (all 10 seeds) |
+| Fmax | **32.57 MHz (passes the 25 MHz target)** |
+| Worst negative slack | +9.300 ns |
+| Failing endpoints | 0 of 15,061 setup, 0 hold |
+| CLB LUTs | 17,322 / 117,120 (14.8%) |
+| CLB Registers | 5,924 / 234,240 (2.5%) |
+| Block RAM | 3 / 144 tiles (2.1%) |
+| Errors / inferred latches / DRC violations | 0 / 0 / 0 |
 
-Latest representative single-run log (`build/rep_ecp5/nextpnr.log`):
+Caveat: this is an out-of-context build with no pinout, so clock skew is not
+fully modelled (Vivado warns `HD.CLK_SRC` is unset). Treat the figure as
+indicative rather than board-final — a real KV260 design clocks the PL from the
+PS through the Zynq block rather than from a bare port.
+
+### Lattice ECP5 — timing does NOT close
+
+`./synth/fpga/run_ecp5_representative.sh`, LFE5U-85F CABGA381 speed 8, 25 MHz
+target, ABC9:
 
 | Metric | Value |
 |--------|-------|
-| LUT4 | 21,941 / 43,848 (50%) |
-| TRELLIS_COMB | 22,603 / 43,848 (51%) |
-| TRELLIS_FF | 2,487 / 43,848 (5%) |
-| Fmax @ 25 MHz target | 26.69 MHz (timing pass) |
+| TRELLIS_COMB | 46,225 / 83,640 (55%) |
+| TRELLIS_FF | 6,922 / 83,640 (8%) |
+| DP16KD | 10 / 208 (4%) |
+| MULT18X18D | 5 / 156 (3%) |
+| Fmax | **11.21 MHz — fails the 25 MHz target** |
 
-## Equivalence Validation
+The critical path runs from the decoded-opcode register (`I_OPCODE_DECODER.OP`)
+through the control module's combinational next-state logic to the `CIOUT`
+decision latch: **127 logic stages, about 89 ns**. The cache-inhibit decision
+therefore sits at the end of a deep cone containing the transparent-translation
+match, the ATC lookup and the function-code decode. That cone is what an ECP5
+build would need to pipeline; it is deliberately left alone because the KV260
+target clears its constraint by a third of a period, and pipelining it would be
+invasive for no benefit there.
 
-The `validation/` directory contains a co-simulation harness that compares
-the VHDL and SystemVerilog designs cycle-by-cycle. Both are synthesized to
-gate-level Verilog netlists via Yosys (VHDL through the GHDL plugin, SV
-natively), then driven with identical randomized bus stimulus in iverilog.
+The figures that used to appear here (21,941 LUT4, 26.69 MHz passing) predate the
+MMU, cache and coprocessor subsystems and are not comparable.
 
-Result: 50,000 cycles across 5 random seeds, 0 output mismatches.
+## Equivalence Checking (SV revision vs SV revision)
 
-**Important:** This validates equivalence to the original VHDL — it does not
-guarantee correctness to the MC68030 specification. The original design has
-not been verified against the Motorola programmer's manual or any known-good
-68030 emulator.
+    ./validation/run_equiv.sh [GOLD_REV] [CYCLES]
 
-Run with:
+Proves bounded sequential equivalence between a git revision (default `HEAD`)
+and the working tree, by elaborating both, building a miter and discharging it
+with Yosys's SAT engine. Exhaustive over all inputs within the bound, unlike a
+randomized testbench. Intended as a refactoring guard.
 
-    GHDL_PREFIX=/path/to/oss-cad-suite/lib/ghdl ./validation/run_equiv.sh
+Read the scope limits in the script before trusting a pass. In short: it detects
+*change*, not correctness, and the bound is small — 12 cycles from reset is
+barely one bus cycle, so it catches changes observable at the ports early and
+will not catch anything requiring an instruction to execute. Both directions are
+verified: tying `CIOUTn` low is caught, while forcing `TRAP_DIVZERO` low is not,
+because reaching a divide takes far longer than the bound. Roughly 60-75s at
+8-12 cycles, climbing steeply after.
 
-Detailed build requirements and local technical notes are kept in local
-workspace notes (not repository-tracked).
+**The former VHDL-vs-SV comparison is retired**, and the figure that used to
+appear here (50,000 cycles, 5 seeds, 0 mismatches) is withdrawn. It cannot be
+revived meaningfully: the SV top has MMU, cache and coprocessor subsystems the
+VHDL never had, so the port lists cannot correspond; and the July 2026 audit
+fixed a number of defects the SV had inherited faithfully from the VHDL, so the
+SV is now deliberately *not* equivalent to it in those places. See
+`notes/AUDIT_2026-07.md` and the BUG-R009/R014 amendment in `notes/BUGLIST.md`.
 
 ## Software Smoke Battery
 
@@ -123,7 +170,19 @@ Seeded randomized differential run (register-state check at epilogue):
 
 A bare-metal csmith flow is available for fuzz-style software smoke tests.
 Each seed builds a random C program with `csmith`, cross-compiles with
-`m68k-elf-gcc`, and runs in the cocotb harness until it writes the sentinel.
+`m68k-elf-gcc`, runs it in the cocotb harness, and **compares the program's
+checksum against `qemu-system-m68k -cpu m68030` running the identical binary**.
+
+That checksum comparison is the strongest end-to-end gate in the repo: it checks
+computed results on real compiler output, not just that the program terminated.
+It is also what caught the base-register-suppression defect that made every
+indexed array access read through the wrong address (see
+`notes/AUDIT_2026-07.md`) -- the core computed `0xFFFFFFFF` where QEMU computed
+`0x3FE75C61`, while every hand-written instruction test passed.
+
+Note the cycle budget: verifying the checksum costs real work, so the default is
+12M cycles per seed. A budget too low presents as "did not reach sentinel",
+which looks like a hang rather than the wrong answer it may actually be.
 
 Requirements:
 
@@ -142,7 +201,7 @@ When `CSMITH_CC_EXTRA_FLAGS` is unset, the csmith compile step defaults to
 Override seed selection or cycle budget:
 
     CSMITH_SEEDS=1-25 make test-csmith-smoke
-    CSMITH_SEEDS=3,7,19 CSMITH_MAX_CYCLES=800000 make test-csmith-smoke
+    CSMITH_SEEDS=3,7,19 CSMITH_MAX_CYCLES=12000000 make test-csmith-smoke
     CSMITH_CC_EXTRA_FLAGS='-fno-jump-tables' make test-csmith-smoke
 
 Run with jump tables enabled:
@@ -204,7 +263,7 @@ Default campaign scope:
 - Software torture campaign:
   `SHAKEOUT_CSMITH_SEEDS=1,4-10,12-17,19-23,25-32,34-37,39-59`,
   `SHAKEOUT_CSMITH_JUMP_SEEDS=1,4,7,10,13`,
-  `SHAKEOUT_CSMITH_MAX_CYCLES=800000`,
+  `SHAKEOUT_CSMITH_MAX_CYCLES=12000000`,
   `SHAKEOUT_COREMARK_OPTS=O0,O1,O2,Os`,
   `SHAKEOUT_COREMARK_REQUIRED_OPTS=` (empty => all from `SHAKEOUT_COREMARK_OPTS`),
   `SHAKEOUT_COREMARK_MAX_CYCLES=5000000`,
@@ -219,13 +278,30 @@ Example override:
 
 ## Formal Smoke
 
-Lightweight bounded formal checks are available for:
-
-- data-register hazard tracking
-- MMU runtime request gating during stall/fault windows
-- MMU walk-delay state transition safety
-
     make formal-smoke
+
+Checks:
+
+- **data-register file and hazard tracking** — bound to the real
+  `WF68K30L_DATA_REGISTERS`, writes enabled, proven by temporal induction.
+- **MMU runtime request gating** and **MMU walk-delay state transitions** —
+  these two harnesses re-implement the gating equations rather than
+  instantiating the RTL, so they check the intended contract and would not
+  catch an implementation divergence. Binding them to the real modules is
+  pending; the files say so at the top.
+
+`formal-smoke` depends on `formal-selftest`, which asserts false and requires
+FAILED. That guard exists because the flow was previously producing vacuous
+passes for everything: as of Yosys 0.62 an immediate `assert` becomes a
+`$check` cell and `write_smt2` emits nothing for it, so the SMT2 files
+contained zero assertions. `clk2fflogic; chformal -lower` fixes it.
+
+    make formal-deep
+
+Opt-in exhaustive register-file property (symbolic register index plus a 32-bit
+shadow). Kept separate because the UNSAT direction did not complete at depth 10
+under yices, boolector or bitwuzla, while counterexamples are still found in
+seconds.
 
 ## MMU Random Campaign
 
@@ -255,6 +331,12 @@ It is also included in `test-full`.
 ---
 
 ## Original README
+
+> Historical, and describing the **pre-fork** core: the MMU, caches and
+> coprocessor surface it says are absent have since been implemented, and the
+> RTE/SSW limitation it notes has been addressed. Kept verbatim for provenance.
+> See the top of this file and `notes/AUDIT_2026-07.md` for current behaviour.
+
 
 This is the top level structural design unit of the 68K30L complex instruction set (CISC) microcontroller. It's programming model is (hopefully) fully compatible with Motorola's MC68030. This core features a pipelined architecture. In comparision to the fully featured 68K30 the core has no MMU, no data and instruction cache and no coprocessor interface. This results in missing burstmodes which are not required due to lack of cache. Missing coprocessor operations are: cpBcc, cpDBcc, cpGEN, cpRESTORE, cpSAVE, cpScc, cpTRAPcc. Missing MMU operations are: PFLUSH, PLOAD, PMOVE and PTEST. The trap handler does not process the following exceptions which lack due to the missing MMU and coprocessor interface: PRE_EXC_CP, MID_EXC_CP, POST_EXC_CP, EXC_VECT_CP, MMU_CFG_ERR. The shifter in the 68K30 is a barrel shifter and in this core it is a conventional shift register controlled logic. This core features the loop operation mode of the 68010 to deal with DBcc loops. This feature is a predecessor to the MC68020/30/40 caches. The exception handler works for the RTE but without taking the SSW into account which is intended to restore from a defectice bus error stack frame.
 

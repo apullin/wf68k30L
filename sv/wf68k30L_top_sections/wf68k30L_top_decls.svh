@@ -79,6 +79,7 @@ logic        CAAR_WR;
 logic [31:0] CACR;
 logic        CACR_RD;
 logic        CACR_WR;
+logic        CACHE_INHIBIT_IN;
 logic        CPU_SPACE;
 logic        CPU_SPACE_EXH;
 logic [2:0]  DFC;
@@ -114,6 +115,7 @@ logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_V_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_B_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_W_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_M_FLAT;
+logic [MMU_ATC_SETS*MMU_ATC_WAYS-1:0] MMU_ATC_CI_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*3-1:0] MMU_ATC_FC_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_TAG_FLAT;
 logic [MMU_ATC_SETS*MMU_ATC_WAYS*32-1:0] MMU_ATC_PTAG_FLAT;
@@ -146,6 +148,8 @@ logic        DATA_RDY_BUSIF;
 logic        DATA_RDY_CACHE;
 logic        MMU_FAULT_DATA_ACK;
 logic        MMU_FAULT_OPCODE_ACK;
+logic        MMU_FAULT_SSW_VALID;
+logic [8:0]  MMU_FAULT_SSW;
 logic [31:0] DATA_TO_CORE;
 logic [31:0] DATA_TO_CORE_BUSIF;
 logic [31:0] DATA_TO_CORE_CACHE;
@@ -236,6 +240,19 @@ logic        PHASE2_MAIN;
 logic        PC_ADD_DISPL;
 logic [7:0]  PC_ADR_OFFSET;
 logic [3:0]  PC_EW_OFFSET;
+logic [3:0]  PC_EW_BASE;
+logic [31:0] PC_INSTR_EXH;   // PC frozen at exception entry (format $2 IA field).
+logic [31:0] PC_WB;          // PC of the instruction owning the writeback stage.
+logic        DATA_WR_PENDING; // Core data write outstanding in the previous cycle.
+logic [31:0] PC_BF;          // Instruction PC for a format $A/$B bus-fault frame.
+logic [31:0] ADR_BF;         // Address the faulted write cycle drove.
+logic        BF_IS_WRITE;    // The faulted access was a core data write.
+logic        PC_BF_FROZEN;   // PC_BF/ADR_BF hold the faulted access's owner.
+logic [31:0] PC_STACKED;     // PC written to the frame at offset $2.
+logic [31:0] ADR_STACKED;    // Fault address written to the frame at offset $10.
+logic        CYCLE_STERM_32; // Burst eligibility: 32-bit synchronous cycle.
+logic        STERM_NOW;
+logic        CBACK_HONOURED; // UM 6.1.3.2: CBACK only counts on a STERM cycle.
 logic        PC_INC;
 logic        PC_INC_EXH;
 logic        PC_INC_EXH_I;
@@ -259,6 +276,8 @@ logic        RESET_CPU;
 logic        RESET_IN;
 logic        RESET_STRB;
 logic        CIOUT_ASSERT;
+logic        CIOUT_ASSERT_NOW;
+logic        CIOUT_LATCH;
 logic        CBREQ_ASSERT;
 logic        CBREQ_REQ_NOW;
 logic        CBREQ_REQ_LATCH;
@@ -364,6 +383,7 @@ logic [31:0] MMU_RUNTIME_ATC_PTAG;
 logic        MMU_RUNTIME_ATC_B;
 logic        MMU_RUNTIME_ATC_W;
 logic        MMU_RUNTIME_ATC_M;
+logic        MMU_RUNTIME_ATC_CI;
 logic [31:0] MMU_ATC_FLUSH_COUNT;
 logic [2:0]  MMU_PTEST_FC;
 logic [2:0]  MMU_PTEST_LEVEL;
@@ -373,6 +393,7 @@ logic        MMU_PTEST_CONSUME;
 logic        MMU_PTEST_BUSY;
 logic        MMU_PTEST_READY;
 logic [15:0] MMU_PTEST_WALK_MMUSR;
+logic [31:0] MMU_PTEST_DESC_ADDR;
 logic        MMU_TWALK_START;
 logic        MMU_TWALK_BUSY;
 logic        MMU_TWALK_VALID;
@@ -402,6 +423,15 @@ logic [31:0] MMU_TWALK_FETCH_LO_WORD;
 logic [31:0] MMU_TWALK_FETCH_HI_WORD;
 logic        MMU_TWALK_FETCH_LO_VALID;
 logic        MMU_TWALK_FETCH_HI_VALID;
+// MMU table-search bus master (UM 9.5.2).
+logic        MMU_TWALK_BUS_RD;
+logic        MMU_TWALK_BUS_WR;
+logic        MMU_TWALK_BUS_ACTIVE;
+logic [31:0] MMU_TWALK_BUS_ADDR;
+logic [31:0] MMU_TWALK_BUS_DATA;
+logic        MMU_TWALK_RMC;
+logic [2:0]  MMU_TWALK_BUS_FC;
+logic        BUS_CYCLE_MMU_WALK;
 logic        UNMARK;
 logic        USE_APAIR;
 logic        USE_DFC;

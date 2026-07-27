@@ -14,6 +14,19 @@ localparam logic [31:0] CACR_RW_MASK = 32'h0000_3313; // WA,DBE,FD,ED,IBE,FI,EI
 localparam int ICACHE_LINES = 16;
 localparam int DCACHE_LINES = 16;
 
+// PLOAD table-search request/response between the MMU register file and the
+// runtime walk sequencer.
+logic        MMU_PLOAD_START;
+logic [2:0]  MMU_PLOAD_FC;
+logic [31:0] MMU_PLOAD_LOGICAL;
+logic        MMU_PLOAD_WRITE;
+logic        MMU_PLOAD_DONE;
+logic [35:0] MMU_PLOAD_RESULT;
+logic        MMU_PLOAD_REQ;
+logic        MMU_PLOAD_CONSUME;
+logic        MMU_PLOAD_BUSY;
+logic        MMU_PLOAD_READY;
+
 WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .CLK(CLK),
     .RESET_CPU(RESET_CPU),
@@ -30,6 +43,7 @@ WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .FC_I(FC_I),
     .MMU_TT0(MMU_TT0),
     .MMU_TT1(MMU_TT1),
+    .MMU_RUNTIME_ATC_CI(MMU_RUNTIME_ATC_CI),
     .FC_BUS_REQ(FC_BUS_REQ),
     .OPCODE_RDY_BUSIF(OPCODE_RDY_BUSIF),
     .DATA_RD_BUS(DATA_RD_BUS),
@@ -41,6 +55,13 @@ WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .DATA_VALID_BUSIF(DATA_VALID_BUSIF),
     .OPCODE_VALID_BUSIF(OPCODE_VALID_BUSIF),
     .BERRn(BERRn),
+    .CACHE_INHIBIT_IN(CACHE_INHIBIT_IN),
+    // UM 6.1.3.2 says CBACK counts only on a STERM-terminated cycle, and
+    // CBACK_HONOURED encodes that for the CBREQ pin. It is deliberately NOT
+    // applied here: this cache completes a line with background single cycles
+    // rather than a held-address burst, so qualifying the context on STERM
+    // disables line completion outright rather than making it faithful. Apply
+    // it in the same change that adds real streaming.
     .CBACKn(CBACKn),
     .BUS_CYCLE_BURST(BUS_CYCLE_BURST),
     .OPCODE_TO_CORE_BUSIF(OPCODE_TO_CORE_BUSIF),
@@ -354,6 +375,15 @@ assign MMU_PTEST_CONSUME = (OP_WB == PTEST) &&
                            (MMU_PTEST_LEVEL != 3'b000) &&
                            ALU_ACK;
 
+// PLOAD gets the same request/ready handshake PTEST has, so its table search
+// completes before the instruction retires (UM 9.8).
+assign MMU_PLOAD_REQ = (OP_WB == PLOAD) &&
+                       ALU_BSY &&
+                       ALU_REQ &&
+                       !MMU_PLOAD_BUSY &&
+                       !MMU_PLOAD_READY;
+assign MMU_PLOAD_CONSUME = (OP_WB == PLOAD) && ALU_ACK;
+
 WF68K30L_TOP_MMU_STATE #(
     .MMU_ATC_LINES(MMU_ATC_LINES),
     .MMU_ATC_WAYS(MMU_ATC_WAYS),
@@ -382,6 +412,7 @@ WF68K30L_TOP_MMU_STATE #(
     .MMU_RUNTIME_ATC_B(MMU_RUNTIME_ATC_B),
     .MMU_RUNTIME_ATC_W(MMU_RUNTIME_ATC_W),
     .MMU_RUNTIME_ATC_M(MMU_RUNTIME_ATC_M),
+    .MMU_RUNTIME_ATC_CI(MMU_RUNTIME_ATC_CI),
     .BIW_1(BIW_1),
     .DR_OUT_1(DR_OUT_1),
     .SFC(SFC),
@@ -389,6 +420,16 @@ WF68K30L_TOP_MMU_STATE #(
     .ADR_EFF(ADR_EFF),
     .PTEST_WALK_START(MMU_PTEST_START),
     .PTEST_WALK_MMUSR(MMU_PTEST_WALK_MMUSR),
+    .MMU_PLOAD_DONE(MMU_PLOAD_DONE),
+    .MMU_PLOAD_RESULT(MMU_PLOAD_RESULT),
+    .MMU_PLOAD_REQ(MMU_PLOAD_REQ),
+    .MMU_PLOAD_CONSUME(MMU_PLOAD_CONSUME),
+    .MMU_PLOAD_BUSY(MMU_PLOAD_BUSY),
+    .MMU_PLOAD_READY(MMU_PLOAD_READY),
+    .MMU_PLOAD_START(MMU_PLOAD_START),
+    .MMU_PLOAD_FC(MMU_PLOAD_FC),
+    .MMU_PLOAD_LOGICAL(MMU_PLOAD_LOGICAL),
+    .MMU_PLOAD_WRITE(MMU_PLOAD_WRITE),
     .MMU_SRP(MMU_SRP),
     .MMU_CRP(MMU_CRP),
     .MMU_TC(MMU_TC),
@@ -401,6 +442,7 @@ WF68K30L_TOP_MMU_STATE #(
     .MMU_ATC_B_FLAT(MMU_ATC_B_FLAT),
     .MMU_ATC_W_FLAT(MMU_ATC_W_FLAT),
     .MMU_ATC_M_FLAT(MMU_ATC_M_FLAT),
+    .MMU_ATC_CI_FLAT(MMU_ATC_CI_FLAT),
     .MMU_ATC_FC_FLAT(MMU_ATC_FC_FLAT),
     .MMU_ATC_TAG_FLAT(MMU_ATC_TAG_FLAT),
     .MMU_ATC_PTAG_FLAT(MMU_ATC_PTAG_FLAT)
