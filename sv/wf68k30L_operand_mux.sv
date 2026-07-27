@@ -450,13 +450,13 @@ assign ALU_OP3_IN = ((OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU
 
 // The bit field offset is bit-wise.
 assign BF_OFFSET = !BIW_1[11] ? {24'h0, 3'b000, BIW_1[10:6]} : DR_OUT_1;
-// A register width comes from port 2, whose selector is the width register field.
-// BFINS is the exception: port 2 carries its insert value, so a register width
-// there still reads the offset register (see notes/AUDIT_2026-07.md).
-wire [31:0] BF_WIDTH_REG = (OP == BFINS) ? DR_OUT_1 : DR_OUT_2;
-
+// A register width always comes from port 2, whose selector is the width
+// register field BIW_1[2:0].  BFINS shares that port with its insert value:
+// wf68k30L_ctrl_regsel.sv keeps the width selected in every cycle in which
+// BF_WIDTH is consumed and switches to the insert register only while LOAD_OP1
+// captures it into the ALU's OP1_BUFFER.
 assign BF_WIDTH = (BIW_1[4:0] != 5'b00000 && !BIW_1[5]) ? {1'b0, BIW_1[4:0]} :
-                   (BF_WIDTH_REG[4:0] != 5'b00000 && BIW_1[5]) ? {1'b0, BF_WIDTH_REG[4:0]} : 6'b100000;
+                   (DR_OUT_2[4:0] != 5'b00000 && BIW_1[5]) ? {1'b0, DR_OUT_2[4:0]} : 6'b100000;
 
 // BITPOS spans 0-31 for register direct mode, modulo-8 for memory mode.
 // For bit field operations in memory, values are 0-7 (byte-aligned loads).

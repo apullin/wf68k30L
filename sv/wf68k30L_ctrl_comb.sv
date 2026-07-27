@@ -376,7 +376,16 @@ assign STORE_IDATA_B1 = (FETCH_STATE == FETCH_IDATA_B1 && EW_ACK) ? 1'b1 : 1'b0;
 // LOAD_OP1 / LOAD_OP2 / LOAD_OP3
 // ====================================================================
 
-assign LOAD_OP1 = (OP == BFINS && INIT_ENTRY) ? 1'b1 : // Load insertion pattern.
+// Load the BFINS insertion pattern while read port 2 selects it; see the BFINS
+// arms of DR_SEL_RD_2 in wf68k30L_ctrl_regsel.sv.  A register destination is
+// decided in START_OP, so INIT_ENTRY is inside the insert window there.  A
+// memory destination reads its operand in FETCH_OPERAND, whose acknowledge
+// cycle needs port 2 back on the width register to restore BF_BYTES, so the
+// pattern is loaded during the read instead -- OP1_BUFFER holds it until
+// ALU_INIT.  RD_RDY cannot be asserted on the first FETCH_OPERAND cycle
+// (READ_CYCLE is registered from DATA_RD), so the window is never empty.
+assign LOAD_OP1 = (OP == BFINS && BIW_0[5:3] == 3'b000 && INIT_ENTRY) ? 1'b1 : // Load insertion pattern.
+                  (OP == BFINS && FETCH_STATE == FETCH_OPERAND && !RD_RDY) ? 1'b1 : // Load insertion pattern.
                   ((OP == CHK2 || OP == CMP2) && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && !PHASE2) ? 1'b1 :
                   (OP == CMPM && FETCH_STATE == FETCH_OPERAND && RD_RDY && DATA_VALID && PHASE2) ? 1'b1 :
                   (OP == MOVE && BIW_0[8:6] == 3'b100 && BIW_0[5:3] == 3'b001 && BIW_0[11:9] == BIW_0[2:0] && INIT_ENTRY) ? 1'b1 : // Load early to write the undecremented Register for Ax, -(Ax).

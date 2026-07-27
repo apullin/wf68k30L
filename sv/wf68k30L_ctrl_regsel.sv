@@ -314,9 +314,28 @@ assign DR_SEL_RD_2 = (OP == ABCD || OP == SBCD || OP == ADDX || OP == SUBX) ? BI
                      ((OP == ADD || OP == AND_B || OP == OR_B || OP == SUB) && BIW_0[8]) ? BIW_0[2:0] :
                      (OP == ADD || OP == CMP || OP == SUB || OP == AND_B || OP == OR_B) ? BIW_0[11:9] :
                      (OP == CHK || OP == EXG) ? BIW_0[11:9] :
+                     // BFINS needs three register values -- offset BIW_1[8:6] on
+                     // read port 1, width BIW_1[2:0] and insert BIW_1[14:12] --
+                     // and there are two ports.  Port 2 carries the insert value
+                     // only in the cycles in which it is loaded into the ALU, and
+                     // the width in every cycle in which BF_WIDTH is consumed
+                     // (BF_BYTES in START_OP and on the FETCH_OPERAND read
+                     // acknowledge, and the ALU parameter buffer at ALU_INIT in
+                     // INIT_EXEC_WB).  LOAD_OP1 in wf68k30L_ctrl_comb.sv is keyed
+                     // to exactly these two windows and the ALU's OP1_BUFFER is
+                     // the second phase's hold, so no extra register is needed.
+                     //
+                     // A register destination is decided in START_OP and executed
+                     // in INIT_EXEC_WB, so START_OP is the insert window there and
+                     // BF_BYTES takes its register-access constant in that state.
+                     (OP == BFINS && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b000) ? BIW_1[14:12] : // Insert value.
+                     // A memory destination is read in FETCH_OPERAND; the insert
+                     // window is the read itself, and the acknowledge cycle -- the
+                     // one that restores BF_BYTES -- is back on the width.
+                     (OP == BFINS && FETCH_STATE == FETCH_OPERAND && !RD_RDY) ? BIW_1[14:12] : // Insert value.
+                     (OP == BFINS) ? BIW_1[2:0] : // Width value.
                      // All three states selected the same register; restricting it to
                      // them left memory destinations reading whatever followed.
-                     (OP == BFINS) ? BIW_1[14:12] : // Insert value.
                      (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? BIW_1[2:0] : // Width value.
                      (OP == BFFFO || OP == BFSET || OP == BFTST) ? BIW_1[2:0] : // Width value.
                      (OP == CAS) ? BIW_1[8:6] : // Update operand.
