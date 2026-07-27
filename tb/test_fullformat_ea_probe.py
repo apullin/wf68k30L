@@ -20,6 +20,28 @@ instruction test still passes.
 The cases below publish both the computed address (via MOVE.L A1,Dn) and the
 longword loaded through it, and pair each full-format case with a brief-format
 control that must produce the same address.
+
+Two further defects in this addressing form are known and NOT covered here,
+because a test for either would fail today:
+
+  - Base register suppression (BS = 1) is ignored unless the effective address
+    is memory indirect: wf68k30L_address_registers.sv only forces the base mux
+    to zero when FETCH_MEM_ADR is asserted, which happens solely in the
+    FETCH_MEMADR state. The suppressed-base cases below therefore have to set
+    A0 = 0 by hand, and real compiled code that leaves a live value in the base
+    register reads through a wrong address. This is why the csmith checksum
+    gate is still red: gcc emits `lea @(bd,%d0:l:4),%a1` with BS = 1 while %a0
+    holds something else.
+  - Index suppression (IS = 1) is also ignored: I_S_IS 4'b1000 still adds
+    index_scaled_comb, so `(bd,An)` written in full format picks up a stray
+    index term.
+
+  - A memory indirect effective address whose index register is written by the
+    immediately preceding instruction still computes the wrong address, even
+    with the index interlock in place, because FETCH_MEMADR issues its
+    intermediate read before the intermediate address is valid. Reproducer:
+    the program in test_fullformat_memory_indirect_outer_displacement with
+    moveq/lsr in place of the settled moveq #3,D2.
 """
 
 import cocotb
@@ -29,9 +51,11 @@ from m68k_encode import (
     LONG,
     DN,
     AN,
+    AN_IDX,
     SPECIAL,
     IMMEDIATE,
     imm_long,
+    imm_word,
     lsr,
     move,
     move_to_abs_long,
@@ -230,6 +254,201 @@ async def test_fullformat_index_written_by_previous_instruction(dut):
     assert tight_val == TABLE_VALUE and spaced_val == TABLE_VALUE, (
         f"Loads through the EA returned tight=0x{tight_val:08X} "
         f"spaced=0x{spaced_val:08X}, expected 0x{TABLE_VALUE:08X}"
+    )
+
+
+def _shift_index_into_d2():
+    """D2 = 3, produced by the instruction immediately before the EA."""
+    return [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(INDEX << 24),                    # D2 = 0x03000000
+        *moveq(24, 3),
+        *lsr(LONG, 3, 2, ir=1),                    # D2 = 3, immediately before
+    ]
+
+
+@cocotb.test()
+async def test_fullformat_word_displacement_index_hazard(dut):
+    """A word base displacement takes a different exit than the long one.
+
+    FETCH_EXWORD_1 leaves straight for FETCH_D_LO when BD SIZE = 10, skipping
+    the FETCH_D_HI state the long-displacement cases pass through, so the
+    interlock has to cover that arm as well.
+    """
+    h = CPUTestHarness(dut)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),       # A0 = 0x00010000
+        *imm_long(CPUTestHarness.DATA_BASE),
+        *_shift_index_into_d2(),
+        # LEA (0x0340.W,A0,D2.L*4),A1 -- full format, word bd, base present
+        0x43F0, 0x2D20, TABLE_BASE - CPUTestHarness.DATA_BASE,
+        *_publish(h, 0),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(TABLE_BASE + INDEX * 4, TABLE_VALUE)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+    got_ea = h.read_result_long(0)
+    got_val = h.read_result_long(4)
+    h.cleanup()
+
+    expect_ea = TABLE_BASE + INDEX * 4
+    assert got_ea == expect_ea, (
+        f"LEA (0x0340.W,A0,D2.L*4),A1 with D2 written by the previous "
+        f"instruction computed 0x{got_ea:08X}, expected 0x{expect_ea:08X}"
+    )
+    assert got_val == TABLE_VALUE, (
+        f"Load through it returned 0x{got_val:08X}, expected 0x{TABLE_VALUE:08X}"
+    )
+
+
+@cocotb.test()
+async def test_fullformat_memory_indirect_outer_displacement(dut):
+    """Preindexed memory indirect with a null base displacement.
+
+    A null bd with a non-null I/IS leaves FETCH_EXWORD_1 for FETCH_OD_LO or
+    FETCH_MEMADR directly, without passing through either base-displacement
+    state. Those exits are on the same interlocked path as the displacement
+    ones, so they need coverage that they still resolve.
+
+    The index is set well before the EA here on purpose: with the index written
+    by the *immediately* preceding instruction, this form computes the wrong
+    address both before and after the index interlock, because the intermediate
+    fetch in FETCH_MEMADR issues its read before the intermediate address is
+    valid. That is a separate defect from the index hazard; see the module
+    docstring.
+
+        LEA ([A0,D2.L*4],4),A1   -> A1 = mem[A0 + D2*4] + 4
+        LEA ([A0,D2.L*4]),A1     -> A1 = mem[A0 + D2*4]
+    """
+    h = CPUTestHarness(dut)
+    ptr_table = TABLE_BASE
+    target = CPUTestHarness.DATA_BASE + 0x800
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),       # A0 = ptr_table
+        *imm_long(ptr_table),
+        *moveq(INDEX, 2),                          # D2 = 3, settled
+        *nop(), *nop(), *nop(), *nop(),
+        # LEA ([A0,D2.L*4],4),A1 -- null bd, preindexed, word outer displacement
+        0x43F0, 0x2D12, *imm_word(4),
+        *_publish(h, 0),
+        # LEA ([A0,D2.L*4]),A1 -- null bd, preindexed, null outer displacement
+        0x43F0, 0x2D11,
+        *_publish(h, 8, an_to_dn=5),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(ptr_table + INDEX * 4, target)
+    h.mem.load_long(target + 4, TABLE_VALUE)
+    h.mem.load_long(target, TABLE_VALUE)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+    od_ea = h.read_result_long(0)
+    od_val = h.read_result_long(4)
+    null_ea = h.read_result_long(8)
+    null_val = h.read_result_long(12)
+    h.cleanup()
+
+    assert od_ea == target + 4, (
+        f"LEA ([A0,D2.L*4],4),A1 computed 0x{od_ea:08X}, expected "
+        f"0x{target + 4:08X} (mem[0x{ptr_table + INDEX * 4:08X}] + 4)"
+    )
+    assert null_ea == target, (
+        f"LEA ([A0,D2.L*4]),A1 computed 0x{null_ea:08X}, expected 0x{target:08X}"
+    )
+    assert od_val == TABLE_VALUE and null_val == TABLE_VALUE, (
+        f"Loads through the EAs returned od=0x{od_val:08X} null=0x{null_val:08X}, "
+        f"expected 0x{TABLE_VALUE:08X}"
+    )
+
+
+@cocotb.test()
+async def test_fullformat_destination_index_hazard(dut):
+    """The EA is the MOVE *destination*, reached in the second fetch phase.
+
+    A MOVE destination re-enters FETCH_EXWORD_1 from INIT_EXEC_WB rather than
+    from START_OP, so it is a separate entry into the interlocked state.
+
+        MOVE.L D5,(0x00010340,D2.L*4)
+    """
+    h = CPUTestHarness(dut)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),       # A0 = 0 (base, suppressed)
+        *imm_long(0x00000000),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 5),
+        *imm_long(TABLE_VALUE),                    # D5 = payload
+        *_shift_index_into_d2(),
+        # MOVE.L D5,(bd.L,D2.L*4) -- full format destination, base suppressed
+        *move(LONG, DN, 5, AN_IDX, 0),
+        0x2DB0, (TABLE_BASE >> 16) & 0xFFFF, TABLE_BASE & 0xFFFF,
+        # Read the written longword back through a plain (An).
+        *movea(LONG, SPECIAL, IMMEDIATE, 4),
+        *imm_long(TABLE_BASE + INDEX * 4),
+        *move(LONG, 2, 4, DN, 0),                  # MOVE.L (A4),D0
+        *move_to_abs_long(LONG, DN, 0, h.RESULT_BASE),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached"
+    got = h.read_result_long(0)
+    h.cleanup()
+
+    assert got == TABLE_VALUE, (
+        f"MOVE.L D5,(0x{TABLE_BASE:08X},D2.L*4) with D2 written by the "
+        f"previous instruction left 0x{got:08X} at "
+        f"0x{TABLE_BASE + INDEX * 4:08X}, expected 0x{TABLE_VALUE:08X}"
+    )
+
+
+@cocotb.test()
+async def test_fullformat_an_index_ignores_pending_dn_write(dut):
+    """An An index must not wait on a data register write.
+
+    D/A = 1 makes the index field name A2, not D2, so the pending write to D2
+    is irrelevant here. This bounds the interlock from the other side: one that
+    keyed on the register *number* rather than on D/A would stall for no reason,
+    and one that waited on something the writeback pipeline never clears would
+    hang instead of retiring.
+
+        LEA (0x0340.L,A0,A2.L*4),A1
+    """
+    h = CPUTestHarness(dut)
+
+    program = [
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),       # A0 = 0x00010000
+        *imm_long(CPUTestHarness.DATA_BASE),
+        *movea(LONG, SPECIAL, IMMEDIATE, 2),       # A2 = 3 (the index)
+        *imm_long(INDEX),
+        *_shift_index_into_d2(),                   # D2 = 3, must be ignored
+        # LEA (0x0340.L,A0,A2.L*4),A1 -- full format, long bd, An index
+        0x43F0, 0xAD30, 0x0000, TABLE_BASE - CPUTestHarness.DATA_BASE,
+        *_publish(h, 0),
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    h.mem.load_long(TABLE_BASE + INDEX * 4, TABLE_VALUE)
+    found = await h.run_until_sentinel(max_cycles=8000)
+    assert found, "Sentinel not reached (An-index full format hung)"
+    got_ea = h.read_result_long(0)
+    got_val = h.read_result_long(4)
+    h.cleanup()
+
+    expect_ea = TABLE_BASE + INDEX * 4
+    assert got_ea == expect_ea, (
+        f"LEA (0x0340.L,A0,A2.L*4),A1 computed 0x{got_ea:08X}, expected "
+        f"0x{expect_ea:08X} (the An index must come from A2, not D2)"
+    )
+    assert got_val == TABLE_VALUE, (
+        f"Load through it returned 0x{got_val:08X}, expected 0x{TABLE_VALUE:08X}"
     )
 
 
