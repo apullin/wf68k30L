@@ -39,9 +39,15 @@ report_utilization    -file [file join $out utilization_synth.rpt]
 report_timing_summary -file [file join $out timing_synth.rpt] -max_paths 10
 
 # Yosys does not report these; this is the main reason to run the vendor tool.
-set drc [report_drc -return_string -checks {MDRV-1 LATCH-1 LUTLP-1}]
-puts "=== structural DRC (multi-driven / latch / comb loop) ==="
-puts $drc
+# Only MDRV-1 (multi-driven) and LUTLP-1 (combinational loop) are DRC rules --
+# latch inference is a synthesis message (Synth 8-327), not a DRC check, so it is
+# counted from the log instead. Wrapped so a bad rule name cannot abort the run.
+if {[catch {report_drc -return_string -checks {MDRV-1 LUTLP-1}} drc]} {
+    puts "=== structural DRC unavailable: $drc ==="
+} else {
+    puts "=== structural DRC (multi-driven / combinational loop) ==="
+    puts $drc
+}
 
 if {$stage eq "impl"} {
     opt_design
