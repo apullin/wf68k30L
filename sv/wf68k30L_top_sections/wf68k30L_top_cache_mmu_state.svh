@@ -53,6 +53,12 @@ WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
     .OPCODE_VALID_BUSIF(OPCODE_VALID_BUSIF),
     .BERRn(BERRn),
     .CACHE_INHIBIT_IN(CACHE_INHIBIT_IN),
+    // UM 6.1.3.2 says CBACK counts only on a STERM-terminated cycle, and
+    // CBACK_HONOURED encodes that for the CBREQ pin. It is deliberately NOT
+    // applied here: this cache completes a line with background single cycles
+    // rather than a held-address burst, so qualifying the context on STERM
+    // disables line completion outright rather than making it faithful. Apply
+    // it in the same change that adds real streaming.
     .CBACKn(CBACKn),
     .BUS_CYCLE_BURST(BUS_CYCLE_BURST),
     .OPCODE_TO_CORE_BUSIF(OPCODE_TO_CORE_BUSIF),

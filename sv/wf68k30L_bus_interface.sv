@@ -136,6 +136,9 @@ logic               WAITSTATES;
 logic [31:0]        WP_BUFFER;
 logic               WRITE_ACCESS;
 logic [2:0]         SIZE_RESTORE;
+logic [2:0]         SIZE_STEP;
+logic [2:0]         SIZE_REMAIN;
+logic               LAST_SUB_CYCLE;
 logic               RDY_ARMED;
 logic               SLICE_S0_TO_S4;
 logic               SLICE_S1_TO_S5;
@@ -181,7 +184,7 @@ end
 // BERRn, which is the same edge the terminating sub-cycle leaves DATA_C1C4 on.
 // That cycle therefore has to qualify the negedge sample directly. When the
 // fault is a retry, BUS_CYC_RDY is already suppressed, so this stays clear.
-assign BUS_FLT_ANY = BUS_FLT || (BUS_CYC_RDY && SIZE_N == 3'b000 && BUS_FLT_VAR);
+assign BUS_FLT_ANY = BUS_FLT || (BUS_CYC_RDY && LAST_SUB_CYCLE && BUS_FLT_VAR);
 
 // ---- Access type tracking ----
 // Latches which type of access (read/write/opcode) is active during a bus cycle.
@@ -199,7 +202,7 @@ always_ff @(posedge CLK) begin : access_type
         READ_ACCESS <= 1'b0;
         WRITE_ACCESS <= 1'b0;
         OPCODE_ACCESS <= 1'b0;
-    end else if (BUS_CTRL_STATE == DATA_C1C4 && NEXT_BUS_CTRL_STATE == BUS_IDLE && SIZE_N == 3'b000) begin
+    end else if (BUS_CTRL_STATE == DATA_C1C4 && NEXT_BUS_CTRL_STATE == BUS_IDLE && LAST_SUB_CYCLE) begin
         READ_ACCESS <= 1'b0;
         WRITE_ACCESS <= 1'b0;
         OPCODE_ACCESS <= 1'b0;
@@ -289,6 +292,42 @@ assign BUS_WIDTH = (DSACKn == 2'b01 || DSACK_MEM == 2'b01) ? BW_WORD :
 
 assign BUS_BSY = (BUS_CTRL_STATE != BUS_IDLE);
 
+// ---- Bytes moved by the sub-cycle in flight ----
+// UM 7.2.1 / Tables 7-4 and 7-5: a sub-cycle transfers the bytes between the
+// lane selected by A1:A0 and the end of the responding port, so the step is a
+// function of the port width and the current address only. SIZE_REMAIN is what
+// is left of the operand once this sub-cycle has been acknowledged; it
+// saturates at zero rather than wrapping, so a spurious decrement cannot turn
+// a finished transfer into a seven-byte one.
+always_comb begin : size_step_calc
+    case (BUS_WIDTH)
+        LONG_32: begin
+            case (ADR_OUT_I[1:0])
+                2'b01:   SIZE_STEP = 3'b011;
+                2'b10:   SIZE_STEP = 3'b010;
+                2'b11:   SIZE_STEP = 3'b001;
+                default: SIZE_STEP = 3'b100;
+            endcase
+        end
+        BW_WORD: begin
+            case (ADR_OUT_I[1:0])
+                2'b01, 2'b11: SIZE_STEP = 3'b001;
+                default:      SIZE_STEP = 3'b010;
+            endcase
+        end
+        default: SIZE_STEP = 3'b001; // BW_BYTE.
+    endcase
+end
+
+assign SIZE_REMAIN = (SIZE_N > SIZE_STEP) ? (SIZE_N - SIZE_STEP) : 3'b000;
+
+// A synchronous cycle is acknowledged on the same rising edge that advances
+// SIZE_N, so the end-of-transfer test cannot read the register there: it would
+// see the count from before this sub-cycle. At S3 the post-decrement value is
+// the one that decides, everywhere else SIZE_N is already up to date (an
+// asynchronous cycle advances the count at S3 but completes at S5).
+assign LAST_SUB_CYCLE = (T_SLICE == S3) ? (SIZE_REMAIN == 3'b000) : (SIZE_N == 3'b000);
+
 // ---- Transfer size partitioning ----
 // Tracks remaining bytes to transfer across multiple bus cycles when the
 // port width is narrower than the operand size. SIZE_N counts down to zero.
@@ -314,30 +353,16 @@ always_ff @(posedge CLK) begin : partitioning
         end
     end
 
-    // Decrement remaining size based on how many bytes this cycle transferred.
+    // Advance the remaining size once per acknowledged sub-cycle. S3 is where
+    // both terminations are recognised: DSACKx drops WAITSTATES there, and so
+    // does STERM. Counting at S1 as well -- which a synchronous cycle reaches
+    // with STERM already valid -- decremented twice per STERM cycle, and the
+    // second sub-cycle of a misaligned synchronous transfer then ran with
+    // SIZE = 00 and overwrote the operand with a full long word.
     if (RETRY) begin
         SIZE_N <= SIZE_RESTORE;
-    end else if (BUS_CTRL_STATE == DATA_C1C4 && ((T_SLICE == S1 && !STERMn) || (T_SLICE == S3 && !WAITSTATES))) begin
-        if (BUS_WIDTH == LONG_32 && SIZE_N > 3'd3 && ADR_OUT_I[1:0] == 2'b01)
-            SIZE_N <= SIZE_N - 3'b011;
-        else if (BUS_WIDTH == LONG_32 && SIZE_N > 3'd2 && ADR_OUT_I[1:0] == 2'b10)
-            SIZE_N <= SIZE_N - 3'b010;
-        else if (BUS_WIDTH == LONG_32 && SIZE_N > 3'd1 && ADR_OUT_I[1:0] == 2'b11)
-            SIZE_N <= SIZE_N - 3'b001;
-        else if (BUS_WIDTH == LONG_32)
-            SIZE_N <= 3'b000;
-        //
-        else if (BUS_WIDTH == BW_WORD && ADR_OUT_I[1:0] == 2'b11)
-            SIZE_N <= SIZE_N - 3'b001;
-        else if (BUS_WIDTH == BW_WORD && ADR_OUT_I[1:0] == 2'b01)
-            SIZE_N <= SIZE_N - 3'b001;
-        else if (BUS_WIDTH == BW_WORD && SIZE_N == 3'b001)
-            SIZE_N <= SIZE_N - 3'b001;
-        else if (BUS_WIDTH == BW_WORD)
-            SIZE_N <= SIZE_N - 3'b010;
-        //
-        else if (BUS_WIDTH == BW_BYTE)
-            SIZE_N <= SIZE_N - 3'b001;
+    end else if (BUS_CTRL_STATE == DATA_C1C4 && T_SLICE == S3 && !WAITSTATES) begin
+        SIZE_N <= SIZE_REMAIN;
     end
 
     if (BUS_FLT && HALT_In) begin // Abort bus cycle on unrecoverable fault.
@@ -391,7 +416,7 @@ always_comb begin : bus_ctrl_dec
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
         end
         DATA_C1C4: begin
-            if (BUS_CYC_RDY && SIZE_N == 3'b000)
+            if (BUS_CYC_RDY && LAST_SUB_CYCLE)
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
             else
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
@@ -611,24 +636,24 @@ always_ff @(posedge CLK) begin : prefetch_buffers
     // Opcode cycle complete:
     if (AERR_I)
         OPCODE_RDY_I <= 1'b1;
-    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY && SIZE_N == 3'b000) begin
+    else if (OPCODE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY && LAST_SUB_CYCLE) begin
         OBUFFER <= DATA_INMUX[15:0];
         OPCODE_RDY_I <= RDY_ARMED;
     end
 
     // Data cycle complete:
-    if (WRITE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY && SIZE_N == 3'b000) begin
+    if (WRITE_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY && LAST_SUB_CYCLE) begin
         DATA_RDY_I <= RDY_ARMED;
     end else if (READ_ACCESS && BUS_CTRL_STATE == DATA_C1C4 && BUS_CYC_RDY) begin
         case (OP_SIZE)
             LONG: begin
-                if (SIZE_N == 3'b000) begin
+                if (LAST_SUB_CYCLE) begin
                     DBUFFER <= DATA_INMUX;
                     DATA_RDY_I <= RDY_ARMED;
                 end
             end
             WORD: begin
-                if (SIZE_N == 3'b000) begin
+                if (LAST_SUB_CYCLE) begin
                     DBUFFER <= {16'h0, DATA_INMUX[15:0]};
                     DATA_RDY_I <= RDY_ARMED;
                 end

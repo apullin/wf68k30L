@@ -239,7 +239,10 @@ logic        PC_ADD_DISPL;
 logic [7:0]  PC_ADR_OFFSET;
 logic [3:0]  PC_EW_OFFSET;
 logic [3:0]  PC_EW_BASE;
-logic [31:0] PC_INSTR_EXH;   // PC frozen at exception entry (format $2 IA field).
+logic [31:0] PC_INSTR_EXH;
+logic        CYCLE_STERM_32;   // Burst eligibility: 32-bit synchronous cycle.
+logic        STERM_NOW;
+logic        CBACK_HONOURED;   // UM 6.1.3.2: CBACK only counts on a STERM cycle.   // PC frozen at exception entry (format $2 IA field).
 logic        PC_INC;
 logic        PC_INC_EXH;
 logic        PC_INC_EXH_I;

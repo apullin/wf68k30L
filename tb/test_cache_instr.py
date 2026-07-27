@@ -11,8 +11,10 @@ Coverage in this phase:
 """
 
 import cocotb
-from cocotb.triggers import RisingEdge
+from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge, ClockCycles
 
+from bus_model import BusModel
 from cpu_harness import CPUTestHarness
 from m68k_encode import (
     BYTE,
@@ -23,6 +25,7 @@ from m68k_encode import (
     AN_IND,
     SPECIAL,
     IMMEDIATE,
+    cas,
     move,
     moveq,
     nop,
@@ -1870,5 +1873,389 @@ async def test_ciin_prevents_icache_fill(dut):
     assert h.mem.read(res1, 4) == 0, "Loop-2 counter did not terminate at zero"
     assert loop2_fetches >= loop1_fetches, (
         f"CIIN-marked prefetches were cached anyway: loop1={loop1_fetches}, loop2={loop2_fetches}"
+    )
+    h.cleanup()
+
+
+# ===================================================================
+# Burst handshake -- UM 6.1.3.2 / 7.3.7
+# ===================================================================
+#
+# UM 7.3.7: "The MC68030 allows burst filling only from 32-bit ports that
+# terminate bus cycles with STERM and respond to CBREQ by asserting CBACK. When
+# the MC68030 recognizes STERM and CBACK and it has asserted CBREQ, it maintains
+# AS, DS, R/W, A0-A31, FC0-FC2, SIZ0-SIZ1 in their current state throughout the
+# burst operation. The processor continues to accept data on every clock during
+# which STERM is asserted until the burst is complete or an abnormal termination
+# occurs." UM 6.1.3.2 adds: "The MC68030 ignores the assertion of CBACK during
+# cycles terminated with DSACKx."
+#
+# The address-held streaming engine that second sentence describes is not built:
+# see the skipped tests at the end of this section for exactly what is missing.
+# What is enforced here is the qualification -- which acknowledges the model may
+# honour at all -- and that no burst is requested inside an RMC sequence.
+
+BURST_DATA_CACR = 0x0000_1100  # DBE, ED
+BURST_ALL_CACR = 0x0000_1111   # DBE, ED, IBE, EI
+
+
+async def _bringup(dut, h, program, bus):
+    """Bring the CPU up against a caller-supplied bus model.
+
+    CPUTestHarness.setup() always installs a plain asynchronous BusModel, so a
+    test needing a synchronous or burst-capable device does the sequence itself.
+    """
+    clock = Clock(dut.CLK, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    h._init_idle_inputs()
+    h._install_trap_stubs()
+    h._load_memory(program)
+    await RisingEdge(dut.CLK)
+    await RisingEdge(dut.CLK)
+    dut.RESET_INn.value = 0
+    dut.HALT_INn.value = 0
+    await ClockCycles(dut.CLK, 20)
+    h.bus = bus
+    await bus.start()
+    dut.RESET_INn.value = 1
+    dut.HALT_INn.value = 1
+    await ClockCycles(dut.CLK, 4)
+
+
+def _burst_read_program(h, data_addr, res, cacr=BURST_DATA_CACR):
+    """Enable the data cache with burst filling, then miss on an aligned long.
+
+    Instruction bursting is left off by default so the only burst-eligible cycle
+    in the run is the one under test.
+    """
+    return [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(cacr),
+        *movec_dn_to_cr(0, CR_CACR),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, AN_IND, 0, DN, 1),             # aligned long read miss
+        *move_to_abs_long(LONG, DN, 1, res),
+        *h.sentinel_program(),
+    ]
+
+
+@cocotb.test()
+async def test_cback_on_dsack_cycle_is_not_honoured(dut):
+    """CBACK asserted on a DSACKx-terminated cycle must be ignored entirely.
+
+    UM 6.1.3.2: "The MC68030 ignores the assertion of CBACK during cycles
+    terminated with DSACKx." Ignoring it means the burst request is not consumed
+    either, so CBREQ stays asserted for the whole cycle instead of being
+    released by an acknowledge that never counted.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x600
+    res = h.RESULT_BASE + 0xD0
+
+    h.mem.load_long(data_addr, 0x5A6B_7C8D)
+    await h.setup(_burst_read_program(h, data_addr, res))
+    dut.CBACKn.value = 0  # Device claims burst capability on an async cycle.
+
+    found = False
+    cbreq_samples = []
+    honoured = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rw_n = int(dut.RWn.value)
+            addr = int(dut.ADR_OUT.value)
+            cbreq_n = int(dut.CBREQn.value)
+            honoured |= int(dut.CBACK_HONOURED.value) == 1
+        except ValueError:
+            continue
+
+        if as_n == 0 and rw_n == 1 and addr == data_addr:
+            cbreq_samples.append(cbreq_n)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    dut.CBACKn.value = 1
+    assert found, "DSACK-cycle CBACK test did not complete"
+    assert h.mem.read(res, 4) == 0x5A6B_7C8D, "burst-eligible read returned wrong data"
+    assert cbreq_samples, "never observed the burst-eligible data-read cycle"
+    assert all(s == 0 for s in cbreq_samples), (
+        f"CBREQn was released mid-cycle ({cbreq_samples}) by a CBACK on a "
+        "DSACKx-terminated cycle, which the UM says to ignore"
+    )
+    assert not honoured, (
+        "CBACK was honoured on a DSACKx-terminated cycle"
+    )
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_cback_on_sterm_cycle_is_honoured(dut):
+    """CBACK with STERM on a burst-eligible read is the one legal acknowledge.
+
+    UM 7.3.7: "burst mode is only initiated if both of these signals are
+    asserted for a synchronous cycle." The handshake must be recognised, and the
+    requested operand must still reach the core intact.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x640
+    res = h.RESULT_BASE + 0xD4
+
+    for i in range(4):
+        h.mem.load_long((data_addr & ~0xF) + 4 * i, 0xC0DE_0000 | i)
+    h.mem.load_long(data_addr, 0x91A2_B3C4)
+
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True)
+    await _bringup(dut, h, _burst_read_program(h, data_addr, res), bus)
+
+    found = False
+    honoured = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        try:
+            honoured |= int(dut.CBACK_HONOURED.value) == 1
+        except ValueError:
+            pass
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, "STERM-cycle CBACK test did not complete"
+    h.check_no_unexpected_exception()
+    assert h.mem.read(res, 4) == 0x91A2_B3C4, (
+        "the burst handshake corrupted the requested long word"
+    )
+    assert bus.bursts, (
+        "the device never saw CBREQ asserted on a synchronous read, so the "
+        "burst handshake was not exercised"
+    )
+    assert honoured, "CBACK with STERM on a burst-eligible read was not honoured"
+    h.cleanup()
+
+
+@cocotb.test()
+async def test_cbreq_not_asserted_inside_rmc_sequence(dut):
+    """No burst is requested anywhere inside a read-modify-write sequence.
+
+    UM 7.3.7: "CBREQ is not asserted during the read or write cycles of any
+    read-modify-write operation", and UM 6.1.3.2 lists the read portion of an
+    RMW among the conditions under which CBREQ is never asserted.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x680
+    res = h.RESULT_BASE + 0xD8
+
+    program = [
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 0),
+        *imm_long(BURST_ALL_CACR),
+        *movec_dn_to_cr(0, CR_CACR),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(data_addr),
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 1),
+        *imm_long(0x1111_2222),                    # Dc: the compare value.
+        *move(LONG, SPECIAL, IMMEDIATE, DN, 2),
+        *imm_long(0x3333_4444),                    # Du: the update value.
+        *cas(LONG, 1, 2, AN_IND, 0),               # CAS.L D1,D2,(A0)
+        *move(LONG, AN_IND, 0, DN, 3),
+        *move_to_abs_long(LONG, DN, 3, res),
+        *h.sentinel_program(),
+    ]
+
+    h.mem.load_long(data_addr, 0x1111_2222)  # Compare succeeds, so CAS writes.
+    await h.setup(program)
+
+    found = False
+    rmc_cycles = 0
+    rmc_cbreq_low = 0
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        try:
+            as_n = int(dut.ASn.value)
+            rmc_n = int(dut.RMCn.value)
+            cbreq_n = int(dut.CBREQn.value)
+        except ValueError:
+            continue
+
+        if as_n == 0 and rmc_n == 0:
+            rmc_cycles += 1
+            if cbreq_n == 0:
+                rmc_cbreq_low += 1
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+
+    assert found, "RMC burst-request test did not complete"
+    assert h.mem.read(res, 4) == 0x3333_4444, "CAS did not write the update value"
+    assert rmc_cycles, "never observed a bus cycle with RMC asserted"
+    assert rmc_cbreq_low == 0, (
+        f"CBREQn was asserted on {rmc_cbreq_low} of {rmc_cycles} RMC bus clocks"
+    )
+    h.cleanup()
+
+
+# -------------------------------------------------------------------
+# Address-held burst streaming: NOT IMPLEMENTED, deliberately skipped.
+#
+# UM 7.3.7 requires the processor to hold AS, DS, R/W, A0-A31, FC0-FC2 and
+# SIZ0-SIZ1 for the whole burst and to take one long word per STERM. This core
+# instead completes the first cycle and then fills the rest of the line with
+# separate AS cycles, re-driving the address each time -- traffic a real MC68030
+# never generates.
+#
+# The engine cannot be built from the files this change is scoped to. It needs
+# ports that do not exist:
+#
+#   * WF68K30L_BUS_INTERFACE has no CBACKn input and no burst-request input, so
+#     it cannot tell that a burst was granted. Adding them means editing
+#     sv/wf68k30L_top_sections/wf68k30L_top_submodules.svh (the instantiation)
+#     and sv/wf68k30L_top_sections/wf68k30L_top_decls.svh (the nets).
+#   * The streamed long words have to reach the cache fill path, which needs
+#     new outputs on the bus interface and new inputs on
+#     WF68K30L_TOP_CACHE_STATE, instantiated in
+#     sv/wf68k30L_top_sections/wf68k30L_top_cache_mmu_state.svh.
+#
+# The device side is ready: BusModel(sync_term=True, cback=True) holds CBACK
+# with STERM, advances A3:A2 itself with line wraparound, and supports
+# cback_drop_after and ciin_on_beat. Each test below fails only on the RTL.
+# -------------------------------------------------------------------
+
+
+def _line_read_cycles(bus, line_base):
+    """Read sub-cycle addresses the device saw inside one cache line."""
+    return [
+        addr for addr, _code, is_write in bus.sub_cycles
+        if not is_write and line_base <= addr < line_base + 16
+    ]
+
+
+@cocotb.test(skip=True)
+async def test_burst_streams_a_full_line_under_one_as(dut):
+    """A burst-eligible miss must fill the line without re-driving the address.
+
+    KNOWN GAP, deliberately left failing-but-skipped: no streaming engine.
+
+    UM 6.1.3.2: "The MC68030 holds the entire address bus constant for the
+    duration of the burst cycle." So one AS cycle covers the whole line and the
+    device supplies four long words, wrapping A3:A2 from the requested one.
+    Today four separate AS cycles appear instead.
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x700
+    line_base = data_addr & ~0xF
+    res = h.RESULT_BASE + 0xDC
+
+    for i in range(4):
+        h.mem.load_long(line_base + 4 * i, 0xB105_0000 | i)
+
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True)
+    await _bringup(dut, h, _burst_read_program(h, data_addr, res), bus)
+
+    found = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+    assert found, "burst streaming test did not complete"
+
+    assert bus.bursts, "no burst was acknowledged"
+    assert bus.bursts[0]["beats"] == 4, (
+        f"device supplied {bus.bursts[0]['beats']} long words; the processor did "
+        "not hold the bus for a four-beat burst"
+    )
+    assert _line_read_cycles(bus, line_base) == [data_addr], (
+        f"line filled with separate AS cycles: "
+        f"{[hex(a) for a in _line_read_cycles(bus, line_base)]}"
+    )
+    h.cleanup()
+
+
+@cocotb.test(skip=True)
+async def test_cback_negated_mid_burst_ends_it_cleanly(dut):
+    """CBACK negated after two long words ends the burst, keeping what arrived.
+
+    KNOWN GAP, deliberately left failing-but-skipped: no streaming engine.
+
+    UM 6.1.3.2: "The premature negation of the CBACK signal during the burst
+    operation causes the current cycle to complete normally, loading the data
+    successfully transferred into the appropriate cache. However, the burst
+    operation aborts and CBREQ negates."
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x740
+    line_base = data_addr & ~0xF
+    line_idx = (line_base >> 4) & 0xF
+    res = h.RESULT_BASE + 0xE0
+
+    for i in range(4):
+        h.mem.load_long(line_base + 4 * i, 0xB2A5_0000 | i)
+
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True, cback_drop_after=2)
+    await _bringup(dut, h, _burst_read_program(h, data_addr, res), bus)
+
+    found = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+    assert found, "premature CBACK negation test did not complete"
+
+    assert bus.bursts and bus.bursts[0]["cback_dropped"], "CBACK was never dropped"
+    assert bus.bursts[0]["beats"] == 2, (
+        f"device supplied {bus.bursts[0]['beats']} long words, expected 2"
+    )
+    # Two entries loaded, and no further external traffic for the other two.
+    valid = int(cache_state(dut).DCACHE_VALID[line_idx].value)
+    assert bin(valid).count("1") == 2, (
+        f"D-cache line validity 0x{valid:X} after a two-beat burst"
+    )
+    assert _line_read_cycles(bus, line_base) == [data_addr], (
+        "the aborted burst was followed by extra AS cycles for the same line"
+    )
+    h.cleanup()
+
+
+@cocotb.test(skip=True)
+async def test_ciin_mid_burst_aborts_it(dut):
+    """CIIN on a burst fill beat keeps that long word uncached and ends the burst.
+
+    KNOWN GAP, deliberately left failing-but-skipped: no streaming engine.
+
+    UM 6.1.3.2: "The assertion of CIIN during the second, third, or fourth cycle
+    of a burst operation prevents the data during that cycle from being loaded
+    into the appropriate cache and causes CBREQ to negate, aborting the burst
+    operation."
+    """
+    h = CPUTestHarness(dut)
+    data_addr = h.DATA_BASE + 0x780
+    line_base = data_addr & ~0xF
+    line_idx = (line_base >> 4) & 0xF
+    res = h.RESULT_BASE + 0xE4
+
+    for i in range(4):
+        h.mem.load_long(line_base + 4 * i, 0xB3C1_0000 | i)
+
+    bus = BusModel(dut, h.mem, sync_term=True, cback=True, ciin_on_beat=3)
+    await _bringup(dut, h, _burst_read_program(h, data_addr, res), bus)
+
+    found = False
+    for _ in range(30000):
+        await RisingEdge(dut.CLK)
+        if h.mem.read(h.SENTINEL_ADDR, 4) == h.SENTINEL_VAL:
+            found = True
+            break
+    assert found, "CIIN mid-burst test did not complete"
+
+    assert bus.bursts and bus.bursts[0]["ciin"], "CIIN was never asserted mid-burst"
+    valid = int(cache_state(dut).DCACHE_VALID[line_idx].value)
+    assert bin(valid).count("1") == 2, (
+        f"D-cache line validity 0x{valid:X}: the CIIN-marked beat and everything "
+        "after it must stay out of the cache"
+    )
+    assert _line_read_cycles(bus, line_base) == [data_addr], (
+        "the aborted burst was followed by extra AS cycles for the same line"
     )
     h.cleanup()

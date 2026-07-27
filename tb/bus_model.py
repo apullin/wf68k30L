@@ -33,7 +33,12 @@ class BusModel:
     # connect, so that latching them shows up as corruption.
     POISON_BYTE = 0xA5
 
-    def __init__(self, dut, memory, wait_states=0, port_width=4, sync_term=False):
+    # Long words in a cache line, and so the longest burst (UM 6.1.3.2).
+    BURST_BEATS = 4
+
+    def __init__(self, dut, memory, wait_states=0, port_width=4, sync_term=False,
+                 cback=False, cback_beats=BURST_BEATS, cback_drop_after=None,
+                 ciin_on_beat=None):
         """
         Args:
             dut: cocotb handle to the DUT (WF68K30L_TOP).
@@ -42,9 +47,28 @@ class BusModel:
             port_width: Responding port width in bytes (4, 2 or 1).
             sync_term: Terminate with STERMn instead of DSACKn. STERM implies a
                 32-bit port, and the two must never be asserted together.
+            cback: Answer a burst request by asserting CBACKn alongside the
+                cycle's termination. With sync_term this is the legal burst
+                handshake of MC68030UM 6.1.3.2 and the device then streams
+                successive long words; without it, it is the case the UM says
+                the processor must ignore ("The MC68030 ignores the assertion
+                of CBACK during cycles terminated with DSACKx").
+            cback_beats: Long words this device is willing to supply, 1..4.
+            cback_drop_after: Negate CBACKn once this many beats have been
+                supplied, modelling a burst cut short by the device.
+            ciin_on_beat: Assert CIINn while supplying this beat (2..4),
+                modelling a non-cachable long word part-way through a burst.
         """
         assert port_width in self.DSACK_FOR_WIDTH, f"bad port_width {port_width}"
         assert not (sync_term and port_width != 4), "STERM requires a 32-bit port"
+        assert 1 <= cback_beats <= self.BURST_BEATS, "a cache line is four long words"
+        # Burst beats are paced by STERM on consecutive clocks, so this model
+        # only streams on a zero-wait-state port: with wait states it cannot
+        # tell the first cycle's acknowledge edge from a burst beat.
+        assert not (cback and sync_term and wait_states), \
+            "burst streaming needs wait_states=0"
+        assert ciin_on_beat is None or 2 <= ciin_on_beat <= self.BURST_BEATS, \
+            "ciin_on_beat names a burst fill beat, which is the second or later"
         self.dut = dut
         self.memory = memory
         self.wait_states = wait_states
@@ -53,6 +77,18 @@ class BusModel:
         # Arbitration hook -- see "Bus arbitration support" below.
         self.bus_owner = None
         self.foreign_cycle_starts = []
+        self.cback = cback
+        self.cback_beats = cback_beats
+        self.cback_drop_after = cback_drop_after
+        self.ciin_on_beat = ciin_on_beat
+        # One (addr, size_code, is_write) record per sub-cycle served, in order.
+        # Lets a test assert what the bus actually did rather than only what
+        # ended up in a register.
+        self.sub_cycles = []
+        # One record per cycle on which this device acknowledged a burst
+        # request: {'base', 'beats', 'cback_dropped', 'ciin'}. beats == 1 means
+        # the processor did not hold the bus, so no burst fill happened.
+        self.bursts = []
         self._running = False
         self._trace = os.environ.get("BUS_TRACE", "0") not in ("", "0", "false", "False")
         self._trace_min = int(os.environ.get("BUS_TRACE_MIN", "0"), 0)
@@ -121,6 +157,86 @@ class BusModel:
         if self.sync_term:
             self.dut.STERMn.value = 1
         self.dut.DSACKn.value = 0b11
+        if self.cback:
+            self.dut.CBACKn.value = 1
+            self.dut.CIINn.value = 1
+
+    def _long_at(self, addr):
+        """The aligned long word covering addr, packed MSB-first on D31:0."""
+        base = addr & ~3
+        data = 0
+        for i in range(4):
+            data |= (self.memory.read(base + i, 1) & 0xFF) << ((3 - i) * 8)
+        return data
+
+    def _burst_acknowledged(self, rw_n, width):
+        """True when this device answers the burst the processor is requesting.
+
+        UM 6.1.3.2: burst filling only happens on a 32-bit read, and a device
+        that supports it answers CBREQ with CBACK -- one that does not simply
+        never asserts CBACK. Keying off the CBREQn pin is what a real device
+        does, so this model never acknowledges a burst nobody asked for.
+        """
+        if not self.cback or rw_n != 1 or width != 4:
+            return False
+        try:
+            return int(self.dut.CBREQn.value) == 0
+        except ValueError:
+            return False
+
+    async def _stream_burst(self, addr):
+        """Supply the rest of the cache line while the processor holds the bus.
+
+        UM 6.1.3.2: "CBACK causes the processor to continue driving the address
+        and bus control signals and to latch a new data value for the next cache
+        entry at the completion of each subsequent cycle (as defined by STERM),
+        for a total of up to four cycles", and "The MC68030 holds the entire
+        address bus constant for the duration of the burst cycle" -- so the
+        device is what advances A3:A2, wrapping inside the line (UM Figure 6-12).
+
+        The edge that acknowledges the first cycle is skipped, so a processor
+        that releases AS after one long word leaves this loop having supplied
+        exactly one beat and is never shown a second long word at all.
+        """
+        line = addr & ~0xF
+        sel = addr & 0xC
+        beats = 1
+        dropped = False
+        ciin = False
+
+        await RisingEdge(self.dut.CLK)  # Acknowledge edge of the first cycle.
+        while self._running and self.sync_term and beats < self.cback_beats:
+            await RisingEdge(self.dut.CLK)
+            try:
+                if int(self.dut.ASn.value) != 0:
+                    break  # Bus released: the burst is over.
+                if int(self.dut.ADR_OUT.value) != addr:
+                    break  # Address re-driven: this is a new cycle, not a beat.
+            except ValueError:
+                break
+
+            sel = (sel + 4) & 0xC
+            self.dut.DATA_IN.value = self._long_at(line | sel)
+            beats += 1
+            if self._trace_enabled(addr):
+                self.dut._log.warning(
+                    "bus burst beat %d addr=0x%08X", beats, line | sel
+                )
+
+            if self.ciin_on_beat == beats:
+                self.dut.CIINn.value = 0
+                ciin = True
+            if self.cback_drop_after is not None and beats >= self.cback_drop_after:
+                self.dut.CBACKn.value = 1
+                dropped = True
+                break
+
+        self.bursts.append({
+            "base": addr,
+            "beats": beats,
+            "cback_dropped": dropped,
+            "ciin": ciin,
+        })
 
     def _cycle_layout(self, addr, size_code, *, is_write=False):
         """Return (start_lane, byte_count) for this bus cycle.
@@ -191,6 +307,7 @@ class BusModel:
                 )
                 width = self._port_width_for(addr)
                 dsack = self.DSACK_FOR_WIDTH[width]
+                self.sub_cycles.append((addr, size_code, rw_n == 0))
 
                 # Insert wait states
                 for _ in range(self.wait_states):
@@ -220,7 +337,15 @@ class BusModel:
                             byte_count,
                             data,
                         )
+                    burst = self._burst_acknowledged(rw_n, width)
+                    if burst:
+                        # UM 6.1.3.2: "The device must also assert CBACK (at the
+                        # same time as STERM) at the end of the cycle in which
+                        # the MC68030 asserts CBREQ."
+                        self.dut.CBACKn.value = 0
                     self._assert_term(dsack)
+                    if burst:
+                        await self._stream_burst(addr)
 
                 else:
                     # WRITE cycle: capture DATA_OUT
