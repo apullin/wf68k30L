@@ -3535,7 +3535,7 @@ async def test_mmu_demand_paging_read_fault_completes_after_rte(dut):
     h.cleanup()
 
 
-@cocotb.test(skip=True)
+@cocotb.test()
 async def test_mmu_demand_paging_write_fault_completes_after_rte(dut):
     """Demand paging on a write: invalid page, handler maps it, RTE, store lands.
 
