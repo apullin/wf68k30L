@@ -255,8 +255,8 @@ assign DR_SEL_RD_1 = (FETCH_STATE == FETCH_EXWORD_1) ? EXT_WORD[14:12] : // Inde
                      ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b000) ? BIW_0[2:0] :
                      ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b001) ? BIW_0[2:0] :
                      ((OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) && FETCH_STATE == FETCH_ABS_LO) ? BIW_0[2:0] :
-                     (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? BIW_1[8:6] : // Width value.
-                     (OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) ? BIW_1[8:6] : // Width value.
+                     (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? BIW_1[8:6] : // Offset value.
+                     (OP == BFFFO || OP == BFINS || OP == BFSET || OP == BFTST) ? BIW_1[8:6] : // Offset value.
                      (OP == CAS) ? BIW_1[2:0] : // Compare operand.
                      (OP == CAS2 && FETCH_STATE == START_OP) ? BIW_1[14:12] : // Address operand.
                      (OP == CAS2 && FETCH_STATE == FETCH_OPERAND && !PHASE2) ? BIW_1[14:12] : // Address operand.
@@ -314,9 +314,11 @@ assign DR_SEL_RD_2 = (OP == ABCD || OP == SBCD || OP == ADDX || OP == SUBX) ? BI
                      ((OP == ADD || OP == AND_B || OP == OR_B || OP == SUB) && BIW_0[8]) ? BIW_0[2:0] :
                      (OP == ADD || OP == CMP || OP == SUB || OP == AND_B || OP == OR_B) ? BIW_0[11:9] :
                      (OP == CHK || OP == EXG) ? BIW_0[11:9] :
-                     (OP == BFINS && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b000) ? BIW_1[14:12] :
-                     (OP == BFINS && FETCH_STATE == START_OP && BIW_0[5:3] == 3'b001) ? BIW_1[14:12] :
-                     (OP == BFINS && FETCH_STATE == FETCH_ABS_LO) ? BIW_1[14:12] :
+                     // All three states selected the same register; restricting it to
+                     // them left memory destinations reading whatever followed.
+                     (OP == BFINS) ? BIW_1[14:12] : // Insert value.
+                     (OP == BFCHG || OP == BFCLR || OP == BFEXTS || OP == BFEXTU) ? BIW_1[2:0] : // Width value.
+                     (OP == BFFFO || OP == BFSET || OP == BFTST) ? BIW_1[2:0] : // Width value.
                      (OP == CAS) ? BIW_1[8:6] : // Update operand.
                      (OP == CAS2 && !PHASE2) ? BIW_1[8:6] : // Update operand.
                      (OP == CAS2) ? BIW_2[8:6] : // Update operand.

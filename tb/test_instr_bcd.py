@@ -637,7 +637,7 @@ async def test_pack_reg_ignores_source_high_word(dut):
 
 
 @cocotb.test()
-async def test_pack_mem_predecrement_FAILS_source_ea_not_predecremented(dut):
+async def test_pack_mem_predecrement(dut):
     """PACK -(A1),-(A2),#adj: two source bytes -> one packed destination byte.
 
     The source word is formed from the two bytes at the decremented address,
@@ -701,11 +701,11 @@ async def test_pack_mem_predecrement_FAILS_source_ea_not_predecremented(dut):
 
 
 @cocotb.test()
-async def test_pack_mem_with_adjustment_FAILS_source_ea_not_predecremented(dut):
+async def test_pack_mem_with_adjustment(dut):
     """PACK -(A1),-(A2),#$F0F0: 0x0102 + 0xF0F0 = 0xF1F2 -> 0x12.
 
     KNOWN RTL DEFECT - same cause as
-    test_pack_mem_predecrement_FAILS_source_ea_not_predecremented: the source
+    test_pack_mem_predecrement: the source
     read lands on the un-decremented A1, so the adjustment is added to 0x0000
     and the result is 0x00 (0x20 with only the AR_DEC_I half of the fix).
     """
@@ -792,7 +792,7 @@ async def test_unpk_reg_ignores_source_high_bits(dut):
 
 
 @cocotb.test()
-async def test_unpk_mem_predecrement_FAILS_source_ea_not_predecremented(dut):
+async def test_unpk_mem_predecrement(dut):
     """UNPK -(A1),-(A2),#$3030: byte 0x27 -> bytes 0x32,0x37 at the destination.
 
     The high byte of the unpacked word goes to the lower destination address.
@@ -807,7 +807,7 @@ async def test_unpk_mem_predecrement_FAILS_source_ea_not_predecremented(dut):
     INIT_ENTRY.  Faithfully ported from vhdl/wf68k30L_control.vhd:683-685.
     Adding PACK and UNPK to that case list makes this test pass; the file is
     owned by another agent.  See
-    test_pack_mem_predecrement_FAILS_source_ea_not_predecremented for the
+    test_pack_mem_predecrement for the
     second, PACK-only half of the defect.
     """
     h = CPUTestHarness(dut)

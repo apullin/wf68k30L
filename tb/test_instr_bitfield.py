@@ -502,7 +502,7 @@ async def test_bfins_reg_uses_only_low_bits_of_source(dut):
 # =========================================================================
 
 @cocotb.test()
-async def test_bfextu_reg_offset_and_width_from_registers_FAILS_bf3_shared_register_port(dut):
+async def test_bfextu_reg_offset_and_width_from_registers(dut):
     """BFEXTU D1{D4:D5},D2 with D4=4, D5=8 matches the immediate form.
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
@@ -519,7 +519,7 @@ async def test_bfextu_reg_offset_and_width_from_registers_FAILS_bf3_shared_regis
 
 
 @cocotb.test()
-async def test_bfextu_reg_offset_modulo_32_FAILS_bf3_shared_register_port(dut):
+async def test_bfextu_reg_offset_modulo_32(dut):
     """A register offset of 36 selects the same field as 4 on a Dn operand.
 
     PRM: for a data register operand the offset is taken modulo 32.
@@ -563,7 +563,7 @@ async def test_bfextu_reg_width_from_register_modulo_32(dut):
 
 
 @cocotb.test()
-async def test_bfextu_reg_negative_offset_wraps_FAILS_bf3_shared_register_port(dut):
+async def test_bfextu_reg_negative_offset_wraps(dut):
     """A register offset of -4 on a Dn operand selects bits 3:0 (offset 28).
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
@@ -626,7 +626,7 @@ FILL = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]
 
 
 @cocotb.test()
-async def test_bftst_mem_byte_at_ea_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bftst_mem_byte_at_ea(dut):
     """BFTST (A1){0:8}: the field is the byte at the effective address.
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -649,7 +649,7 @@ async def test_bftst_mem_zero_field(dut):
 
 
 @cocotb.test()
-async def test_bfextu_mem_byte_at_ea_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfextu_mem_byte_at_ea(dut):
     """BFEXTU (A1){0:8},D2 -> 0x12, the byte at the effective address.
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -665,7 +665,7 @@ async def test_bfextu_mem_byte_at_ea_FAILS_bf2_subword_operand_misaligned(dut):
 
 
 @cocotb.test()
-async def test_bfextu_mem_straddles_byte_boundary_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfextu_mem_straddles_byte_boundary(dut):
     """BFEXTU (A1){4:8},D2 spans the low nibble of byte 0 and the high of byte 1.
 
     Memory is 0x12 0x34, so the field is 0x23.
@@ -683,7 +683,7 @@ async def test_bfextu_mem_straddles_byte_boundary_FAILS_bf2_subword_operand_misa
 
 
 @cocotb.test()
-async def test_bfextu_mem_twelve_bits_straddling_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfextu_mem_twelve_bits_straddling(dut):
     """BFEXTU (A1){12:12},D2 over 0x12 0x34 0x56 -> 0x456.
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -726,7 +726,7 @@ async def test_bfextu_mem_single_bit(dut):
 
 
 @cocotb.test()
-async def test_bfexts_mem_straddling_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfexts_mem_straddling(dut):
     """BFEXTS (A1){4:8},D2 -> 0x23 (positive field, no sign extension).
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -742,7 +742,7 @@ async def test_bfexts_mem_straddling_FAILS_bf2_subword_operand_misaligned(dut):
 
 
 @cocotb.test()
-async def test_bfexts_mem_field_spanning_long_boundary_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfexts_mem_field_spanning_long_boundary(dut):
     """BFEXTS (A1){31:8},D2 spans the last bit of the long and the next byte.
 
     0x78 = 0111 1000, so offset 31 is 0; 0x9A = 1001 1010 supplies the next
@@ -786,7 +786,7 @@ async def test_bfffo_mem_empty_field(dut):
 
 
 @cocotb.test()
-async def test_bfchg_mem_byte_at_ea_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfchg_mem_byte_at_ea(dut):
     """BFCHG (A1){0:8}: 0x12 becomes 0xED, rest of memory untouched.
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -803,7 +803,7 @@ async def test_bfchg_mem_byte_at_ea_FAILS_bf2_subword_operand_misaligned(dut):
 
 
 @cocotb.test()
-async def test_bfchg_mem_straddling_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfchg_mem_straddling(dut):
     """BFCHG (A1){4:8} over 0x12 0x34 -> 0x1D 0xC4: only the field flips.
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -820,7 +820,7 @@ async def test_bfchg_mem_straddling_FAILS_bf2_subword_operand_misaligned(dut):
 
 
 @cocotb.test()
-async def test_bfclr_mem_word_field_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfclr_mem_word_field(dut):
     """BFCLR (A1){0:16} zeroes the first two bytes only.
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -837,7 +837,7 @@ async def test_bfclr_mem_word_field_FAILS_bf2_subword_operand_misaligned(dut):
 
 
 @cocotb.test()
-async def test_bfclr_mem_straddling_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfclr_mem_straddling(dut):
     """BFCLR (A1){4:8} over 0x12 0x34 -> 0x10 0x04.
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -853,7 +853,7 @@ async def test_bfclr_mem_straddling_FAILS_bf2_subword_operand_misaligned(dut):
 
 
 @cocotb.test()
-async def test_bfset_mem_straddling_FAILS_bf2_subword_operand_misaligned(dut):
+async def test_bfset_mem_straddling(dut):
     """BFSET (A1){4:8} over 0x12 0x34 -> 0x1F 0xF4.
 
     KNOWN RTL DEFECT BF-2 (see module docstring): a bit-field memory operand
@@ -885,7 +885,7 @@ async def test_bfset_mem_five_byte_access(dut):
 
 
 @cocotb.test()
-async def test_bfins_mem_byte_at_ea_FAILS_bf3_shared_register_port(dut):
+async def test_bfins_mem_byte_at_ea(dut):
     """BFINS D3,(A1){0:8} with D3=0xA5 writes one byte; N=1 from the insert.
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
@@ -902,7 +902,7 @@ async def test_bfins_mem_byte_at_ea_FAILS_bf3_shared_register_port(dut):
 
 
 @cocotb.test()
-async def test_bfins_mem_straddling_FAILS_bf3_shared_register_port(dut):
+async def test_bfins_mem_straddling(dut):
     """BFINS D3,(A1){4:8} with D3=0x5A -> 0x15 0xA4.
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
@@ -919,7 +919,7 @@ async def test_bfins_mem_straddling_FAILS_bf3_shared_register_port(dut):
 
 
 @cocotb.test()
-async def test_bfins_mem_sixteen_bits_straddling_FAILS_bf3_shared_register_port(dut):
+async def test_bfins_mem_sixteen_bits_straddling(dut):
     """BFINS D3,(A1){4:16} with D3=0xBEEF -> 0x1B 0xEE 0xF6.
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
@@ -936,7 +936,7 @@ async def test_bfins_mem_sixteen_bits_straddling_FAILS_bf3_shared_register_port(
 
 
 @cocotb.test()
-async def test_bfins_mem_full_long_FAILS_bf3_shared_register_port(dut):
+async def test_bfins_mem_full_long(dut):
     """BFINS D3,(A1){0:32} replaces the aligned long.
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
@@ -952,7 +952,7 @@ async def test_bfins_mem_full_long_FAILS_bf3_shared_register_port(dut):
 
 
 @cocotb.test()
-async def test_bfins_mem_five_byte_access_FAILS_bf3_shared_register_port(dut):
+async def test_bfins_mem_five_byte_access(dut):
     """BFINS D3,(A1){4:32} writes across five bytes: 0x1D EA DB EE Fx.
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
@@ -968,7 +968,7 @@ async def test_bfins_mem_five_byte_access_FAILS_bf3_shared_register_port(dut):
 
 
 @cocotb.test()
-async def test_bfextu_mem_offset_past_bit31_is_not_modulo_FAILS_bf3_shared_register_port(dut):
+async def test_bfextu_mem_offset_past_bit31_is_not_modulo(dut):
     """BFEXTU (A1){D4:D5},D2 with D4=32: memory offsets are not taken modulo 32.
 
     PRM: "If Do = 1, the offset field specifies a data register that contains
@@ -990,7 +990,7 @@ async def test_bfextu_mem_offset_past_bit31_is_not_modulo_FAILS_bf3_shared_regis
 
 
 @cocotb.test()
-async def test_bfextu_mem_offset_36_straddles_FAILS_bf3_shared_register_port(dut):
+async def test_bfextu_mem_offset_36_straddles(dut):
     """BFEXTU (A1){D4:D5},D2 with D4=36 -> 0xAB from 0x9A 0xBC.
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
@@ -1006,7 +1006,7 @@ async def test_bfextu_mem_offset_36_straddles_FAILS_bf3_shared_register_port(dut
 
 
 @cocotb.test()
-async def test_bfextu_mem_negative_offset_reads_below_ea_FAILS_bf3_shared_register_port(dut):
+async def test_bfextu_mem_negative_offset_reads_below_ea(dut):
     """A negative register offset reads below the effective address.
 
     A1 points at DATA_BASE+8 and D4 = -8, so the field is the byte at
@@ -1026,7 +1026,7 @@ async def test_bfextu_mem_negative_offset_reads_below_ea_FAILS_bf3_shared_regist
 
 
 @cocotb.test()
-async def test_bfclr_mem_offset_and_width_from_registers_FAILS_bf3_shared_register_port(dut):
+async def test_bfclr_mem_offset_and_width_from_registers(dut):
     """BFCLR (A1){D4:D5} with a register offset and width clears 0x12 0x34.
 
     KNOWN RTL DEFECT BF-3 (see module docstring): the register-supplied field
