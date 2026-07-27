@@ -59,6 +59,48 @@ assign CIOUT_ASSERT = BUS_BSY ? CIOUT_LATCH : CIOUT_ASSERT_NOW;
 
 assign CIOUTn = (ASn == 1'b0) ? !CIOUT_ASSERT : 1'b1;
 
+// ---- Burst acknowledge qualification ----
+// UM 7.3.7: "burst mode is only initiated if both of these signals are
+// asserted for a synchronous cycle", and UM 6.1.3.2: "The MC68030 ignores the
+// assertion of CBACK during cycles terminated with DSACKx." STERM and DSACKx
+// are never both asserted for the same cycle (UM 7.3.2), so STERM seen while
+// AS is asserted with DSACKx negated is exactly the cycle shape whose CBACK
+// may be honoured -- STERM is the 32-bit synchronous acknowledge.
+//
+// Tracked across the whole AS window rather than at one nominated slice,
+// because UM 7.4.1 requires STERM to meet setup and hold against every rising
+// edge while AS is asserted. The register is re-armed while the bus is idle,
+// which is the clock on which the completing cycle raises its ready strobe, so
+// a consumer sampling on that strobe still reads this cycle's value.
+logic CYCLE_STERM_32; // STERM already seen earlier in the cycle in flight.
+logic STERM_NOW;      // STERM valid for the cycle in flight at this edge.
+logic CBACK_HONOURED;
+
+assign STERM_NOW = !ASn && !STERMn && DSACKn == 2'b11;
+
+always_ff @(posedge CLK) begin : cycle_sterm_track
+    if (RESET_CPU || !BUS_BSY)
+        CYCLE_STERM_32 <= 1'b0;
+    else if (!ASn && DSACKn != 2'b11)
+        CYCLE_STERM_32 <= 1'b0; // Asynchronously terminated: CBACK is ignored.
+    else if (STERM_NOW)
+        CYCLE_STERM_32 <= 1'b1;
+end
+
+// CBACK gated by the termination the cycle in flight actually saw. The
+// registered term carries the qualification one clock past the cycle, so a
+// consumer sampling on the cycle's ready strobe still sees it; STERM_NOW covers
+// the terminating edge itself, which a two-clock synchronous cycle reaches
+// before the register can update.
+//
+// The cache state machine still consumes the raw CBACKn pin and so still opens
+// a burst-fill context off an acknowledge the UM says to ignore. Wiring its
+// CBACKn port to !CBACK_HONOURED closes that, which needs the net declared in
+// wf68k30L_top_sections/wf68k30L_top_decls.svh (that file is included ahead of
+// the instantiation) and the port re-pointed in
+// wf68k30L_top_sections/wf68k30L_top_cache_mmu_state.svh.
+assign CBACK_HONOURED = !CBACKn && (CYCLE_STERM_32 || STERM_NOW);
+
 // External burst request semantics (phase 5/7):
 // Request burst fills for cacheable miss cycles when burst-enable bits are set.
 // Once a line has been burst-acknowledged (CBACKn low), suppress redundant
@@ -76,7 +118,10 @@ always_comb begin : cbreq_generation
                              DCACHE_BURST_TRACK_TAG == ADR_P_PHYS[31:8];
 
     // Instruction burst-request candidate: I-cache enabled + burst enabled + miss fillable.
-    if (!BUS_BSY && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && OPCODE_REQ_CORE_MISS && CACR[0] && CACR[4] && !CACR[1]) begin
+    // UM 7.3.7: "CBREQ is not asserted during the read or write cycles of any
+    // read-modify-write operation", and no burst filling occurs while RMC is
+    // asserted, so nothing inside that indivisible sequence may request one.
+    if (!BUS_BSY && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && OPCODE_REQ_CORE_MISS && !RMC && CACR[0] && CACR[4] && !CACR[1]) begin
         CBREQ_INST_REQ_NOW = !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI) &&
                              !icache_same_burst_line;
     end
@@ -96,12 +141,22 @@ always_ff @(posedge CLK) begin : cbreq_latch
         CBREQ_REQ_LATCH <= 1'b0;
     end else if (!BUS_BSY) begin
         CBREQ_REQ_LATCH <= CBREQ_REQ_NOW;
-    end else if (!CBACKn || CACHE_INHIBIT_IN) begin
-        // In this surface model, a burst acknowledge consumes the request.
+    end else if (CBACK_HONOURED || CACHE_INHIBIT_IN) begin
+        // A burst acknowledge consumes the request. On a real burst UM 7.3.7
+        // holds CBREQ until STERM for the third of four long words; with no
+        // streaming engine there is only ever one cycle to hold it for, so it
+        // is released at the end of that cycle instead. An acknowledge on a
+        // DSACKx-terminated cycle is not one, and must leave CBREQ alone.
         // UM 6.1.3.1: CIIN also negates CBREQ, aborting the burst.
         CBREQ_REQ_LATCH <= 1'b0;
     end
 end
 
 assign CBREQ_ASSERT = BUS_BSY ? CBREQ_REQ_LATCH : CBREQ_REQ_NOW;
-assign CBREQn = (ASn == 1'b0 && CBREQ_ASSERT) ? 1'b0 : 1'b1;
+
+// UM 7.3.7: "CBREQ is not asserted during the read or write cycles of any
+// read-modify-write operation." That is a statement about the pin, so it is
+// enforced at the pin: a request latched before RMC rose must not survive into
+// the sequence either. RMC is the same signal the bus interface drives RMCn
+// from, so CBREQ and RMC can never be asserted together on the bus.
+assign CBREQn = (ASn == 1'b0 && CBREQ_ASSERT && !RMC) ? 1'b0 : 1'b1;
