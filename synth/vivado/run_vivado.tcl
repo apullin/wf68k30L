@@ -5,6 +5,9 @@
 #
 # stage: "synth" (default) or "impl" for full place & route with timing.
 #
+# Default part is the Kria K26 SOM used on the KV260 (Zynq UltraScale+ MPSoC).
+# Pass a part as the first tclarg for anything else, e.g. xc7a200tfbg484-2.
+#
 # Purpose is portability checking, not a board build: it confirms the RTL is
 # accepted by a vendor toolchain and that the design has no latches, no
 # combinational loops and no multiply-driven nets, which Yosys alone does not
@@ -13,7 +16,7 @@
 # Note the six explicit logic-to-enum casts in the RTL exist for this flow:
 # Vivado and Verilator both reject the implicit form that Yosys accepts.
 
-set part  [expr {[llength $argv] > 0 ? [lindex $argv 0] : "xc7a200tfbg484-2"}]
+set part  [expr {[llength $argv] > 0 ? [lindex $argv 0] : "xck26-sfvc784-2LV-c"}]
 set stage [expr {[llength $argv] > 1 ? [lindex $argv 1] : "synth"}]
 
 set repo [file normalize [file join [file dirname [info script]] .. ..]]
