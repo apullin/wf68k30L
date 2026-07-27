@@ -135,8 +135,12 @@ appear here (50,000 cycles, 5 seeds, 0 mismatches) is withdrawn. It cannot be
 revived meaningfully: the SV top has MMU, cache and coprocessor subsystems the
 VHDL never had, so the port lists cannot correspond; and the July 2026 audit
 fixed a number of defects the SV had inherited faithfully from the VHDL, so the
-SV is now deliberately *not* equivalent to it in those places. See
-`notes/AUDIT_2026-07.md` and the BUG-R009/R014 amendment in `notes/BUGLIST.md`.
+SV is now deliberately *not* equivalent to it in those places. The VHDL's own
+README records that it was never verified against the manual, which is why
+comparing against it would have certified every shared defect as correct: two
+earlier bug reports (BUG-R009 and BUG-R014) had "fixed" the testbench to match
+observed core behaviour rather than fixing the core, and the misaligned-long-read
+byte lanes were the case that exposed it.
 
 ## Software Smoke Battery
 
@@ -185,8 +189,10 @@ checksum against `qemu-system-m68k -cpu m68030` running the identical binary**.
 That checksum comparison is the strongest end-to-end gate in the repo: it checks
 computed results on real compiler output, not just that the program terminated.
 It is also what caught the base-register-suppression defect that made every
-indexed array access read through the wrong address (see
-`notes/AUDIT_2026-07.md`) -- the core computed `0xFFFFFFFF` where QEMU computed
+indexed array access read through the wrong address -- the base-suppress bit was
+qualified on a fetch-stage term that is not asserted for every full-format
+effective address, so the base register was added when the encoding said suppress
+it. The core computed `0xFFFFFFFF` where QEMU computed
 `0x3FE75C61`, while every hand-written instruction test passed.
 
 Note the cycle budget: verifying the checksum costs real work, so the default is
@@ -345,7 +351,7 @@ It is also included in `test-full`.
 > Historical, and describing the **pre-fork** core: the MMU, caches and
 > coprocessor surface it says are absent have since been implemented, and the
 > RTE/SSW limitation it notes has been addressed. Kept verbatim for provenance.
-> See the top of this file and `notes/AUDIT_2026-07.md` for current behaviour.
+> See the top of this file for current behaviour.
 
 
 This is the top level structural design unit of the 68K30L complex instruction set (CISC) microcontroller. It's programming model is (hopefully) fully compatible with Motorola's MC68030. This core features a pipelined architecture. In comparision to the fully featured 68K30 the core has no MMU, no data and instruction cache and no coprocessor interface. This results in missing burstmodes which are not required due to lack of cache. Missing coprocessor operations are: cpBcc, cpDBcc, cpGEN, cpRESTORE, cpSAVE, cpScc, cpTRAPcc. Missing MMU operations are: PFLUSH, PLOAD, PMOVE and PTEST. The trap handler does not process the following exceptions which lack due to the missing MMU and coprocessor interface: PRE_EXC_CP, MID_EXC_CP, POST_EXC_CP, EXC_VECT_CP, MMU_CFG_ERR. The shifter in the 68K30 is a barrel shifter and in this core it is a conventional shift register controlled logic. This core features the loop operation mode of the 68010 to deal with DBcc loops. This feature is a predecessor to the MC68020/30/40 caches. The exception handler works for the RTE but without taking the SSW into account which is intended to restore from a defectice bus error stack frame.

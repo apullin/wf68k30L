@@ -385,6 +385,34 @@ module mmu_runtime_gate_formal;
             assert(OPCODE_REQ == BURST_PREFETCH_OP_REQ);
         end
 
+        // The guard above is NOT sufficient, which a mutation exposed: dropping
+        // !MMU_TWALK_BUS_LOCK from the core read request passed this proof and all
+        // 52 tests in tb/test_mmu_instr.py. The reason is that MMU_RUNTIME_FAULT
+        // and MMU_RUNTIME_STALL describe a *runtime translation* for a core
+        // access, and a PTEST search runs with neither asserted -- its instruction
+        // is held in EXECUTE by ALU_BSY/ALU_REQ instead. So while PTEST owns the
+        // descriptor bus, nothing above constrains the core's requests at all.
+        //
+        // MMU_TWALK_BUS_LOCK itself is module-internal; MMU_TWALK_BUSY and
+        // MMU_PTEST_BUSY are its two sources and are port-visible, and the lock
+        // takes them directly whenever !BUS_BSY, so this mirrors that arm.
+        if (!BUS_BSY && (MMU_TWALK_BUSY || MMU_PTEST_BUSY)) begin
+            assert(RD_REQ == (BURST_PREFETCH_DATA_REQ || MMU_TWALK_BUS_RD));
+            assert(WR_REQ == MMU_TWALK_BUS_WR);
+        end
+
+        // ...and the same for the LATCHED copy. RD_REQ is built twice -- an inline
+        // copy of the equation for !BUS_BSY (routing_bus_cache.sv:1120) and the
+        // registered RD_REQ_I for BUS_BSY (:299). A property on RD_REQ alone only
+        // ever sees the inline copy, which is why mutating just the register went
+        // undetected. Guarded on the previous cycle's lock sources, since that is
+        // when the register sampled them.
+        if (f_past_valid && !$past(RESET_CPU) &&
+            $past(!BUS_BSY && (MMU_TWALK_BUSY || MMU_PTEST_BUSY))) begin
+            assert(RD_REQ_I == $past(BURST_PREFETCH_DATA_REQ || MMU_TWALK_BUS_RD));
+            assert(WR_REQ_I == $past(MMU_TWALK_BUS_WR));
+        end
+
         // While BUS_BSY the requests are replayed from latched copies of the
         // same equations, and MMU_RUNTIME_FAULT/STALL are already low by then,
         // so the check above cannot reach that copy. Pin it to the cycle the
