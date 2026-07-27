@@ -16,7 +16,7 @@ entirely wrong values passed as long as it reached the sentinel.
 Environment knobs:
   CSMITH_SEEDS       Seed expression, e.g. "1-10" or "1,4,13,20"
                      (default: 1,4,5,6,7,8,10,12,13,19)
-  CSMITH_MAX_CYCLES  Cycle budget per seed (default: 400000)
+  CSMITH_MAX_CYCLES  Cycle budget per seed (default: 12000000)
   CSMITH_CC_EXTRA_FLAGS Extra compiler flags for csmith build script
   CSMITH_QEMU_SETTLE_S  Seconds to let the QEMU reference run (default: 2.0)
 """
@@ -40,7 +40,7 @@ DEFAULT_SEED_EXPR = "1,4,5,6,7,8,10,12,13,19"
 # orders of magnitude more work than the ~2200 cycles they used to. Measured
 # worst case across the default seed set is ~7.4M cycles, so this leaves
 # headroom without letting a genuine hang run forever.
-DEFAULT_MAX_CYCLES = 20000000
+DEFAULT_MAX_CYCLES = 12_000_000
 
 # Memory contract with tooling/csmith/runtime/csmith.h.
 CRC_ADDR = CPUTestHarness.RESULT_BASE          # computed checksum

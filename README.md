@@ -161,7 +161,7 @@ When `CSMITH_CC_EXTRA_FLAGS` is unset, the csmith compile step defaults to
 Override seed selection or cycle budget:
 
     CSMITH_SEEDS=1-25 make test-csmith-smoke
-    CSMITH_SEEDS=3,7,19 CSMITH_MAX_CYCLES=800000 make test-csmith-smoke
+    CSMITH_SEEDS=3,7,19 CSMITH_MAX_CYCLES=12000000 make test-csmith-smoke
     CSMITH_CC_EXTRA_FLAGS='-fno-jump-tables' make test-csmith-smoke
 
 Run with jump tables enabled:
@@ -223,7 +223,7 @@ Default campaign scope:
 - Software torture campaign:
   `SHAKEOUT_CSMITH_SEEDS=1,4-10,12-17,19-23,25-32,34-37,39-59`,
   `SHAKEOUT_CSMITH_JUMP_SEEDS=1,4,7,10,13`,
-  `SHAKEOUT_CSMITH_MAX_CYCLES=800000`,
+  `SHAKEOUT_CSMITH_MAX_CYCLES=12000000`,
   `SHAKEOUT_COREMARK_OPTS=O0,O1,O2,Os`,
   `SHAKEOUT_COREMARK_REQUIRED_OPTS=` (empty => all from `SHAKEOUT_COREMARK_OPTS`),
   `SHAKEOUT_COREMARK_MAX_CYCLES=5000000`,
