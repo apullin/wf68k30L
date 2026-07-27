@@ -93,6 +93,8 @@ module WF68K30L_EXCEPTION_HANDLER #(
     output logic [15:0] RTE_PIPE_BIW_2,
     output logic        RTE_PIPE_C_FAULT,
     output logic        RTE_PIPE_B_FAULT,
+    output logic        RTE_RERUN_WR,   // Replaying the faulted data write (UM 8.2.3).
+    output logic [31:0] RTE_RERUN_DATA, // Data output buffer popped from the frame.
     output logic        REFILLn,
     output logic        RESTORE_ISP_PC,
 
@@ -149,7 +151,10 @@ typedef enum logic [4:0] {
     EXS_SWITCH_STATE    = 5'd15,
     EXS_VALIDATE_FRAME  = 5'd16,
     EXS_READ_BF_META    = 5'd17,
-    EXS_READ_BF_PIPE    = 5'd18
+    EXS_READ_BF_PIPE    = 5'd18,
+    EXS_READ_BF_ADR     = 5'd19,
+    EXS_READ_BF_DOB     = 5'd20,
+    EXS_RERUN_WRITE     = 5'd21
 } EX_STATES;
 
 // ---- Exception type identifiers ----
@@ -263,8 +268,13 @@ logic [15:0] rte_bf_ssw;
 logic        rte_bf_c_fault_restore;
 logic        rte_bf_b_fault_restore;
 logic        rte_bf_need_rerun;
+logic [31:0] rte_bf_fault_adr;   // Frame $10: address the faulted cycle drove.
+logic [31:0] rte_bf_dob;         // Frame $18: data output buffer.
+logic        rte_bf_replay_write; // The SSW asks for a data write rerun.
+logic [1:0]  rte_bf_replay_size;
+logic        rte_bf_replay_flt;  // The replayed write faulted in turn.
 logic        rte_pc_odd;
-logic        rte_aerr_hold;
+logic        rte_abort_hold;
 
 // True when any exception pending flag is asserted.
 logic        any_exception_pending;
@@ -446,7 +456,12 @@ always_comb begin : decode_instruction_trap_source
     else if ((EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE) ||
              (EX_STATE == EXS_EXAMINE_VERSION && DATA_RDY && DATA_VALID && NEXT_EX_STATE == EXS_IDLE))
         trap_source = TRAP_SRC_FORMAT;
-    else if (TRAP_CODE_OPC == T_RTE && !rte_pc_odd && !rte_aerr_hold)
+    // Both abort terms have to appear here combinationally, not only through
+    // rte_abort_hold: trap_set_rte takes priority over clear_instruction_traps in
+    // pending_instruction_traps, so a registered hold would arrive a cycle too
+    // late and EX_P_RTE would survive the abort. It would then re-enter RTE on the
+    // fresh bus-fault frame the abort just pushed, before the handler ever ran.
+    else if (TRAP_CODE_OPC == T_RTE && !rte_pc_odd && !rte_bf_replay_flt && !rte_abort_hold)
         trap_source = TRAP_SRC_RTE;
 end
 
@@ -457,13 +472,22 @@ end
 assign rte_pc_odd = (EXCEPTION == EX_RTE && EX_STATE == EXS_RESTORE_PC &&
                      DATA_RDY && DATA_VALID && DATA_0);
 
-always_ff @(posedge CLK) begin : rte_odd_pc_abort
+// A fault on the replayed data write abandons the RTE the same way. UM 8.2.3:
+// "If a fault occurs when the RTE instruction attempts to rerun the bus
+// cycle(s), the processor creates a new stack frame on the supervisor stack
+// after deallocating the previous frame, and address error or bus error
+// exception processing starts in the normal manner." The frame is already
+// deallocated at this point, so dropping to idle with EX_P_BERR pending is
+// exactly that; the hold keeps the abandoned RTE from re-arming underneath it.
+assign rte_bf_replay_flt = (EX_STATE == EXS_RERUN_WRITE && DATA_RDY && !DATA_VALID);
+
+always_ff @(posedge CLK) begin : rte_abort_tracker
     if (SYS_INIT)
-        rte_aerr_hold <= 1'b0;
-    else if (rte_pc_odd)
-        rte_aerr_hold <= 1'b1;
+        rte_abort_hold <= 1'b0;
+    else if (rte_pc_odd || rte_bf_replay_flt)
+        rte_abort_hold <= 1'b1;
     else if (EX_STATE == EXS_REFILL_PIPE && NEXT_EX_STATE != EXS_REFILL_PIPE)
-        rte_aerr_hold <= 1'b0;
+        rte_abort_hold <= 1'b0;
 end
 
 always_comb begin : decode_instruction_trap_clear
@@ -478,7 +502,7 @@ always_comb begin : decode_instruction_trap_clear
         else if (EXCEPTION == EX_RTE && EX_STATE == EXS_RESTORE_STATUS && DATA_RDY && DATA_VALID &&
                  NEXT_EX_STATE == EXS_IDLE)
                 clear_instruction_traps = 1'b1;
-        else if (rte_pc_odd)
+        else if (rte_pc_odd || rte_bf_replay_flt)
                 clear_instruction_traps = 1'b1;
 end
 
@@ -624,8 +648,17 @@ end
 
 assign CPU_SPACE = (NEXT_EX_STATE == EXS_GET_VECTOR);
 
+// The replayed write drives the fault address the frame carries, not a
+// stack-relative one. RESTORE_ISP_PC makes the address register file load
+// ADR_EFF from ADR_OFFSET absolutely, which is the same path the vector fetch
+// in EXS_UPDATE_PC already uses.
 assign ADR_OFFSET = (EX_STATE == EXS_REFILL_PIPE) ? {24'h0, 5'b0, PIPE_CNT, 1'b0} :
+                    (NEXT_EX_STATE == EXS_RERUN_WRITE) ? rte_bf_fault_adr :
                     (NEXT_EX_STATE == EXS_RESTORE_PC && EXCEPTION == EX_RESET_EX) ? 32'h4 :
+                    // A replayed write resumes at the continuation PC in the
+                    // internal-register long word, not by re-executing from the
+                    // faulted instruction's own address at $2.
+                    (NEXT_EX_STATE == EXS_RESTORE_PC && rte_bf_replay_write) ? 32'h14 :
                     (NEXT_EX_STATE == EXS_RESTORE_PC) ? 32'h2 :
                     (NEXT_EX_STATE == EXS_VALIDATE_FRAME) ? 32'h6 :
                     (NEXT_EX_STATE == EXS_EXAMINE_VERSION) ? 32'h36 :
@@ -633,16 +666,20 @@ assign ADR_OFFSET = (EX_STATE == EXS_REFILL_PIPE) ? {24'h0, 5'b0, PIPE_CNT, 1'b0
                     (NEXT_EX_STATE == EXS_READ_BOTTOM && STACK_FORMAT_I == 4'hB) ? 32'h5A :
                     (NEXT_EX_STATE == EXS_READ_BF_META) ? 32'h8 :
                     (NEXT_EX_STATE == EXS_READ_BF_PIPE) ? 32'hC :
+                    (NEXT_EX_STATE == EXS_READ_BF_ADR) ? 32'h10 :
+                    (NEXT_EX_STATE == EXS_READ_BF_DOB) ? 32'h18 :
                     (NEXT_EX_STATE == EXS_UPDATE_PC) ? INT_VECT : 32'h0;
 
 // ---- Operand size for bus transactions ----
 
-assign OP_SIZE = (EX_STATE == EXS_INIT) ? LONG : // Decrement the stack by four (ISP_DEC).
+assign OP_SIZE = (EX_STATE == EXS_RERUN_WRITE || NEXT_EX_STATE == EXS_RERUN_WRITE) ? rte_bf_replay_size :
+                 (EX_STATE == EXS_INIT) ? LONG : // Decrement the stack by four (ISP_DEC).
                  (NEXT_EX_STATE == EXS_RESTORE_ISP || NEXT_EX_STATE == EXS_RESTORE_PC) ? LONG :
                  (NEXT_EX_STATE == EXS_BUILD_STACK || NEXT_EX_STATE == EXS_BUILD_TSTACK) ? LONG :
                  (NEXT_EX_STATE == EXS_UPDATE_PC || EX_STATE == EXS_UPDATE_PC) ? LONG :
                  (EX_STATE == EXS_SWITCH_STATE) ? LONG :
                  (NEXT_EX_STATE == EXS_READ_BF_META || NEXT_EX_STATE == EXS_READ_BF_PIPE) ? LONG :
+                 (NEXT_EX_STATE == EXS_READ_BF_ADR || NEXT_EX_STATE == EXS_READ_BF_DOB) ? LONG :
                  (NEXT_EX_STATE == EXS_GET_VECTOR) ? BYTE : WORD;
 
 // ---- Stack frame displacement lookup ----
@@ -677,6 +714,8 @@ assign DATA_RD_I = DATA_RDY ? 1'b0 :
                    (NEXT_EX_STATE == EXS_READ_BOTTOM) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_READ_BF_META) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_READ_BF_PIPE) ? 1'b1 :
+                   (NEXT_EX_STATE == EXS_READ_BF_ADR) ? 1'b1 :
+                   (NEXT_EX_STATE == EXS_READ_BF_DOB) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_RESTORE_ISP) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_RESTORE_STATUS) ? 1'b1 :
                    (NEXT_EX_STATE == EXS_UPDATE_PC) ? 1'b1 :
@@ -684,7 +723,8 @@ assign DATA_RD_I = DATA_RDY ? 1'b0 :
 
 assign DATA_WR_I = DATA_RDY ? 1'b0 :
                    (EX_STATE == EXS_BUILD_STACK) ? 1'b1 :
-                   (EX_STATE == EXS_BUILD_TSTACK) ? 1'b1 : 1'b0;
+                   (EX_STATE == EXS_BUILD_TSTACK) ? 1'b1 :
+                   (EX_STATE == EXS_RERUN_WRITE) ? 1'b1 : 1'b0;
 
 // ---- Stack pointer, PC, and status register control ----
 
@@ -716,7 +756,8 @@ assign HALT_OUTn = !(EX_STATE == EXS_HALTED);
 
 assign RESTORE_ISP_PC = (EXCEPTION == EX_RESET_EX && (NEXT_EX_STATE == EXS_RESTORE_ISP || EX_STATE == EXS_RESTORE_ISP)) ||
                         (EXCEPTION == EX_RESET_EX && (NEXT_EX_STATE == EXS_RESTORE_PC || EX_STATE == EXS_RESTORE_PC)) ||
-                        (NEXT_EX_STATE == EXS_UPDATE_PC);
+                        (NEXT_EX_STATE == EXS_UPDATE_PC) ||
+                        (NEXT_EX_STATE == EXS_RERUN_WRITE);
 
 assign REFILLn = !(EX_STATE == EXS_REFILL_PIPE);
 
@@ -725,6 +766,46 @@ assign STACK_FORMAT = STACK_FORMAT_I;
 assign rte_bf_c_fault_restore = rte_bf_ssw[15] && rte_bf_ssw[13];
 assign rte_bf_b_fault_restore = rte_bf_ssw[14] && rte_bf_ssw[12];
 assign rte_bf_need_rerun = rte_bf_ssw[8] || rte_bf_c_fault_restore || rte_bf_b_fault_restore;
+
+// ---- Data write replay (UM 8.2.3) ----
+// "If the DF bit is still set at the time of the RTE execution, the faulted data
+// cycle is rerun by the RTE instruction." UM 8.2.2 names the two frame fields
+// the rerun needs: "the handler must transfer the properly sized data from the
+// data output buffer (DOB) on the stack frame to the location indicated by the
+// data fault address in the address space defined by the SSW. (Both the DOB and
+// the data fault address are part of the stack frame at SP+$18 and SP+$10,
+// respectively.)"
+//
+// Conditions, all from the SSW:
+//   DF  (bit 8) set      - a data cycle faulted and has not been repaired.
+//   RM  (bit 7) clear    - UM 8.2.3: with RM set the rerun "reruns the entire
+//                          instruction", which is what the pipe-image path does.
+//   RW  (bit 6) clear    - a write. A faulted read is discussed below.
+//   bit 3 set            - internal: the write was its instruction's last
+//                          memory transfer, so completing the cycle and
+//                          continuing at the stacked continuation PC is
+//                          equivalent to continuing the suspended instruction.
+// Derived from latched state only (EXCEPTION, STACK_FORMAT_I and the SSW are all
+// registers), so it is stable from the cycle after the SSW is popped until the
+// RTE finishes. That matters because both the frame-walk transitions and the
+// ADR_OFFSET selections read it one cycle ahead of the state they set up.
+assign rte_bf_replay_write = (EXCEPTION == EX_RTE) &&
+                             (STACK_FORMAT_I == 4'hA || STACK_FORMAT_I == 4'hB) &&
+                             rte_bf_ssw[8] && !rte_bf_ssw[7] && !rte_bf_ssw[6] && rte_bf_ssw[3];
+
+// SIZE field of the SSW, in the encoding this design's two fault-info capture
+// paths both produce (bus_interface.sv:data_fault_info and the MMU's
+// mmu_fault_ssw_capture).
+always_comb begin : rte_replay_size_decode
+    case (rte_bf_ssw[5:4])
+        2'b10:   rte_bf_replay_size = LONG;
+        2'b01:   rte_bf_replay_size = WORD;
+        default: rte_bf_replay_size = BYTE;
+    endcase
+end
+
+assign RTE_RERUN_WR = (EX_STATE == EXS_RERUN_WRITE) || (NEXT_EX_STATE == EXS_RERUN_WRITE);
+assign RTE_RERUN_DATA = rte_bf_dob;
 
 assign RTE_PIPE_LOAD = (EX_STATE == EXS_RESTORE_STATUS && DATA_RDY && DATA_VALID &&
                         EXCEPTION == EX_RTE &&
@@ -801,16 +882,23 @@ always_ff @(posedge CLK) begin : stack_ctrl
 end
 
 // ---- Bus-fault RTE frame capture ----
-// Captures stack-frame pipe image words and SSW for format A/B RTE restore.
+// Captures stack-frame pipe image words and SSW for format A/B RTE restore,
+// plus the data fault address ($10) and data output buffer ($18) a data write
+// rerun needs. Without the last two the design could not replay the cycle at
+// all - it had no register anywhere holding either value once the frame was
+// pushed.
 always_ff @(posedge CLK) begin : rte_bus_fault_capture
     if (SYS_INIT) begin
         rte_bf_biw_0 <= 16'h0;
         rte_bf_biw_1 <= 16'h0;
         rte_bf_biw_2 <= 16'h0;
         rte_bf_ssw <= 16'h0;
-    end else if (EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID &&
-                 (DATA_IN[15:12] == 4'hA || DATA_IN[15:12] == 4'hB)) begin
-        // Reset capture before reading frame-specific fields.
+        rte_bf_fault_adr <= 32'h0;
+        rte_bf_dob <= 32'h0;
+    end else if (EX_STATE == EXS_VALIDATE_FRAME && DATA_RDY && DATA_VALID) begin
+        // Reset capture before reading frame-specific fields. A non-A/B format
+        // must not be able to leave a previous frame's SSW behind, or its RTE
+        // would inherit that frame's rerun request.
         rte_bf_biw_0 <= 16'h0;
         rte_bf_biw_1 <= 16'h0;
         rte_bf_biw_2 <= 16'h0;
@@ -821,6 +909,10 @@ always_ff @(posedge CLK) begin : rte_bus_fault_capture
     end else if (EX_STATE == EXS_READ_BF_PIPE && DATA_RDY && DATA_VALID) begin
         rte_bf_biw_1 <= DATA_IN[31:16];
         rte_bf_biw_2 <= DATA_IN[15:0];
+    end else if (EX_STATE == EXS_READ_BF_ADR && DATA_RDY && DATA_VALID) begin
+        rte_bf_fault_adr <= DATA_IN;
+    end else if (EX_STATE == EXS_READ_BF_DOB && DATA_RDY && DATA_VALID) begin
+        rte_bf_dob <= DATA_IN;
     end
 end
 
@@ -991,8 +1083,32 @@ always_comb begin : exception_handler_dec
                             DATA_RDY   ? EXS_READ_BF_PIPE : EXS_READ_BF_META;
 
         EXS_READ_BF_PIPE:
+            // The data fault address and output buffer are only popped when the
+            // SSW asks for a data write rerun, so an unrelated frame costs no
+            // extra bus cycles.
+            NEXT_EX_STATE = ACCESS_ERR          ? EXS_IDLE :
+                            !DATA_RDY           ? EXS_READ_BF_PIPE :
+                            rte_bf_replay_write ? EXS_READ_BF_ADR : EXS_RESTORE_PC;
+
+        EXS_READ_BF_ADR:
             NEXT_EX_STATE = ACCESS_ERR ? EXS_IDLE :
-                            DATA_RDY   ? EXS_RESTORE_PC : EXS_READ_BF_PIPE;
+                            DATA_RDY   ? EXS_READ_BF_DOB : EXS_READ_BF_ADR;
+
+        EXS_READ_BF_DOB:
+            NEXT_EX_STATE = ACCESS_ERR ? EXS_IDLE :
+                            DATA_RDY   ? EXS_RESTORE_PC : EXS_READ_BF_DOB;
+
+        EXS_RERUN_WRITE: begin
+            // UM 8.2.3 puts the rerun after the frame is read and deallocated,
+            // so a fault here builds a fresh frame below the old one. ACCESS_ERR
+            // drops to idle with EX_P_BERR already latched, which is that.
+            if (ACCESS_ERR)
+                NEXT_EX_STATE = EXS_IDLE;
+            else if (DATA_RDY)
+                NEXT_EX_STATE = EXS_REFILL_PIPE;
+            else
+                NEXT_EX_STATE = EXS_RERUN_WRITE;
+        end
 
         EXS_RESTORE_STATUS: begin
             if (DOUBLE_BUSFLT)
@@ -1001,6 +1117,8 @@ always_comb begin : exception_handler_dec
                 NEXT_EX_STATE = EXS_IDLE;
             else if (DATA_RDY && STACK_FORMAT_I == 4'h1)
                 NEXT_EX_STATE = EXS_VALIDATE_FRAME; // Throwaway stack frame.
+            else if (DATA_RDY && rte_bf_replay_write)
+                NEXT_EX_STATE = EXS_RERUN_WRITE; // Complete the faulted data write.
             else if (DATA_RDY)
                 NEXT_EX_STATE = EXS_REFILL_PIPE;
             else
