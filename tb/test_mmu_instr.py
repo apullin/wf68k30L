@@ -3614,3 +3614,55 @@ async def test_mmu_demand_paging_write_fault_completes_after_rte(dut):
         f"0x{stored_value:08X}"
     )
     h.cleanup()
+
+
+@cocotb.test()
+async def test_mmu_pload_search_completes_before_the_next_instruction(dut):
+    """PLOAD must not retire before its table search has loaded the ATC.
+
+    UM 9.8: "The PLOAD instruction performs a table search operation for a
+    specified function code and logical address and then loads the translation
+    for the address into the ATC."
+
+    The probe reads the ATC in the instruction immediately after PLOADR, with no
+    filler at all, on a tree that needs three levels of real descriptor bus
+    cycles. While PLOAD completed asynchronously this reported a miss.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0xF40)
+    mmusr_dst = h.DATA_BASE + 0xFC0
+    logical_addr = 0x12345008
+    page_base = 0x00234000
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+
+        0xF010, 0x2215,                       # PLOADR #5,(A0)
+        0xF010, 0x8215,                       # PTESTR #5,(A0),#0 -- next instruction
+        *movea(LONG, SPECIAL, IMMEDIATE, 3),
+        *imm_long(mmusr_dst),
+        0xF013, 0x6200,                       # PMOVE MMUSR,(A3)
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    _load_short_tree(h, s, page_base)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "PLOAD handshake test did not complete"
+
+    mmusr = h.mem.read(mmusr_dst, 2)
+    assert (mmusr & MMUSR_I) == 0, (
+        f"ATC probe in the instruction after PLOADR reported a miss "
+        f"(MMUSR 0x{mmusr:04X}); the search had not finished when PLOAD retired"
+    )
+    assert (mmusr & MMUSR_B) == 0, (
+        f"PLOADR left a bus-error-marked entry (MMUSR 0x{mmusr:04X})"
+    )
+    assert (mmusr & MMUSR_M) == 0, (
+        f"PLOADR (read form) must leave M clear, got MMUSR 0x{mmusr:04X}"
+    )
+    h.cleanup()

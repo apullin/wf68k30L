@@ -22,6 +22,10 @@ logic [31:0] MMU_PLOAD_LOGICAL;
 logic        MMU_PLOAD_WRITE;
 logic        MMU_PLOAD_DONE;
 logic [35:0] MMU_PLOAD_RESULT;
+logic        MMU_PLOAD_REQ;
+logic        MMU_PLOAD_CONSUME;
+logic        MMU_PLOAD_BUSY;
+logic        MMU_PLOAD_READY;
 logic        MMU_RUNTIME_ATC_M_SET;
 
 WF68K30L_TOP_CACHE_STATE I_TOP_CACHE_STATE (
@@ -366,6 +370,15 @@ assign MMU_PTEST_CONSUME = (OP_WB == PTEST) &&
                            (MMU_PTEST_LEVEL != 3'b000) &&
                            ALU_ACK;
 
+// PLOAD gets the same request/ready handshake PTEST has, so its table search
+// completes before the instruction retires (UM 9.8).
+assign MMU_PLOAD_REQ = (OP_WB == PLOAD) &&
+                       ALU_BSY &&
+                       ALU_REQ &&
+                       !MMU_PLOAD_BUSY &&
+                       !MMU_PLOAD_READY;
+assign MMU_PLOAD_CONSUME = (OP_WB == PLOAD) && ALU_ACK;
+
 WF68K30L_TOP_MMU_STATE #(
     .MMU_ATC_LINES(MMU_ATC_LINES),
     .MMU_ATC_WAYS(MMU_ATC_WAYS),
@@ -405,6 +418,10 @@ WF68K30L_TOP_MMU_STATE #(
     .PTEST_WALK_MMUSR(MMU_PTEST_WALK_MMUSR),
     .MMU_PLOAD_DONE(MMU_PLOAD_DONE),
     .MMU_PLOAD_RESULT(MMU_PLOAD_RESULT),
+    .MMU_PLOAD_REQ(MMU_PLOAD_REQ),
+    .MMU_PLOAD_CONSUME(MMU_PLOAD_CONSUME),
+    .MMU_PLOAD_BUSY(MMU_PLOAD_BUSY),
+    .MMU_PLOAD_READY(MMU_PLOAD_READY),
     .MMU_PLOAD_START(MMU_PLOAD_START),
     .MMU_PLOAD_FC(MMU_PLOAD_FC),
     .MMU_PLOAD_LOGICAL(MMU_PLOAD_LOGICAL),

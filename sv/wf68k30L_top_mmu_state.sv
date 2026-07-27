@@ -38,7 +38,11 @@ module WF68K30L_TOP_MMU_STATE #(
     input  logic [15:0] PTEST_WALK_MMUSR,
     input  logic        MMU_PLOAD_DONE,
     input  logic [35:0] MMU_PLOAD_RESULT,
+    input  logic        MMU_PLOAD_REQ,
+    input  logic        MMU_PLOAD_CONSUME,
 
+    output logic        MMU_PLOAD_BUSY,
+    output logic        MMU_PLOAD_READY,
     output logic        MMU_PLOAD_START,
     output logic [2:0]  MMU_PLOAD_FC,
     output logic [31:0] MMU_PLOAD_LOGICAL,
@@ -265,6 +269,8 @@ always_ff @(posedge CLK) begin : mmu_registers
         PTEST_WALK_PENDING <= 1'b0;
         TRAP_MMU_CFG <= 1'b0;
         MMU_PLOAD_START <= 1'b0;
+        MMU_PLOAD_BUSY <= 1'b0;
+        MMU_PLOAD_READY <= 1'b0;
         MMU_PLOAD_FC <= 3'b000;
         MMU_PLOAD_LOGICAL <= 32'h0;
         MMU_PLOAD_WRITE <= 1'b0;
@@ -285,7 +291,11 @@ always_ff @(posedge CLK) begin : mmu_registers
     end else begin
         tc_cfg_err = mmu_tc_cfg_error(ALU_RESULT[31:0]);
         ptest_exec = ALU_ACK && (OP_WB == PTEST);
-        pload_exec = ALU_ACK && (OP_WB == PLOAD);
+        // PLOAD is a synchronous handshake: the search starts while the
+        // instruction is still in its execute state and the instruction does not
+        // retire until MMU_PLOAD_READY comes back, so an ATC read placed
+        // immediately after it observes the loaded entry (UM 9.8).
+        pload_exec = MMU_PLOAD_REQ;
         pmove_flush_exec = MMU_ATC_FLUSH &&
                            (MMU_TC_WR || MMU_SRP_WR || MMU_CRP_WR || MMU_TT0_WR || MMU_TT1_WR);
         pflush_exec = MMU_ATC_FLUSH && !pmove_flush_exec;
@@ -293,6 +303,8 @@ always_ff @(posedge CLK) begin : mmu_registers
         // Translation faults are delivered as bus errors (UM 8.1.2).
         TRAP_MMU_CFG <= 1'b0;
         MMU_PLOAD_START <= 1'b0;
+        if (MMU_PLOAD_CONSUME)
+            MMU_PLOAD_READY <= 1'b0;
         if (MMU_ATC_FLUSH)
             MMU_ATC_FLUSH_COUNT <= MMU_ATC_FLUSH_COUNT + 32'd1;
         if (MMU_SRP_WR) begin
@@ -380,10 +392,20 @@ always_ff @(posedge CLK) begin : mmu_registers
 
             if (!tt_hit && atc_fc != FC_CPU_SPACE) begin
                 MMU_PLOAD_START <= 1'b1;
+                MMU_PLOAD_BUSY <= 1'b1;
                 MMU_PLOAD_FC <= atc_fc;
                 MMU_PLOAD_LOGICAL <= atc_logical;
                 MMU_PLOAD_WRITE <= !BIW_1[9];
+            end else begin
+                // A transparent or CPU-space address needs no search, so the
+                // instruction may retire at once.
+                MMU_PLOAD_READY <= 1'b1;
             end
+        end
+
+        if (MMU_PLOAD_DONE) begin
+            MMU_PLOAD_BUSY <= 1'b0;
+            MMU_PLOAD_READY <= 1'b1;
         end
 
         // A write to a page whose entry has M clear sets M in the entry (UM 9.4).
