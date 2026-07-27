@@ -1,50 +1,45 @@
-"""Arbitration deviations from MC68030UM 7.7 that are confirmed by test.
+"""Arbitration timing contract of MC68030UM 7.7, in the four places it broke.
 
-EVERY TEST IN THIS MODULE IS EXPECTED TO FAIL against the current RTL. Each
-one reproduces a specific, diagnosed deviation from the bus arbitration
-contract in MC68030UM Section 7.7. They are deliberately not weakened and not
-skipped: an external bus master can observe every one of them, so they belong
-in the tree until the RTL matches the manual.
+Each test here started life as a reproducer for a diagnosed deviation from the
+bus arbitration contract in MC68030UM Section 7.7; all four are now closed and
+the module is an ordinary regression. Everything an external bus master can
+observe about *when* the bus becomes available lives here, which is why they are
+filed apart from test_bus_arbitration.py's protocol-shape tests.
 
-All four have the same neighbourhood: WF68K30L_BUS_INTERFACE's arb_dec state
-machine and the BUS_EN three-state qualifier next to it. They are filed as a
-separate module from test_bus_arbitration.py (which passes) so the green
-contract tests can be wired into the regular regression immediately while
-these stay visible as known gaps.
+All four had one root cause in sv/wf68k30L_bus_interface.sv: arb_dec gated both
+of its ARB_IDLE transitions on `BUS_CTRL_STATE == BUS_IDLE`, which defers the
+arbitration state change -- and with it BG -- to the *end* of the current bus
+cycle. UM 7.7.2 defers it only until the cycle has *begun*. The fix drops that
+gate and re-derives the three-state from UM 7.7.4's signal T, so the state change
+is immediate and only the release waits for AS; that separation is also what
+makes arbitration safe against a burst, which holds AS asserted across four long
+words and is "a single cycle" for arbitration purposes (UM 7.3.7).
 
-Summary of the diagnoses, all in sv/wf68k30L_bus_interface.sv:
+What each test pins down, and what it measured before the fix:
 
-  1. arb_dec's ARB_IDLE -> GRANT transition is gated on
-     `BUS_CTRL_STATE == BUS_IDLE`, so BG is deferred until the current bus
-     cycle has *finished*. UM 7.7.2 defers BG only until the cycle "has
-     begun". The requester is the party that qualifies on AS/DSACK/BGACK
-     (UM 7.7.3), so the grant itself is supposed to overlap the cycle.
+  1. BG must overlap a cycle already in progress. Measured: BG arrived 10
+     clocks after BR with AS already negated.
      -> test_bus_grant_overlaps_an_in_progress_bus_cycle
 
-  2. The same gate is never satisfied part-way through a split operand
-     transfer, because bus_ctrl_dec keeps chained sub-cycles inside
-     DATA_C1C4 and never returns to BUS_IDLE between them. A grant can
-     therefore be deferred by a whole misaligned or narrow-port operand.
+  2. At most the one cycle already begun may delay BG -- not a whole split
+     operand's worth of chained sub-cycles, which never return the bus
+     controller to BUS_IDLE. Measured: 19 clocks, with a further sub-cycle
+     starting first.
      -> test_bus_grant_not_deferred_across_a_split_operand_transfer
 
-  3. arb_dec's ARB_IDLE -> WAIT_RELEASE_3WIRE (single-wire BGACK) transition
-     carries the same BUS_CTRL_STATE == BUS_IDLE gate, and bus_ctrl_dec can
-     move BUS_IDLE -> START_CYCLE on the very edge the alternate master
-     legitimately takes the bus. UM 7.7.4 states that observing AS negated
-     on two consecutive clock edges "ensures that any current or pending bus
-     activity has completed or has been pre-empted"; here the pending
-     activity is neither.
+  3. Single-wire BGACK must pre-empt a pending cycle, not queue behind it.
+     UM 7.7.4: observing AS negated on two consecutive clock edges "ensures
+     that any current or pending bus activity has completed or has been
+     pre-empted". Measured: 3 of 6 takeovers at the point UM 7.7.4 declares
+     safe left the core still driving.
      -> test_single_wire_bgack_alone_preempts_a_pending_bus_cycle
 
-  4. There is no way at all to force the core off the bus during the first
-     read of a read-modify-write sequence by relinquish and retry. arb_dec
-     bypasses the RMC lock when RETRY is asserted, but RETRY also pins
-     bus_ctrl_dec in DATA_C1C4 (BUS_CYC_RDY is forced low while RETRY), and
-     both remaining arb_dec transitions require BUS_CTRL_STATE == BUS_IDLE.
-     So the `!RETRY` term is dead and UM 7.7.4's first escape hatch is
-     missing. Note this refutes, rather than confirms, the static reading
-     that relinquish and retry is permitted on *any* RMC cycle: it is
-     permitted on none.
+  4. Relinquish and retry must break into the first read of a
+     read-modify-write sequence, and only that one. arb_dec did try, with
+     `if (RMC && !RETRY)`, but the exemption was unreachable: RETRY also holds
+     BUS_CYC_RDY low, so bus_ctrl_dec cannot leave DATA_C1C4, and both
+     remaining transitions needed BUS_IDLE. Measured: BG never asserted at
+     all, so neither of UM 7.7.4's two escape hatches worked.
      -> test_relinquish_and_retry_breaks_into_first_rmc_read
 """
 
@@ -96,7 +91,7 @@ async def _wait_cycle_start(dut, limit=6000, want_addr=None, want_rw=None):
 
 @cocotb.test()
 async def test_bus_grant_overlaps_an_in_progress_bus_cycle(dut):
-    """EXPECTED FAIL. UM 7.7.2: BG is asserted while the current cycle runs.
+    """UM 7.7.2: BG is asserted while the current cycle runs.
 
     "The processor asserts BG as soon as possible after receipt of BR. This is
     immediately following internal synchronization except during a
@@ -113,14 +108,14 @@ async def test_bus_grant_overlaps_an_in_progress_bus_cycle(dut):
     still asserted, within the two clocks UM 7.7.4 allows for synchronizing an
     asynchronous input.
 
-    DIAGNOSIS: sv/wf68k30L_bus_interface.sv arb_dec, ARB_IDLE state --
+    WAS: sv/wf68k30L_bus_interface.sv arb_dec, ARB_IDLE state --
     `else if (!BR_In && BUS_CTRL_STATE == BUS_IDLE) NEXT_ARB_STATE = GRANT;`
-    The BUS_CTRL_STATE == BUS_IDLE term defers the grant until the cycle has
-    ended. Removing it also means BUS_EN (and DATA_PORT_EN) can no longer be
+    The BUS_CTRL_STATE == BUS_IDLE term deferred the grant until the cycle had
+    ended. Dropping it also means BUS_EN (and DATA_PORT_EN) can no longer be
     `ARB_STATE == ARB_IDLE` alone: UM 7.7.4 says signal T places the buses in
     high impedance "after the next rising edge following the negation of AS
-    and RMC", so the three-state has to be qualified on AS/RMC negation
-    instead of on the arbitration state alone.
+    and RMC", so the three-state is qualified on AS negation instead of on the
+    arbitration state alone.
     """
     h = CPUTestHarness(dut, wait_states=6)
     await h.setup(_busy_program(h))
@@ -147,7 +142,7 @@ async def test_bus_grant_overlaps_an_in_progress_bus_cycle(dut):
 
 @cocotb.test()
 async def test_bus_grant_not_deferred_across_a_split_operand_transfer(dut):
-    """EXPECTED FAIL. UM 7.7.2: at most the cycle already begun may delay BG.
+    """UM 7.7.2: at most the cycle already begun may delay BG.
 
     A misaligned long word is transferred as several chained sub-cycles. Since
     UM 7.7.2 defers BG only "until the bus cycle has begun", no *further* bus
@@ -155,12 +150,12 @@ async def test_bus_grant_not_deferred_across_a_split_operand_transfer(dut):
     with operand size, which UM 11.9 lists only for the address translation
     search, never for ordinary misaligned operands.
 
-    DIAGNOSIS: sv/wf68k30L_bus_interface.sv bus_ctrl_dec keeps every sub-cycle
-    of a split transfer inside DATA_C1C4 (it leaves only on
-    `BUS_CYC_RDY && SIZE_N == 3'b000`), so the `BUS_CTRL_STATE == BUS_IDLE`
-    gate on arb_dec's grant transition cannot be satisfied until the entire
-    operand has been transferred. Same root cause as
-    test_bus_grant_overlaps_an_in_progress_bus_cycle, but the deferral is
+    WAS: sv/wf68k30L_bus_interface.sv bus_ctrl_dec keeps every sub-cycle of a
+    split transfer inside DATA_C1C4 (it leaves only on
+    `BUS_CYC_RDY && LAST_SUB_CYCLE`), so the `BUS_CTRL_STATE == BUS_IDLE` gate
+    on arb_dec's grant transition could not be satisfied until the entire
+    operand had been transferred. Same root cause as
+    test_bus_grant_overlaps_an_in_progress_bus_cycle, but the deferral was
     unbounded in operand size rather than in one cycle.
     """
     h = CPUTestHarness(dut, wait_states=6)
@@ -194,30 +189,28 @@ async def test_bus_grant_not_deferred_across_a_split_operand_transfer(dut):
 
 @cocotb.test()
 async def test_single_wire_bgack_alone_preempts_a_pending_bus_cycle(dut):
-    """EXPECTED FAIL. UM 7.7.4: the two-edge AS check is meant to be enough.
+    """UM 7.7.4: the two-edge AS check is enough to take the bus safely.
 
     "Note that for the method to operate properly, AS must be observed to be
     negated (high) on two consecutive clock edges before the alternate bus
     master takes the bus. Waiting for this condition ensures that any current
     or pending bus activity has completed or has been pre-empted."
 
-    The model does exactly that and then asserts BGACK. The core must not
-    drive the bus afterwards. Several attempts are made because the hazard
-    needs the core to have a cycle queued at that moment; a conforming core
-    passes every attempt.
+    The model asserts BGACK and then does exactly that (Figure 7-62 NOTE: the
+    two edges are counted "after BGACK is recognized low"). The core must not
+    drive the bus afterwards. Several attempts are made because the hazard needs
+    the core to have a cycle queued at that moment; a conforming core passes
+    every attempt.
 
-    DIAGNOSIS: sv/wf68k30L_bus_interface.sv. In back-to-back traffic AS is
-    high for exactly two rising edges: one in BUS_CTRL_STATE == BUS_IDLE and
-    one in START_CYCLE. Asserting BGACK on the second of those is legal per
-    UM 7.7.4, but BGACK_In is only sampled on the following negedge, by which
-    time bus_ctrl_dec has already committed BUS_IDLE -> START_CYCLE ->
-    DATA_C1C4; arb_dec's `!BGACK_In && BUS_CTRL_STATE == BUS_IDLE` guard then
-    cannot fire until that cycle ends. The pending activity is neither
-    completed nor pre-empted, and because the slave model is correctly off the
-    bus the cycle also stalls with AS asserted until BGACK is released. The UM
-    behaviour is to assert signal T immediately (state 0 -> state 4) and let
-    the three-state wait for AS to negate, rather than to gate the state
-    change on the bus controller being idle.
+    WAS: sv/wf68k30L_bus_interface.sv. arb_dec's forced-release transition
+    carried the same `BUS_CTRL_STATE == BUS_IDLE` gate as the grant, so a
+    BGACK that arrived while a cycle was committed could not change the
+    arbitration state until that cycle ended -- and because the slave model is
+    correctly off the bus by then, the cycle stalled with AS asserted until
+    BGACK was released. Neither completed nor pre-empted. The fix asserts signal
+    T immediately (Figure 7-61 state 0 -> state 4) and pre-empts a cycle that
+    has been committed in START_CYCLE but has not driven AS yet; the release
+    itself then waits for AS.
     """
     h = CPUTestHarness(dut, wait_states=1)
     await h.setup(_busy_program(h))
@@ -247,7 +240,7 @@ async def test_single_wire_bgack_alone_preempts_a_pending_bus_cycle(dut):
 
 @cocotb.test()
 async def test_relinquish_and_retry_breaks_into_first_rmc_read(dut):
-    """EXPECTED FAIL. UM 7.7.4: BERR+HALT+BR must work on the first RMC read.
+    """UM 7.7.4: BERR+HALT+BR must work on the first RMC read.
 
     "One way for an alternate bus master to force the MC68030 to release the
     bus applies only to the first read cycle of an read-modify-write sequence.
@@ -262,15 +255,17 @@ async def test_relinquish_and_retry_breaks_into_first_rmc_read(dut):
     BERR, HALT and BR are asserted together on the first (and only) read of a
     TAS, so BG must be asserted.
 
-    DIAGNOSIS: sv/wf68k30L_bus_interface.sv. arb_dec does try to allow this --
-    its RMC lock reads `if (RMC && !RETRY)` -- but the exemption is
-    unreachable. BUS_CYC_RDY is forced to 0 while RETRY is asserted, so
-    bus_ctrl_dec cannot leave DATA_C1C4, and arb_dec's grant transition
-    additionally requires `BUS_CTRL_STATE == BUS_IDLE`. RETRY is cleared on
-    the same negedge that samples HALT negated, so there is never a clock in
-    which RMC && RETRY && BUS_CTRL_STATE == BUS_IDLE all hold. Combined with
+    WAS: sv/wf68k30L_bus_interface.sv. arb_dec did try to allow this -- its RMC
+    lock read `if (RMC && !RETRY)` -- but the exemption was unreachable.
+    BUS_CYC_RDY is forced to 0 while RETRY is asserted, so bus_ctrl_dec cannot
+    leave DATA_C1C4, and arb_dec's grant transition additionally required
+    `BUS_CTRL_STATE == BUS_IDLE`. RETRY is cleared on the same negedge that
+    samples HALT negated, so there was never a clock in which
+    RMC && RETRY && BUS_CTRL_STATE == BUS_IDLE all held. Combined with
     single-wire arbitration during RMC (fixed separately), this was the second
-    of the two escape hatches UM 7.7.4 provides, and neither worked.
+    of the two escape hatches UM 7.7.4 provides, and neither worked. The lock is
+    now `RMC && !(RETRY && RMC_FIRST_READ)`, which is UM 7.5.2's limit exactly:
+    a relinquish and retry lands the release, and only on the first read.
     """
     h = CPUTestHarness(dut)
     tas_addr = h.DATA_BASE + 0x40

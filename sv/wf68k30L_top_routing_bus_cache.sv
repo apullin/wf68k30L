@@ -33,6 +33,8 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE (
     input  logic        MMU_PTEST_START,
     input  logic        MMU_PTEST_CONSUME,
 
+    // Retired with the background line-completion cycles below. The ports stay
+    // because this module's instantiation is not part of this change.
     input  logic        ICACHE_BURST_FILL_VALID,
     input  logic [3:0]  ICACHE_BURST_FILL_LINE,
     input  logic [23:0] ICACHE_BURST_FILL_TAG,
@@ -80,6 +82,10 @@ module WF68K30L_TOP_ROUTING_BUS_CACHE (
     output logic        MMU_FAULT_OPCODE_ACK,
     output logic        MMU_FAULT_SSW_VALID,
     output logic [8:0]  MMU_FAULT_SSW,
+    // Retired with the background line-completion cycles: no bus cycle belongs
+    // to a line fill any more, so none has to be hidden from the core's ready
+    // strobes. The ports stay because this module's instantiation is not part of
+    // this change.
     output logic        BUS_CYCLE_BURST,
     output logic        BUS_CYCLE_BURST_IS_OP,
 
@@ -148,18 +154,6 @@ logic [31:0] MMU_TWALK_OFFSET_MASK_CUR;
 logic        MMU_TWALK_IS_PLOAD;
 logic        MMU_PLOAD_PENDING;
 logic        OPCODE_REQ_BUS_OK;
-logic        BURST_PREFETCH_OP_REQ_NOW;
-logic        BURST_PREFETCH_DATA_REQ_NOW;
-logic [2:0]  BURST_PREFETCH_OP_WORD_NOW;
-logic [1:0]  BURST_PREFETCH_DATA_ENTRY_NOW;
-logic [31:0] BURST_PREFETCH_ADDR_NOW;
-logic [2:0]  BURST_PREFETCH_FC_NOW;
-logic        BURST_PREFETCH_OP_REQ_HELD;
-logic        BURST_PREFETCH_DATA_REQ_HELD;
-logic [2:0]  BURST_PREFETCH_OP_WORD_HELD;
-logic [1:0]  BURST_PREFETCH_DATA_ENTRY_HELD;
-logic [31:0] BURST_PREFETCH_ADDR_HELD;
-logic [2:0]  BURST_PREFETCH_FC_HELD;
 
 assign MMU_TWALK_INDIRECT_SHORT_ADDR = {MMU_TWALK_DESC_PTR[31:2], 2'b00};
 assign MMU_TWALK_INDIRECT_LONG_ADDR = {MMU_TWALK_DESC_PTR[31:3], 3'b000};
@@ -270,98 +264,27 @@ WF68K30L_TOP_MMU_PTEST I_TOP_MMU_PTEST (
 assign DATA_RD = DATA_RD_EXH || DATA_RD_MAIN;
 assign DATA_WR = DATA_WR_EXH || DATA_WR_MAIN;
 
-always_comb begin : burst_prefetch_select
-    integer      scan_idx;
-    logic        icache_found;
-    logic [2:0]  icache_scan_word;
-    logic        dcache_found;
-    logic [1:0]  dcache_scan_entry;
-    BURST_PREFETCH_OP_REQ_NOW = 1'b0;
-    BURST_PREFETCH_DATA_REQ_NOW = 1'b0;
-    BURST_PREFETCH_OP_WORD_NOW = 3'b000;
-    BURST_PREFETCH_DATA_ENTRY_NOW = 2'b00;
-    BURST_PREFETCH_ADDR_NOW = 32'h0000_0000;
-    BURST_PREFETCH_FC_NOW = FC_USER_PROG;
-    scan_idx = 0;
-    icache_found = 1'b0;
-    icache_scan_word = ICACHE_BURST_FILL_NEXT_WORD;
-    dcache_found = 1'b0;
-    dcache_scan_entry = DCACHE_BURST_FILL_NEXT_ENTRY;
-
-    // UM 7.3.7: RMC is asserted for the whole indivisible read-modify-write
-    // sequence and no burst filling occurs during it, so no background fill
-    // cycle may be injected between its halves either. UM 9.5.2 makes the same
-    // demand of a table search, which owns the bus from its first descriptor
-    // cycle to its last -- the PTEST search included (UM 9.8).
-    if (!BUS_BSY && !DATA_WR && !DATA_RD && !OPCODE_RD && !BUSY_EXH && !RMC &&
-        !MMU_DESC_SEARCH_BUSY) begin
-        if (ICACHE_BURST_FILL_VALID && ICACHE_BURST_FILL_PENDING != 8'h00) begin
-            for (scan_idx = 0; scan_idx < 8; scan_idx = scan_idx + 1) begin
-                if (!icache_found) begin
-                    icache_scan_word = ICACHE_BURST_FILL_NEXT_WORD + scan_idx[2:0];
-                    if (ICACHE_BURST_FILL_PENDING[icache_scan_word]) begin
-                        BURST_PREFETCH_OP_WORD_NOW = icache_scan_word;
-                        icache_found = 1'b1;
-                    end
-                end
-            end
-            BURST_PREFETCH_OP_REQ_NOW = 1'b1;
-            BURST_PREFETCH_ADDR_NOW = {
-                ICACHE_BURST_FILL_TAG,
-                ICACHE_BURST_FILL_LINE,
-                BURST_PREFETCH_OP_WORD_NOW,
-                1'b0
-            };
-            BURST_PREFETCH_FC_NOW = ICACHE_BURST_FILL_FC;
-        end else if (DCACHE_BURST_FILL_VALID && DCACHE_BURST_FILL_PENDING != 4'h0) begin
-            for (scan_idx = 0; scan_idx < 4; scan_idx = scan_idx + 1) begin
-                if (!dcache_found) begin
-                    dcache_scan_entry = DCACHE_BURST_FILL_NEXT_ENTRY + scan_idx[1:0];
-                    if (DCACHE_BURST_FILL_PENDING[dcache_scan_entry]) begin
-                        BURST_PREFETCH_DATA_ENTRY_NOW = dcache_scan_entry;
-                        dcache_found = 1'b1;
-                    end
-                end
-            end
-            BURST_PREFETCH_DATA_REQ_NOW = 1'b1;
-            BURST_PREFETCH_ADDR_NOW = {
-                DCACHE_BURST_FILL_TAG,
-                DCACHE_BURST_FILL_LINE,
-                BURST_PREFETCH_DATA_ENTRY_NOW,
-                2'b00
-            };
-            BURST_PREFETCH_FC_NOW = DCACHE_BURST_FILL_FC;
-        end
-    end
-end
-
-// The bus controller samples address, size and function code live for the whole
-// cycle, so the selected burst context must be held until the cycle completes
-// instead of collapsing when BUS_BSY rises.
-always_ff @(posedge CLK) begin : burst_prefetch_hold
-    if (RESET_CPU) begin
-        BURST_PREFETCH_OP_REQ_HELD <= 1'b0;
-        BURST_PREFETCH_DATA_REQ_HELD <= 1'b0;
-        BURST_PREFETCH_OP_WORD_HELD <= 3'b000;
-        BURST_PREFETCH_DATA_ENTRY_HELD <= 2'b00;
-        BURST_PREFETCH_ADDR_HELD <= 32'h0000_0000;
-        BURST_PREFETCH_FC_HELD <= FC_USER_PROG;
-    end else if (!BUS_BSY) begin
-        BURST_PREFETCH_OP_REQ_HELD <= BURST_PREFETCH_OP_REQ_NOW;
-        BURST_PREFETCH_DATA_REQ_HELD <= BURST_PREFETCH_DATA_REQ_NOW;
-        BURST_PREFETCH_OP_WORD_HELD <= BURST_PREFETCH_OP_WORD_NOW;
-        BURST_PREFETCH_DATA_ENTRY_HELD <= BURST_PREFETCH_DATA_ENTRY_NOW;
-        BURST_PREFETCH_ADDR_HELD <= BURST_PREFETCH_ADDR_NOW;
-        BURST_PREFETCH_FC_HELD <= BURST_PREFETCH_FC_NOW;
-    end
-end
-
-assign BURST_PREFETCH_OP_REQ = BUS_BSY ? BURST_PREFETCH_OP_REQ_HELD : BURST_PREFETCH_OP_REQ_NOW;
-assign BURST_PREFETCH_DATA_REQ = BUS_BSY ? BURST_PREFETCH_DATA_REQ_HELD : BURST_PREFETCH_DATA_REQ_NOW;
-assign BURST_PREFETCH_OP_WORD = BUS_BSY ? BURST_PREFETCH_OP_WORD_HELD : BURST_PREFETCH_OP_WORD_NOW;
-assign BURST_PREFETCH_DATA_ENTRY = BUS_BSY ? BURST_PREFETCH_DATA_ENTRY_HELD : BURST_PREFETCH_DATA_ENTRY_NOW;
-assign BURST_PREFETCH_ADDR = BUS_BSY ? BURST_PREFETCH_ADDR_HELD : BURST_PREFETCH_ADDR_NOW;
-assign BURST_PREFETCH_FC = BUS_BSY ? BURST_PREFETCH_FC_HELD : BURST_PREFETCH_FC_NOW;
+// ---- Background line completion: retired ----
+// A line fill used to be completed by injecting separate bus cycles at re-driven
+// addresses, one per missing entry, which is traffic no MC68030 emits: UM 7.3.7
+// holds AS, DS, R/W, A0-A31, FC0-FC2 and SIZ0-SIZ1 for the whole burst and takes
+// one long word per STERM, and UM 6.1.3.2 has the processor "continue driving the
+// address and bus control signals and to latch a new data value for the next
+// cache entry at the completion of each subsequent cycle". A real '030 either
+// bursts under one AS or fills the single entry it asked for.
+//
+// The bus interface's streaming engine now does that, so nothing requests a
+// background cycle any more. The request ports remain because
+// WF68K30L_TOP_ROUTING_MMU_TRANSLATE still takes them as the address override for
+// such a cycle; tied off, that mux arm is unreachable and synthesis drops it.
+assign BURST_PREFETCH_OP_REQ = 1'b0;
+assign BURST_PREFETCH_DATA_REQ = 1'b0;
+assign BURST_PREFETCH_OP_WORD = 3'b000;
+assign BURST_PREFETCH_DATA_ENTRY = 2'b00;
+assign BURST_PREFETCH_ADDR = 32'h0000_0000;
+assign BURST_PREFETCH_FC = FC_USER_PROG;
+assign BUS_CYCLE_BURST = 1'b0;
+assign BUS_CYCLE_BURST_IS_OP = 1'b0;
 
 // Request/fault latches that decouple core-side combinational logic from bus FSM timing.
 always_ff @(posedge CLK) begin : bus_req_latch
@@ -373,32 +296,19 @@ always_ff @(posedge CLK) begin : bus_req_latch
         OPCODE_REQ_I <= 1'b0;
         MMU_FAULT_DATA_ACK <= 1'b0;
         MMU_FAULT_OPCODE_ACK <= 1'b0;
-        BUS_CYCLE_BURST <= 1'b0;
-        BUS_CYCLE_BURST_IS_OP <= 1'b0;
         BUS_CYCLE_MMU_WALK <= 1'b0;
     end else if (!BUS_BSY) begin
         MMU_FAULT_DATA_ACK <= MMU_RUNTIME_FAULT && (DATA_RD_BUS || DATA_WR);
         MMU_FAULT_OPCODE_ACK <= MMU_RUNTIME_FAULT && OPCODE_REQ_CORE_MISS && !DATA_RD_BUS && !DATA_WR;
         RD_REQ_I <= (DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
-                    BURST_PREFETCH_DATA_REQ || MMU_TWALK_BUS_RD;
+                    MMU_TWALK_BUS_RD;
         WR_REQ_I <= (DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
                     MMU_TWALK_BUS_WR;
-        OPCODE_REQ_I <= (OPCODE_REQ_CORE_MISS && !DATA_RD && !DATA_WR &&
-                         !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
-                        BURST_PREFETCH_OP_REQ;
-        if (BURST_PREFETCH_OP_REQ) begin
-            BUS_CYCLE_BURST <= 1'b1;
-            BUS_CYCLE_BURST_IS_OP <= 1'b1;
-        end else if (BURST_PREFETCH_DATA_REQ) begin
-            BUS_CYCLE_BURST <= 1'b1;
-            BUS_CYCLE_BURST_IS_OP <= 1'b0;
-        end else begin
-            BUS_CYCLE_BURST <= 1'b0;
-            BUS_CYCLE_BURST_IS_OP <= 1'b0;
-        end
+        OPCODE_REQ_I <= OPCODE_REQ_CORE_MISS && !DATA_RD && !DATA_WR &&
+                        !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK;
         // Descriptor traffic is invisible to the core's ready strobes.
         BUS_CYCLE_MMU_WALK <= MMU_TWALK_BUS_RD || MMU_TWALK_BUS_WR;
-    end else if (BUS_BSY) begin
+    end else begin
         RD_REQ_I <= 1'b0;
         WR_REQ_I <= 1'b0;
         OPCODE_REQ_I <= 1'b0;
@@ -1216,7 +1126,7 @@ end
 // A table search in flight owns the bus (UM 9.5.2), so core traffic is held off
 // and the search's own descriptor cycles are injected instead.
 assign RD_REQ = !BUS_BSY ? ((DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
-                            BURST_PREFETCH_DATA_REQ || MMU_TWALK_BUS_RD) : RD_REQ_I;
+                            MMU_TWALK_BUS_RD) : RD_REQ_I;
 assign WR_REQ = !BUS_BSY ? ((DATA_WR && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
                             MMU_TWALK_BUS_WR) : WR_REQ_I;
 assign OPCODE_REQ_CORE = !BUS_BSY ? OPCODE_RD : OPCODE_REQ_I;
@@ -1230,9 +1140,8 @@ assign OPCODE_REQ_CORE_MISS = OPCODE_REQ_CORE && !ICACHE_HIT_NOW;
 assign OPCODE_REQ_BUS_OK = BUS_BSY || (!DATA_RD && !DATA_WR);
 
 // On an instruction-cache hit, satisfy the opcode fetch internally.
-assign OPCODE_REQ = (OPCODE_REQ_CORE_MISS && OPCODE_REQ_BUS_OK &&
-                     !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK) ||
-                    BURST_PREFETCH_OP_REQ;
+assign OPCODE_REQ = OPCODE_REQ_CORE_MISS && OPCODE_REQ_BUS_OK &&
+                    !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL && !MMU_TWALK_BUS_LOCK;
 
 assign DATA_RD_BUS = DATA_RD && !DCACHE_HIT_NOW;
 

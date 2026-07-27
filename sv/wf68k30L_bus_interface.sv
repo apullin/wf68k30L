@@ -51,7 +51,20 @@ module WF68K30L_BUS_INTERFACE (
 
     input  logic        STERMn,
     input  logic        CIINn,
+    input  logic        CBACKn,
     output logic        CACHE_INHIBIT_IN,
+
+    // Burst streaming (UM 7.3.7). BURST_REQ is the burst request the cache
+    // subsystem is making, which is what CBREQ is driven from; the beat port
+    // hands each streamed long word to the cache fill path.
+    input  logic        BURST_REQ,
+    output logic        BURST_ACTIVE,
+    output logic        BURST_CBREQ_HOLD,
+    output logic        BURST_BEAT_RDY,
+    output logic        BURST_BEAT_FIRST,
+    output logic        BURST_BEAT_IS_OP,
+    output logic [31:0] BURST_BEAT_ADDR,
+    output logic [31:0] BURST_BEAT_DATA,
 
     input  logic        BRn,
     input  logic        BGACKn,
@@ -131,6 +144,26 @@ logic               SSW_FROZEN;
 logic               STARTUP = 1'b0;
 logic               STERM_In;
 logic               CIIN_In;
+logic               CBACK_In;
+logic [31:0]        DATA_PORT_LATCH;
+logic               BURST_ENTER;
+logic [2:0]         BURST_COUNT;
+logic [1:0]         BURST_BASE_ENTRY;
+logic [27:0]        BURST_BASE_LINE;
+logic               BURST_IS_OP;
+logic               BURST_STREAMING;
+logic               BURST_LAST;
+logic               BURST_TAKE;
+logic [31:0]        BURST_TAKE_DATA;
+logic               BURST_TAKE_CI;
+logic               BURST_TAKE_CBACK;
+logic               BURST_TAKE_FLT;
+logic               ARB_THREE_STATE;
+logic               BUS_HIZ;
+logic               BUS_PREEMPT;
+logic               RMC_ARB_LOCK;
+logic               RMC_FIRST_READ;
+logic               RMC_D;
 TIME_SLICES         T_SLICE;
 logic               WAITSTATES;
 logic [31:0]        WP_BUFFER;
@@ -154,6 +187,7 @@ always_ff @(negedge CLK) begin : sync_bus_termination
     BUS_FLT_VAR <= ~BERRn;
     STERM_In <= STERMn;
     CIIN_In <= CIINn;
+    CBACK_In <= CBACKn;
     BR_In <= BRn;
     BGACK_In <= BGACKn;
     AVEC_In <= AVECn;
@@ -162,7 +196,10 @@ always_ff @(negedge CLK) begin : sync_bus_termination
     // sampled after SIZE_N has already counted down, so the terminating
     // sub-cycle has to qualify as well.
     // The rerun is held off until HALT is negated by external logic.
-    if (!BERRn && !HALTn && BUS_CTRL_STATE == DATA_C1C4)
+    // UM 7.3.7: "during the second, third, or fourth cycle of a burst operation,
+    // this signal combination indicates a bus error condition, which aborts the
+    // burst operation" -- not a retry, so the burst tail is excluded.
+    if (!BERRn && !HALTn && BUS_CTRL_STATE == DATA_C1C4 && !BURST_ACTIVE)
         RETRY <= 1'b1;
     else if (T_SLICE == SLICE_IDLE && HALTn)
         RETRY <= 1'b0;
@@ -173,7 +210,11 @@ always_ff @(posedge CLK) begin : fault_latch
     if (BUS_CTRL_STATE == START_CYCLE)
         AERR <= AERR_I;
     else if (BUS_CTRL_STATE == DATA_C1C4)
-        BUS_FLT <= BUS_FLT_VAR;
+        // UM 6.1.3.2: "The assertion of the BERR signal during the second,
+        // third, or fourth access of a burst operation does not cause a bus
+        // error exception, but the burst is aborted." The burst engine takes
+        // care of the abort; no fault is raised for those accesses.
+        BUS_FLT <= BURST_ACTIVE ? 1'b0 : BUS_FLT_VAR;
     else begin
         BUS_FLT <= 1'b0;
         AERR <= 1'b0;
@@ -290,6 +331,10 @@ assign BUS_WIDTH = (DSACKn == 2'b01 || DSACK_MEM == 2'b01) ? BW_WORD :
                    (DSACKn == 2'b10 || DSACK_MEM == 2'b10) ? BW_BYTE :
                    LONG_32; // Also used during synchronous cycles.
 
+// UM 7.3.7: "a burst operation is a single cycle since AS remains asserted
+// during the entire operation." The bus controller stays in DATA_C1C4 for the
+// streamed long words, so BUS_BSY covers the whole burst on its own, and with it
+// the address, function code and size the top level holds while the bus is busy.
 assign BUS_BSY = (BUS_CTRL_STATE != BUS_IDLE);
 
 // ---- Bytes moved by the sub-cycle in flight ----
@@ -373,14 +418,25 @@ end
 assign SIZE_I = (T_SLICE == S0 || T_SLICE == S1) ? SIZE_N[1:0] : SIZE_D;
 assign SIZE = SIZE_I;
 
+// UM 7.3.7 lists SIZ0-SIZ1 among the signals held "in their current state
+// throughout the burst operation", so the delayed copy that drives SIZE once the
+// cycle is past S1 is frozen for the duration.
 always_ff @(posedge CLK) begin : size_delay
-    SIZE_D <= SIZE_N[1:0];
+    if (!BURST_ACTIVE)
+        SIZE_D <= SIZE_N[1:0];
 end
 
 // ---- Bus controller state register ----
 always_ff @(posedge CLK) begin : bus_state_reg
     BUS_CTRL_STATE <= NEXT_BUS_CTRL_STATE;
 end
+
+// A forced release (BGACK asserted with no grant, UM 7.7.4 state 0 -> state 4)
+// pre-empts a cycle that has been committed but has not driven AS yet. The
+// granted path never needs this: arb_dec leaves ARB_IDLE before BGACK can be
+// asserted, and bus_ctrl_dec will not start a cycle from BUS_IDLE while the
+// arbiter is out of ARB_IDLE.
+assign BUS_PREEMPT = !BGACK_In;
 
 // ---- Bus controller next-state logic ----
 always_comb begin : bus_ctrl_dec
@@ -404,7 +460,17 @@ always_comb begin : bus_ctrl_dec
                 NEXT_BUS_CTRL_STATE = BUS_IDLE;
         end
         START_CYCLE: begin
-            if (RD_REQ)
+            // UM 7.7.4: an alternate master may take the bus once it "must be
+            // observed to be negated (high) on two consecutive clock edges...
+            // Waiting for this condition ensures that any current or pending bus
+            // activity has completed or has been pre-empted." A cycle committed
+            // on the second of those edges has not driven AS yet, so it is the
+            // pending activity, and it is pre-empted rather than run. The access
+            // latches are untouched, so BUS_IDLE restarts it once the bus is
+            // handed back.
+            if (BUS_PREEMPT)
+                NEXT_BUS_CTRL_STATE = BUS_IDLE;
+            else if (RD_REQ)
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
             else if (WR_REQ)
                 NEXT_BUS_CTRL_STATE = DATA_C1C4;
@@ -692,6 +758,8 @@ always_ff @(posedge CLK) begin : slice_counter_pos
         SLICE_CNT_P <= 3'b111; // Init.
     else if (RETRY)
         SLICE_CNT_P <= 3'b111;
+    else if (BURST_ACTIVE)
+        SLICE_CNT_P <= 3'b111; // Burst: no further sub-cycle timing, AS is held.
     else if (BUS_CTRL_STATE != BUS_IDLE && NEXT_BUS_CTRL_STATE == BUS_IDLE)
         SLICE_CNT_P <= 3'b111; // Init.
     else if (SLICE_CNT_P == 3'b001 && !STERM_In) // Synchronous cycle.
@@ -740,16 +808,177 @@ assign RWn  = !(WRITE_ACCESS && BUS_CTRL_STATE == DATA_C1C4);
 assign RMCn = !RMC;
 assign ECSn = !(T_SLICE == S0);
 assign OCSn = !(T_SLICE == S0 && !OCS_INH);
-assign ASn  = !SLICE_S0_TO_S4;
-assign DSn  = !(WRITE_ACCESS ? SLICE_S3_TO_S5 : SLICE_S0_TO_S4); // Write: DS late, read: DS early.
-assign DBENn = !(WRITE_ACCESS ? SLICE_S1_TO_S5 : SLICE_S2_TO_S4); // Write: S1-S5, read: S2-S4.
+// UM 7.3.7 holds AS, DS, R/W, A0-A31, FC0-FC2 and SIZ0-SIZ1 for the whole burst;
+// Figure 7-37's END OF BURST negates AS, DS and DBEN together at the end of it.
+// R/W is already held for a read (WRITE_ACCESS is clear), and the address, FC and
+// SIZE are held by BUS_BSY and size_delay above.
+assign ASn  = !(SLICE_S0_TO_S4 || BURST_ACTIVE);
+assign DSn  = !(WRITE_ACCESS ? SLICE_S3_TO_S5 : (SLICE_S0_TO_S4 || BURST_ACTIVE)); // Write: DS late, read: DS early.
+assign DBENn = !(WRITE_ACCESS ? SLICE_S1_TO_S5 : (SLICE_S2_TO_S4 || BURST_ACTIVE)); // Write: S1-S5, read: S2-S4.
 
-// ---- Bus tri-state controls ----
-assign BUS_EN       = ARB_STATE == ARB_IDLE && !RESET_CPU_I;
-assign DATA_PORT_EN = WRITE_ACCESS && ARB_STATE == ARB_IDLE && !RESET_CPU_I;
+// ---- Bus tri-state controls: UM 7.7.4 signal T ----
+// "The BG output is labeled G, and the internal high-impedance control signal is
+// labeled T. If T is true, the address, data, and control buses are placed in
+// the high-impedance state after the next rising edge following the negation of
+// AS and RMC." Figure 7-61 makes state 0 -- the processor holding the bus -- the
+// only state in which T is negated, so T follows the arbitration state directly
+// and it is the *release* that waits for the bus to fall quiet. That separation
+// is what lets a grant overlap a cycle in progress without pulling the bus out
+// from under it, including a burst, which holds AS asserted for the whole
+// operation and is "a single cycle" for arbitration purposes (UM 7.3.7).
+//
+// AS is the whole condition. Both forced-release paths UM 7.7.4 documents run
+// with RMC still asserted -- relinquish and retry on the first locked read, and
+// single-wire BGACK, which "applies to all bus cycles of a read-modify-write
+// sequence" -- so requiring RMC negated would make neither of them able to
+// release the bus. The granted path cannot be entered while RMC is asserted at
+// all (Figure 7-61 NOTE), so for it the RMC term is already satisfied.
+//
+// "The bus control signals (controlled by T) are driven by the processor,
+// immediately following a state change, when bus mastery is returned to the
+// MC68030": the reacquire side is combinational, not registered.
+assign ARB_THREE_STATE = (ARB_STATE != ARB_IDLE);
+
+always_ff @(posedge CLK) begin : three_state_apply
+    if (RESET_CPU_I || !ARB_THREE_STATE)
+        BUS_HIZ <= 1'b0;
+    else if (ASn)
+        BUS_HIZ <= 1'b1;
+end
+
+assign BUS_EN       = !RESET_CPU_I && !(ARB_THREE_STATE && BUS_HIZ);
+assign DATA_PORT_EN = WRITE_ACCESS && BUS_EN;
+
+// ========================================================================
+// Burst streaming engine (UM 7.3.7, UM 6.1.3.2)
+// ========================================================================
+// UM 7.3.7: "The MC68030 allows burst filling only from 32-bit ports that
+// terminate bus cycles with STERM and respond to CBREQ by asserting CBACK. When
+// the MC68030 recognizes STERM and CBACK and it has asserted CBREQ, it maintains
+// AS, DS, R/W, A0-A31, FC0-FC2, SIZ0-SIZ1 in their current state throughout the
+// burst operation. The processor continues to accept data on every clock during
+// which STERM is asserted until the burst is complete or an abnormal termination
+// occurs."
+//
+// BURST_ACTIVE holds the bus from the first access to the last, and the bus
+// controller stays in DATA_C1C4 for all of it: the burst is one bus cycle with up
+// to four data phases, acknowledged towards the core when the operation ends.
+//
+// Long words are latched on the negative edge, the same point at which
+// data_in_alignment captures a synchronous cycle's data, and handed to the cache
+// one per clock on BURST_BEAT_RDY. The device advances A3:A2 itself, wrapping
+// inside the line (UM 6.1.3.2: "The MC68030 holds the entire address bus constant
+// for the duration of the burst cycle... The bursting mechanism allows addresses
+// to wrap around so that the entire four long words in the cache line can be
+// filled in a single burst operation"), so each beat's entry is computed here
+// from the requested one rather than driven on the bus.
+
+// UM 7.3.2 / 6.1.3.2: STERM and DSACKx are never both asserted for one cycle,
+// and "The MC68030 ignores the assertion of CBACK during cycles terminated with
+// DSACKx", so a burst is entered only on the STERM-only acknowledge. CIIN on the
+// first cycle latches the data but keeps it out of the cache and aborts the burst
+// before it begins (UM 6.1.3.2), and a bus error on the first cycle is a real
+// fault rather than a burst abort.
+assign BURST_ENTER = BUS_CTRL_STATE == DATA_C1C4 && !BURST_ACTIVE &&
+                     (READ_ACCESS || OPCODE_ACCESS) && !WRITE_ACCESS &&
+                     T_SLICE == S3 && !STERM_In && DSACK_In == 2'b11 &&
+                     !CBACK_In && BURST_REQ && LAST_SUB_CYCLE &&
+                     CIIN_In && !CACHE_INHIBIT_IN &&
+                     !BUS_FLT && !BUS_FLT_VAR && !RETRY;
+
+// The port value is captured on every negative edge so the long word the first
+// cycle transferred is still available on the edge the burst is entered;
+// data_in_alignment keeps only the requested operand's lanes.
+//
+// BURST_STREAMING delays the first tail capture by one clock. UM Figure 6-11
+// draws the boundary in the same place -- burst mode is "requested and
+// acknowledged" at the start of cycle 1 but "BURST MODE BEGINS HERE" at the start
+// of cycle 2, and only cycles 2 to 4 are burst fill cycles -- so the acknowledge
+// clock itself carries no new long word. UM Figure 7-38's own example spaces the
+// subsequent accesses out further still, with a wait cycle in each.
+always_ff @(negedge CLK) begin : burst_beat_sample
+    DATA_PORT_LATCH <= DATA_PORT_IN;
+    BURST_TAKE <= 1'b0;
+    if (BURST_ACTIVE && BURST_STREAMING && !STERMn) begin
+        BURST_TAKE <= 1'b1;
+        BURST_TAKE_DATA <= DATA_PORT_IN;
+        BURST_TAKE_CI <= !CIINn;
+        BURST_TAKE_CBACK <= !CBACKn;
+        BURST_TAKE_FLT <= !BERRn;
+    end
+end
+
+always_ff @(posedge CLK) begin : burst_engine
+    BURST_BEAT_RDY <= 1'b0;
+    BURST_BEAT_FIRST <= 1'b0;
+    BURST_STREAMING <= BURST_ACTIVE;
+    if (RESET_CPU_I) begin
+        BURST_STREAMING <= 1'b0;
+        BURST_ACTIVE <= 1'b0;
+        BURST_COUNT <= 3'd0;
+        BURST_BASE_ENTRY <= 2'd0;
+        BURST_BASE_LINE <= 28'h0;
+        BURST_IS_OP <= 1'b0;
+        BURST_BEAT_IS_OP <= 1'b0;
+        BURST_BEAT_ADDR <= 32'h0;
+        BURST_BEAT_DATA <= 32'h0;
+    end else if (BURST_ENTER) begin
+        BURST_ACTIVE <= 1'b1;
+        BURST_COUNT <= 3'd1;
+        BURST_BASE_ENTRY <= ADR_OUT_I[3:2];
+        BURST_BASE_LINE <= ADR_OUT_I[31:4];
+        BURST_IS_OP <= OPCODE_ACCESS;
+        // The first long word is a beat as well. STERM implies a 32-bit port and
+        // "All of the byte sections of the data bus must be driven since the
+        // burst operation latches 32 bits on every cycle", so the whole entry is
+        // available even when the operand that asked for it was a word-sized
+        // instruction prefetch.
+        BURST_BEAT_RDY <= 1'b1;
+        BURST_BEAT_FIRST <= 1'b1;
+        BURST_BEAT_IS_OP <= OPCODE_ACCESS;
+        BURST_BEAT_ADDR <= {ADR_OUT_I[31:2], 2'b00};
+        BURST_BEAT_DATA <= DATA_PORT_LATCH;
+    end else if (BURST_ACTIVE && BURST_TAKE) begin
+        BURST_COUNT <= BURST_COUNT + 3'd1;
+        // UM 6.1.3.2: CIIN "prevents the data during that cycle from being
+        // loaded into the appropriate cache and causes CBREQ to negate, aborting
+        // the burst operation", and BERR during the second, third or fourth
+        // access "does not cause a bus error exception, but the burst is
+        // aborted" -- neither long word is cached. A premature CBACK negation
+        // instead "causes the current cycle to complete normally, loading the
+        // data successfully transferred into the appropriate cache".
+        BURST_BEAT_RDY <= !BURST_TAKE_CI && !BURST_TAKE_FLT;
+        BURST_BEAT_IS_OP <= BURST_IS_OP;
+        BURST_BEAT_ADDR <= {BURST_BASE_LINE, BURST_BASE_ENTRY + BURST_COUNT[1:0], 2'b00};
+        BURST_BEAT_DATA <= BURST_TAKE_DATA;
+        if (BURST_LAST)
+            BURST_ACTIVE <= 1'b0; // Four long words read, or an abnormal end.
+    end
+end
+
+// Four long words read, or an abnormal end (UM 6.1.3.2 lists CIIN, BERR and a
+// premature CBACK negation). This is also the acknowledge point of the cycle as a
+// whole: the bus controller holds AS from the first access to the last, so the
+// burst is one bus cycle with four data phases, and the requester is given its
+// long word when the operation completes. UM 6.1.3.2 hands the first cycle's data
+// to the execution unit as soon as it arrives, which is up to three clocks
+// earlier; nothing an external device can observe differs.
+assign BURST_LAST = BURST_ACTIVE && BURST_TAKE &&
+                    (BURST_COUNT >= 3'd3 || !BURST_TAKE_CBACK ||
+                     BURST_TAKE_CI || BURST_TAKE_FLT);
+
+// UM 7.3.7: "If the MC68030 executes a full burst operation and fetches four
+// long words, CBREQ is negated after STERM is asserted for the third cycle,
+// indicating that the MC68030 only requests one more long word (the fourth
+// cycle)."
+assign BURST_CBREQ_HOLD = !(BURST_ACTIVE && BURST_COUNT >= 3'd3);
 
 // ---- Bus cycle completion detection ----
+// A burst defers the completion to its last long word: BURST_ENTER is asserted on
+// the edge the first access would otherwise have finished on, and the cycle then
+// stays in DATA_C1C4 with AS held until BURST_LAST.
 assign BUS_CYC_RDY = RETRY ? 1'b0 :
+                     (BURST_ENTER || BURST_ACTIVE) ? BURST_LAST :
                      (T_SLICE == S3 && !STERM_In) ? 1'b1 : // Synchronous termination.
                      (T_SLICE == S5);                       // Asynchronous termination.
 
@@ -761,6 +990,44 @@ always_ff @(posedge CLK) begin : arb_reg
         ARB_STATE <= NEXT_ARB_STATE;
 end
 
+// ---- Read-modify-write arbitration lock ----
+// UM 7.7.2: "During a read-modify-write cycle, the processor does not assert BG
+// until the entire operation has completed", and the Figure 7-61 NOTE: "The BG
+// output will not be asserted while RMC is asserted."
+//
+// UM 7.7.4 carves out exactly one hole: "One way for an alternate bus master to
+// force the MC68030 to release the bus applies only to the first read cycle of
+// an read-modify-write sequence. The MC68030 allows normal bus arbitration
+// during this read cycle; a normal relinquish and retry operation (asserting
+// BERR, HALT, and BR at the same time) is used." UM 7.5.2 states the limit from
+// the other side: "The MC68030 does not relinquish the bus during a
+// read-modify-write operation, except during the first read cycle."
+//
+// So the lock lifts only for a relinquish and retry that lands on the first read
+// of the sequence. RETRY alone could never reach the grant, because it also
+// holds BUS_CYC_RDY low and so pins bus_ctrl_dec in DATA_C1C4; a bare BR must
+// still be refused, or the sequence would not be indivisible at all.
+// RMC is asserted a few clocks ahead of the locked read, and queued instruction
+// prefetches run in that window, so the flag has to be retired by the first
+// *data* cycle of the sequence rather than by the first bus cycle of any kind.
+always_ff @(posedge CLK) begin : rmc_first_read_track
+    if (RESET_CPU_I) begin
+        RMC_D <= 1'b0;
+        RMC_FIRST_READ <= 1'b0;
+    end else begin
+        RMC_D <= RMC;
+        if (!RMC)
+            RMC_FIRST_READ <= 1'b0;
+        else if (!RMC_D)
+            RMC_FIRST_READ <= 1'b1;
+        else if ((READ_ACCESS || WRITE_ACCESS) && BUS_CTRL_STATE == DATA_C1C4 &&
+                 BUS_CYC_RDY && LAST_SUB_CYCLE)
+            RMC_FIRST_READ <= 1'b0;
+    end
+end
+
+assign RMC_ARB_LOCK = RMC && !(RETRY && RMC_FIRST_READ);
+
 always_comb begin : arb_dec
     case (ARB_STATE)
         ARB_IDLE: begin
@@ -769,11 +1036,20 @@ always_comb begin : arb_dec
             // bus cycles of a read-modify-write sequence". Only BG is held off
             // while RMC is asserted (UM 7.3.3 and the Figure 7-61 NOTE), so
             // the acknowledge path has to be tested ahead of the RMC lock.
-            if (!BGACK_In && BUS_CTRL_STATE == BUS_IDLE)
+            //
+            // Neither transition waits for the bus controller to go idle. UM
+            // 7.7.2 defers BG only "until the bus cycle has begun", and UM 7.7
+            // adds that "this technique allows processing of bus requests during
+            // data transfer cycles"; the requester is the party that waits for
+            // AS, DSACKx and BGACK (UM 7.7.3). What the state change costs the
+            // cycle in flight is nothing: bus_ctrl_dec will not start a further
+            // cycle out of BUS_IDLE while the arbiter is out of ARB_IDLE, and
+            // signal T holds the three-state off until AS negates.
+            if (!BGACK_In)
                 NEXT_ARB_STATE = WAIT_RELEASE_3WIRE;
-            else if (RMC && !RETRY)
+            else if (RMC_ARB_LOCK)
                 NEXT_ARB_STATE = ARB_IDLE;
-            else if (!BR_In && BUS_CTRL_STATE == BUS_IDLE)
+            else if (!BR_In)
                 NEXT_ARB_STATE = GRANT;
             else
                 NEXT_ARB_STATE = ARB_IDLE;
@@ -790,7 +1066,7 @@ always_comb begin : arb_dec
             // Figure 7-61 NOTE: BG is never asserted while RMC is asserted, so
             // a request left pending over a single-wire release during a locked
             // sequence has to wait for the sequence to end.
-            if (BGACK_In && !BR_In && !(RMC && !RETRY))
+            if (BGACK_In && !BR_In && !RMC_ARB_LOCK)
                 NEXT_ARB_STATE = GRANT;
             else if (BGACK_In)
                 NEXT_ARB_STATE = ARB_IDLE;

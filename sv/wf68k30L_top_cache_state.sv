@@ -13,7 +13,6 @@ module WF68K30L_TOP_CACHE_STATE (
     input  logic [1:0]  OP_SIZE_BUS,
     input  logic        OPCODE_REQ,
     input  logic [31:0] ADR_BUS_REQ_PHYS,
-    input  logic        BURST_PREFETCH_OP_REQ,
     input  logic [2:0]  FC_I,
     input  logic [31:0] MMU_TT0,
     input  logic [31:0] MMU_TT1,
@@ -23,7 +22,6 @@ module WF68K30L_TOP_CACHE_STATE (
     input  logic        DATA_RD_BUS,
     input  logic        MMU_RUNTIME_FAULT,
     input  logic        MMU_RUNTIME_STALL,
-    input  logic        BURST_PREFETCH_DATA_REQ,
     input  logic        RMC,
     input  logic        DATA_RDY_BUSIF,
     input  logic        DATA_VALID_BUSIF,
@@ -31,7 +29,14 @@ module WF68K30L_TOP_CACHE_STATE (
     input  logic        BERRn,
     input  logic        CACHE_INHIBIT_IN,
     input  logic        CBACKn,
-    input  logic        BUS_CYCLE_BURST,
+    // Streamed burst long words (UM 7.3.7). One per clock while the bus
+    // interface holds the address; BURST_BEAT_FIRST marks the long word the
+    // requesting cycle itself transferred.
+    input  logic        BURST_BEAT_RDY,
+    input  logic        BURST_BEAT_FIRST,
+    input  logic        BURST_BEAT_IS_OP,
+    input  logic [31:0] BURST_BEAT_ADDR,
+    input  logic [31:0] BURST_BEAT_DATA,
     input  logic [15:0] OPCODE_TO_CORE_BUSIF,
     input  logic [31:0] DATA_TO_CORE_BUSIF,
     input  logic        DATA_WR,
@@ -51,12 +56,6 @@ module WF68K30L_TOP_CACHE_STATE (
     output logic        ICACHE_BURST_TRACK_VALID,
     output logic [3:0]  ICACHE_BURST_TRACK_LINE,
     output logic [23:0] ICACHE_BURST_TRACK_TAG,
-    output logic        ICACHE_BURST_FILL_VALID,
-    output logic [3:0]  ICACHE_BURST_FILL_LINE,
-    output logic [23:0] ICACHE_BURST_FILL_TAG,
-    output logic [7:0]  ICACHE_BURST_FILL_PENDING,
-    output logic [2:0]  ICACHE_BURST_FILL_FC,
-    output logic [2:0]  ICACHE_BURST_FILL_NEXT_WORD,
     output logic        DATA_RDY_CACHE,
     output logic        DATA_VALID_CACHE,
     output logic [31:0] DATA_TO_CORE_CACHE,
@@ -83,12 +82,6 @@ module WF68K30L_TOP_CACHE_STATE (
     output logic        DCACHE_BURST_TRACK_VALID,
     output logic [3:0]  DCACHE_BURST_TRACK_LINE,
     output logic [23:0] DCACHE_BURST_TRACK_TAG,
-    output logic        DCACHE_BURST_FILL_VALID,
-    output logic [3:0]  DCACHE_BURST_FILL_LINE,
-    output logic [23:0] DCACHE_BURST_FILL_TAG,
-    output logic [3:0]  DCACHE_BURST_FILL_PENDING,
-    output logic [2:0]  DCACHE_BURST_FILL_FC,
-    output logic [1:0]  DCACHE_BURST_FILL_NEXT_ENTRY,
     output logic        DCACHE_WRITE_PENDING,
     output logic [31:0] DCACHE_WRITE_ADDR,
     output logic [1:0]  DCACHE_WRITE_SIZE,
@@ -112,6 +105,24 @@ logic        ICACHE_HIT_PENDING;
 logic        DCACHE_READ_HIT_REQ;
 logic        DCACHE_MERGE_REQ;
 logic        DCACHE_MERGE_RDY;
+logic        ICACHE_FILL_COMMIT;
+logic        DCACHE_READ_FILL_COMMIT;
+logic        DCACHE_WRITE_COMMIT;
+
+// ---- Burst fill drain (UM 7.3.7) ----
+// A burst delivers one long word per clock, but each cache RAM has a single
+// write port -- and the I-cache RAM is 16 bits wide, so one long word is two
+// writes. Beats are therefore buffered per line entry and drained one write per
+// clock, in the wraparound order they arrived in (UM Figure 6-12). A valid bit is
+// only set as its RAM write goes out, so a lookup can never hit an entry that is
+// still sitting in the buffer.
+logic [31:0] BURST_DRAIN_DATA [0:3];
+logic [3:0]  BURST_DRAIN_MASK;
+logic        BURST_DRAIN_IS_OP;
+logic [3:0]  BURST_DRAIN_LINE;
+logic [23:0] BURST_DRAIN_TAG;
+logic [1:0]  BURST_DRAIN_NEXT;
+logic        BURST_DRAIN_HALF;
 
 always_comb begin : icache_lookup
     logic [3:0]  req_line;
@@ -179,6 +190,17 @@ assign DCACHE_RAM_RD_EN = DCACHE_READ_HIT_REQ || DCACHE_MERGE_REQ;
 assign DCACHE_RAM_RD_ADDR = DCACHE_READ_HIT_REQ ? {ADR_P_PHYS[7:4], ADR_P_PHYS[3:2]} :
                                                   {DCACHE_WRITE_ADDR[7:4], DCACHE_WRITE_ADDR[3:2]};
 
+// The three claims on a cache RAM write port, hoisted so the burst drain can
+// stand aside for them instead of colliding.
+assign ICACHE_FILL_COMMIT = OPCODE_RDY_BUSIF && OPCODE_VALID_BUSIF && BERRn && !CACHE_INHIBIT_IN &&
+                            ICACHE_FILL_PENDING && ICACHE_FILL_CACHEABLE && CACR[0] && !CACR[1];
+assign DCACHE_READ_FILL_COMMIT = DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn && !CACHE_INHIBIT_IN &&
+                                 DCACHE_READ_FILL_PENDING && DCACHE_READ_FILL_CACHEABLE &&
+                                 CACR[8] && !CACR[9] && DCACHE_READ_FILL_SIZE == LONG &&
+                                 DCACHE_READ_FILL_ADDR[1:0] == 2'b00;
+assign DCACHE_WRITE_COMMIT = DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn &&
+                             DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE && CACR[8];
+
 always_ff @(posedge CLK) begin : cache_registers
     integer i;
     logic [31:0] cacr_write_value;
@@ -191,12 +213,17 @@ always_ff @(posedge CLK) begin : cache_registers
     logic [1:0]  dcache_entry;
     logic [23:0] dcache_tag;
     logic [7:0]  icache_valid_after;
-    logic [7:0]  icache_burst_pending_after;
     logic [3:0]  dcache_valid_after;
-    logic [3:0]  dcache_burst_pending_after;
     logic        dcache_hit;
     logic [31:0] dcache_write_end;
     logic        dcache_write_spans;
+    logic [3:0]  beat_line;
+    logic [23:0] beat_tag;
+    logic [1:0]  beat_entry;
+    logic [3:0]  drain_mask_next;
+    logic        drain_restart;
+    logic        drain_found;
+    logic [1:0]  drain_entry;
     if (RESET_CPU) begin
         CACR <= 32'h0;
         CAAR <= 32'h0;
@@ -213,12 +240,14 @@ always_ff @(posedge CLK) begin : cache_registers
         ICACHE_BURST_TRACK_VALID <= 1'b0;
         ICACHE_BURST_TRACK_LINE <= 4'h0;
         ICACHE_BURST_TRACK_TAG <= 24'h0;
-        ICACHE_BURST_FILL_VALID <= 1'b0;
-        ICACHE_BURST_FILL_LINE <= 4'h0;
-        ICACHE_BURST_FILL_TAG <= 24'h0;
-        ICACHE_BURST_FILL_PENDING <= 8'h00;
-        ICACHE_BURST_FILL_FC <= 3'b000;
-        ICACHE_BURST_FILL_NEXT_WORD <= 3'd0;
+        BURST_DRAIN_MASK <= 4'h0;
+        BURST_DRAIN_IS_OP <= 1'b0;
+        BURST_DRAIN_LINE <= 4'h0;
+        BURST_DRAIN_TAG <= 24'h0;
+        BURST_DRAIN_NEXT <= 2'd0;
+        BURST_DRAIN_HALF <= 1'b0;
+        for (i = 0; i < 4; i = i + 1)
+            BURST_DRAIN_DATA[i] <= 32'h0;
         DATA_RDY_CACHE <= 1'b0;
         DATA_VALID_CACHE <= 1'b0;
         DATA_TO_CORE_CACHE <= 32'h0;
@@ -238,12 +267,6 @@ always_ff @(posedge CLK) begin : cache_registers
         DCACHE_BURST_TRACK_VALID <= 1'b0;
         DCACHE_BURST_TRACK_LINE <= 4'h0;
         DCACHE_BURST_TRACK_TAG <= 24'h0;
-        DCACHE_BURST_FILL_VALID <= 1'b0;
-        DCACHE_BURST_FILL_LINE <= 4'h0;
-        DCACHE_BURST_FILL_TAG <= 24'h0;
-        DCACHE_BURST_FILL_PENDING <= 4'h0;
-        DCACHE_BURST_FILL_FC <= 3'b000;
-        DCACHE_BURST_FILL_NEXT_ENTRY <= 2'd0;
         DCACHE_WRITE_PENDING <= 1'b0;
         DCACHE_WRITE_ADDR <= 32'h0;
         DCACHE_WRITE_SIZE <= LONG;
@@ -296,19 +319,19 @@ always_ff @(posedge CLK) begin : cache_registers
         if (!BUS_BSY && OPCODE_REQ) begin
             ICACHE_FILL_PENDING <= 1'b1;
             ICACHE_FILL_ADDR <= ADR_BUS_REQ_PHYS;
-            ICACHE_FILL_CACHEABLE <= BURST_PREFETCH_OP_REQ ? 1'b1 :
-                                     !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
+            ICACHE_FILL_CACHEABLE <=
+                !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, 1'b0, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
             ICACHE_FILL_FC <= FC_BUS_REQ;
         end else if (OPCODE_RDY_BUSIF) begin
             ICACHE_FILL_PENDING <= 1'b0;
         end
 
-        if (!BUS_BSY && ((DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) || BURST_PREFETCH_DATA_REQ)) begin
+        if (!BUS_BSY && DATA_RD_BUS && !MMU_RUNTIME_FAULT && !MMU_RUNTIME_STALL) begin
             DCACHE_READ_FILL_PENDING <= 1'b1;
             DCACHE_READ_FILL_ADDR <= ADR_BUS_REQ_PHYS;
-            DCACHE_READ_FILL_SIZE <= BURST_PREFETCH_DATA_REQ ? LONG : OP_SIZE_BUS;
-            DCACHE_READ_FILL_CACHEABLE <= BURST_PREFETCH_DATA_REQ ? 1'b1 :
-                                          !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, RMC, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
+            DCACHE_READ_FILL_SIZE <= OP_SIZE_BUS;
+            DCACHE_READ_FILL_CACHEABLE <=
+                !mmu_cache_inhibit(FC_I, ADR_P_PHYS, 1'b1, 1'b0, RMC, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
             DCACHE_READ_FILL_FC <= FC_BUS_REQ;
         end else if (DATA_RDY_BUSIF) begin
             DCACHE_READ_FILL_PENDING <= 1'b0;
@@ -324,8 +347,7 @@ always_ff @(posedge CLK) begin : cache_registers
             DCACHE_WRITE_PENDING <= 1'b0;
         end
 
-        if (OPCODE_RDY_BUSIF && OPCODE_VALID_BUSIF && BERRn && !CACHE_INHIBIT_IN &&
-            ICACHE_FILL_PENDING && ICACHE_FILL_CACHEABLE && CACR[0] && !CACR[1]) begin
+        if (ICACHE_FILL_COMMIT) begin
             fill_line = ICACHE_FILL_ADDR[7:4];
             fill_word = ICACHE_FILL_ADDR[3:1];
             fill_tag = ICACHE_FILL_ADDR[31:8];
@@ -340,8 +362,15 @@ always_ff @(posedge CLK) begin : cache_registers
             icache_valid_after = (ICACHE_TAG[fill_line] == fill_tag) ?
                                  (ICACHE_VALID[fill_line] | (8'h01 << fill_word)) :
                                  (8'h01 << fill_word);
-            icache_burst_pending_after = ICACHE_BURST_FILL_PENDING & ~(8'h01 << fill_word);
 
+            // UM 6.1.3.2 requests a burst only when "a read cycle for either the
+            // instruction or data cache misses due to the indexed tag not
+            // matching" or "a read cycle tag matches, but all long words in the
+            // line are invalid". Once a line has been burst-acknowledged, a
+            // follow-on miss in it is neither, so the request is suppressed.
+            // CBACKn arrives here already qualified on a STERM termination
+            // (UM 6.1.3.2: "The MC68030 ignores the assertion of CBACK during
+            // cycles terminated with DSACKx"), so only a real burst arms this.
             if (CACR[4] && !CBACKn) begin
                 ICACHE_BURST_TRACK_VALID <= 1'b1;
                 ICACHE_BURST_TRACK_LINE <= fill_line;
@@ -355,29 +384,9 @@ always_ff @(posedge CLK) begin : cache_registers
                          (ICACHE_BURST_TRACK_LINE != fill_line || ICACHE_BURST_TRACK_TAG != fill_tag)) begin
                 ICACHE_BURST_TRACK_VALID <= 1'b0;
             end
-
-            if (ICACHE_BURST_FILL_VALID &&
-                ICACHE_BURST_FILL_LINE == fill_line &&
-                ICACHE_BURST_FILL_TAG == fill_tag) begin
-                ICACHE_BURST_FILL_PENDING <= icache_burst_pending_after;
-                ICACHE_BURST_FILL_NEXT_WORD <= fill_word + 3'd1;
-                if (icache_burst_pending_after == 8'h00)
-                    ICACHE_BURST_FILL_VALID <= 1'b0;
-            end
-
-            if (!BUS_CYCLE_BURST && CACR[4] && !CBACKn) begin
-                ICACHE_BURST_FILL_PENDING <= ~icache_valid_after;
-                ICACHE_BURST_FILL_LINE <= fill_line;
-                ICACHE_BURST_FILL_TAG <= fill_tag;
-                ICACHE_BURST_FILL_FC <= ICACHE_FILL_FC;
-                ICACHE_BURST_FILL_NEXT_WORD <= fill_word + 3'd1;
-                ICACHE_BURST_FILL_VALID <= (~icache_valid_after != 8'h00);
-            end
         end
 
-        if (DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn && !CACHE_INHIBIT_IN &&
-            DCACHE_READ_FILL_PENDING && DCACHE_READ_FILL_CACHEABLE &&
-            CACR[8] && !CACR[9] && DCACHE_READ_FILL_SIZE == LONG && DCACHE_READ_FILL_ADDR[1:0] == 2'b00) begin
+        if (DCACHE_READ_FILL_COMMIT) begin
             dcache_line = DCACHE_READ_FILL_ADDR[7:4];
             dcache_entry = DCACHE_READ_FILL_ADDR[3:2];
             dcache_tag = DCACHE_READ_FILL_ADDR[31:8];
@@ -392,7 +401,6 @@ always_ff @(posedge CLK) begin : cache_registers
             dcache_valid_after = (DCACHE_TAG[dcache_line] == dcache_tag) ?
                                  (DCACHE_VALID[dcache_line] | (4'h1 << dcache_entry)) :
                                  (4'h1 << dcache_entry);
-            dcache_burst_pending_after = DCACHE_BURST_FILL_PENDING & ~(4'h1 << dcache_entry);
 
             if (CACR[12] && !CBACKn) begin
                 DCACHE_BURST_TRACK_VALID <= 1'b1;
@@ -407,45 +415,21 @@ always_ff @(posedge CLK) begin : cache_registers
                          (DCACHE_BURST_TRACK_LINE != dcache_line || DCACHE_BURST_TRACK_TAG != dcache_tag)) begin
                 DCACHE_BURST_TRACK_VALID <= 1'b0;
             end
-
-            if (DCACHE_BURST_FILL_VALID &&
-                DCACHE_BURST_FILL_LINE == dcache_line &&
-                DCACHE_BURST_FILL_TAG == dcache_tag) begin
-                DCACHE_BURST_FILL_PENDING <= dcache_burst_pending_after;
-                DCACHE_BURST_FILL_NEXT_ENTRY <= dcache_entry + 2'd1;
-                if (dcache_burst_pending_after == 4'h0)
-                    DCACHE_BURST_FILL_VALID <= 1'b0;
-            end
-
-            if (!BUS_CYCLE_BURST && CACR[12] && !CBACKn) begin
-                DCACHE_BURST_FILL_PENDING <= ~dcache_valid_after;
-                DCACHE_BURST_FILL_LINE <= dcache_line;
-                DCACHE_BURST_FILL_TAG <= dcache_tag;
-                DCACHE_BURST_FILL_FC <= DCACHE_READ_FILL_FC;
-                DCACHE_BURST_FILL_NEXT_ENTRY <= dcache_entry + 2'd1;
-                DCACHE_BURST_FILL_VALID <= (~dcache_valid_after != 4'h0);
-            end
         end
 
-        // UM 6.1.3.1: CIIN on any cycle of a burst keeps that cycle's data out
-        // of the cache and aborts the burst; the data still reaches the core.
+        // UM 6.1.3.2: CIIN on the first cycle of a burst keeps that cycle's data
+        // out of the cache and aborts the burst before it starts; the data still
+        // reaches the core.
         if (CACHE_INHIBIT_IN) begin
-            if (OPCODE_RDY_BUSIF && ICACHE_FILL_PENDING) begin
+            if (OPCODE_RDY_BUSIF && ICACHE_FILL_PENDING)
                 ICACHE_BURST_TRACK_VALID <= 1'b0;
-                ICACHE_BURST_FILL_VALID <= 1'b0;
-                ICACHE_BURST_FILL_PENDING <= 8'h00;
-            end
-            if (DATA_RDY_BUSIF && DCACHE_READ_FILL_PENDING) begin
+            if (DATA_RDY_BUSIF && DCACHE_READ_FILL_PENDING)
                 DCACHE_BURST_TRACK_VALID <= 1'b0;
-                DCACHE_BURST_FILL_VALID <= 1'b0;
-                DCACHE_BURST_FILL_PENDING <= 4'h0;
-            end
         end
 
         // UM 5.7.1: CIIN is ignored during write cycles, so the write path is
         // not gated on it.
-        if (DATA_RDY_BUSIF && DATA_VALID_BUSIF && BERRn &&
-            DCACHE_WRITE_PENDING && DCACHE_WRITE_CACHEABLE && CACR[8]) begin
+        if (DCACHE_WRITE_COMMIT) begin
             dcache_line = DCACHE_WRITE_ADDR[7:4];
             dcache_entry = DCACHE_WRITE_ADDR[3:2];
             dcache_tag = DCACHE_WRITE_ADDR[31:8];
@@ -493,26 +477,119 @@ always_ff @(posedge CLK) begin : cache_registers
             end
         end
 
+        // ---- Burst beat capture and drain (UM 7.3.7) ----
+        // Beats arrive one per clock; the cache RAM takes one write per clock and
+        // an I-cache entry needs two, so each long word is parked in the line
+        // buffer and written out afterwards. The drain selects from the pre-edge
+        // mask, so a long word arriving on this clock is never written before it
+        // has been buffered, and it walks the entries in the wraparound order the
+        // beats came in (UM Figure 6-12).
+        drain_mask_next = BURST_DRAIN_MASK;
+        drain_restart = 1'b0;
+        drain_found = 1'b0;
+        drain_entry = BURST_DRAIN_NEXT;
+        for (i = 0; i < 4; i = i + 1) begin
+            if (!drain_found && BURST_DRAIN_MASK[BURST_DRAIN_NEXT + i[1:0]]) begin
+                drain_entry = BURST_DRAIN_NEXT + i[1:0];
+                drain_found = 1'b1;
+            end
+        end
+
+        if (BURST_BEAT_RDY) begin
+            beat_line = BURST_BEAT_ADDR[7:4];
+            beat_tag = BURST_BEAT_ADDR[31:8];
+            beat_entry = BURST_BEAT_ADDR[3:2];
+            BURST_DRAIN_DATA[beat_entry] <= BURST_BEAT_DATA;
+            if (BURST_BEAT_FIRST) begin
+                // A new burst owns the buffer. Anything a previous burst had left
+                // pending is dropped rather than written into the wrong line; it
+                // was never marked valid, so nothing observes the loss.
+                BURST_DRAIN_LINE <= beat_line;
+                BURST_DRAIN_TAG <= beat_tag;
+                BURST_DRAIN_IS_OP <= BURST_BEAT_IS_OP;
+                BURST_DRAIN_NEXT <= beat_entry;
+                BURST_DRAIN_HALF <= 1'b0;
+                drain_mask_next = (4'h1 << beat_entry);
+                drain_restart = 1'b1;
+                // The burst *is* the line fill, and it starts before the cycle it
+                // belongs to has acknowledged, so the tag is claimed here rather
+                // than waiting for the fill commit above. A tag miss discards the
+                // line first, exactly as a single-entry fill does.
+                if (BURST_BEAT_IS_OP) begin
+                    if (ICACHE_TAG[beat_line] != beat_tag)
+                        ICACHE_VALID[beat_line] <= 8'h00;
+                    ICACHE_TAG[beat_line] <= beat_tag;
+                end else begin
+                    if (DCACHE_TAG[beat_line] != beat_tag)
+                        DCACHE_VALID[beat_line] <= 4'h0;
+                    DCACHE_TAG[beat_line] <= beat_tag;
+                end
+            end else begin
+                drain_mask_next = drain_mask_next | (4'h1 << beat_entry);
+            end
+        end
+
+        if (!drain_restart && drain_found) begin
+            if (BURST_DRAIN_IS_OP) begin
+                if (ICACHE_FILL_COMMIT) begin
+                    ; // The requesting fill owns the write port this clock.
+                end else if (CACR[0] && ICACHE_TAG[BURST_DRAIN_LINE] == BURST_DRAIN_TAG) begin
+                    // The I-cache RAM is 16 bits wide, so a long word is written
+                    // as its high word then its low word, each validating one
+                    // instruction word of the entry.
+                    ICACHE_RAM_WR_EN <= 1'b1;
+                    ICACHE_RAM_WR_ADDR <= {BURST_DRAIN_LINE, drain_entry, BURST_DRAIN_HALF};
+                    ICACHE_RAM_WR_DATA <= BURST_DRAIN_HALF ? BURST_DRAIN_DATA[drain_entry][15:0] :
+                                                             BURST_DRAIN_DATA[drain_entry][31:16];
+                    ICACHE_VALID[BURST_DRAIN_LINE][{drain_entry, BURST_DRAIN_HALF}] <= 1'b1;
+                    BURST_DRAIN_HALF <= !BURST_DRAIN_HALF;
+                    if (BURST_DRAIN_HALF) begin
+                        drain_mask_next[drain_entry] = 1'b0;
+                        BURST_DRAIN_NEXT <= drain_entry + 2'd1;
+                    end
+                end else begin
+                    // The line was re-tagged or the cache turned off under us.
+                    drain_mask_next = 4'h0;
+                end
+            end else begin
+                if (DCACHE_READ_FILL_COMMIT || DCACHE_WRITE_COMMIT) begin
+                    ; // The requesting fill or a write hit owns the write port.
+                end else if (CACR[8] && DCACHE_TAG[BURST_DRAIN_LINE] == BURST_DRAIN_TAG) begin
+                    DCACHE_RAM_WR_EN <= 1'b1;
+                    DCACHE_RAM_WR_ADDR <= {BURST_DRAIN_LINE, drain_entry};
+                    DCACHE_RAM_WR_DATA <= BURST_DRAIN_DATA[drain_entry];
+                    DCACHE_VALID[BURST_DRAIN_LINE][drain_entry] <= 1'b1;
+                    drain_mask_next[drain_entry] = 1'b0;
+                    BURST_DRAIN_NEXT <= drain_entry + 2'd1;
+                end else begin
+                    drain_mask_next = 4'h0;
+                end
+            end
+        end
+
+        BURST_DRAIN_MASK <= drain_mask_next;
+
         if (CACR_WR) begin
             cacr_write_value = ALU_RESULT[31:0];
             caar_line = CAAR[7:4];
             caar_entry = CAAR[3:2];
             CACR <= cacr_write_value & CACR_RW_MASK;
 
+            // A cache clear or entry invalidate also discards whatever the burst
+            // drain still has buffered for that cache: those long words would
+            // otherwise revalidate entries the program has just asked to drop.
             if (cacr_write_value[11]) begin
                 for (i = 0; i < DCACHE_LINES; i = i + 1)
                     DCACHE_VALID[i] <= 4'h0;
                 DCACHE_BURST_TRACK_VALID <= 1'b0;
-                DCACHE_BURST_FILL_VALID <= 1'b0;
-                DCACHE_BURST_FILL_PENDING <= 4'h0;
-                DCACHE_BURST_FILL_NEXT_ENTRY <= 2'd0;
+                if (!BURST_DRAIN_IS_OP)
+                    BURST_DRAIN_MASK <= 4'h0;
             end
             if (cacr_write_value[10]) begin
                 DCACHE_VALID[caar_line][caar_entry] <= 1'b0;
                 DCACHE_BURST_TRACK_VALID <= 1'b0;
-                DCACHE_BURST_FILL_VALID <= 1'b0;
-                DCACHE_BURST_FILL_PENDING <= 4'h0;
-                DCACHE_BURST_FILL_NEXT_ENTRY <= 2'd0;
+                if (!BURST_DRAIN_IS_OP)
+                    BURST_DRAIN_MASK <= 4'h0;
             end
 
             if (cacr_write_value[3]) begin
@@ -520,32 +597,22 @@ always_ff @(posedge CLK) begin : cache_registers
                     ICACHE_VALID[i] <= 8'h00;
                 ICACHE_HIT_PENDING <= 1'b0;
                 ICACHE_BURST_TRACK_VALID <= 1'b0;
-                ICACHE_BURST_FILL_VALID <= 1'b0;
-                ICACHE_BURST_FILL_PENDING <= 8'h00;
-                ICACHE_BURST_FILL_NEXT_WORD <= 3'd0;
+                if (BURST_DRAIN_IS_OP)
+                    BURST_DRAIN_MASK <= 4'h0;
             end
             if (cacr_write_value[2]) begin
                 ICACHE_VALID[caar_line][{caar_entry, 1'b0}] <= 1'b0;
                 ICACHE_VALID[caar_line][{caar_entry, 1'b1}] <= 1'b0;
                 ICACHE_HIT_PENDING <= 1'b0;
                 ICACHE_BURST_TRACK_VALID <= 1'b0;
-                ICACHE_BURST_FILL_VALID <= 1'b0;
-                ICACHE_BURST_FILL_PENDING <= 8'h00;
-                ICACHE_BURST_FILL_NEXT_WORD <= 3'd0;
+                if (BURST_DRAIN_IS_OP)
+                    BURST_DRAIN_MASK <= 4'h0;
             end
 
-            if (!cacr_write_value[0] || !cacr_write_value[4]) begin
+            if (!cacr_write_value[0] || !cacr_write_value[4])
                 ICACHE_BURST_TRACK_VALID <= 1'b0;
-                ICACHE_BURST_FILL_VALID <= 1'b0;
-                ICACHE_BURST_FILL_PENDING <= 8'h00;
-                ICACHE_BURST_FILL_NEXT_WORD <= 3'd0;
-            end
-            if (!cacr_write_value[8] || !cacr_write_value[12]) begin
+            if (!cacr_write_value[8] || !cacr_write_value[12])
                 DCACHE_BURST_TRACK_VALID <= 1'b0;
-                DCACHE_BURST_FILL_VALID <= 1'b0;
-                DCACHE_BURST_FILL_PENDING <= 4'h0;
-                DCACHE_BURST_FILL_NEXT_ENTRY <= 2'd0;
-            end
         end
 
         if (CAAR_WR)

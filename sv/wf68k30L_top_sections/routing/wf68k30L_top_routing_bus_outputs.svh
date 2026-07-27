@@ -30,8 +30,9 @@ always_comb begin : fc_generation
         FC_I = FC_USER_PROG;
 end
 
-assign FC_BUS_REQ = (BURST_PREFETCH_OP_REQ || BURST_PREFETCH_DATA_REQ) ?
-                    BURST_PREFETCH_FC : FC_I;
+// Every bus cycle is the core's own now that line completion streams under one
+// AS instead of running background cycles of its own (UM 7.3.7).
+assign FC_BUS_REQ = FC_I;
 
 // External CIOUT reflects MMU CI status for bus cycles that reach the external bus.
 always_comb begin : ciout_generation
@@ -43,13 +44,7 @@ always_comb begin : ciout_generation
     write_access = WR_REQ;
     rmw_access = RMC;
 
-    // A background burst-completion cycle runs at the burst address, not at the
-    // core's, and is only ever started for a line that already passed the
-    // cache-inhibit check, so its CI status is negated by construction.
-    if (BURST_PREFETCH_OP_REQ || BURST_PREFETCH_DATA_REQ)
-        CIOUT_ASSERT_NOW = 1'b0;
-    else
-        CIOUT_ASSERT_NOW = mmu_ci_out(FC_I, ADR_P, read_access, write_access, rmw_access, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
+    CIOUT_ASSERT_NOW = mmu_ci_out(FC_I, ADR_P, read_access, write_access, rmw_access, MMU_TT0, MMU_TT1, MMU_RUNTIME_ATC_CI);
 end
 
 // UM 7.3.1: CIOUT is driven with the address and stays valid for the whole
@@ -88,14 +83,9 @@ end
 // registered term carries the qualification one clock past the cycle, so a
 // consumer sampling on the cycle's ready strobe still sees it; STERM_NOW covers
 // the terminating edge itself, which a two-clock synchronous cycle reaches
-// before the register can update.
-//
-// The cache state machine still consumes the raw CBACKn pin and so still opens
-// a burst-fill context off an acknowledge the UM says to ignore. Wiring its
-// CBACKn port to !CBACK_HONOURED closes that, which needs the net declared in
-// wf68k30L_top_sections/wf68k30L_top_decls.svh (that file is included ahead of
-// the instantiation) and the port re-pointed in
-// wf68k30L_top_sections/wf68k30L_top_cache_mmu_state.svh.
+// before the register can update. This is what the cache state machine's CBACKn
+// port is wired from, so a burst-acknowledged line is only ever recorded for an
+// acknowledge the UM permits.
 assign CBACK_HONOURED = !CBACKn && (CYCLE_STERM_32 || STERM_NOW);
 
 // External burst request semantics (phase 5/7):
@@ -138,18 +128,26 @@ always_ff @(posedge CLK) begin : cbreq_latch
         CBREQ_REQ_LATCH <= 1'b0;
     end else if (!BUS_BSY) begin
         CBREQ_REQ_LATCH <= CBREQ_REQ_NOW;
-    end else if (CBACK_HONOURED || CACHE_INHIBIT_IN) begin
-        // A burst acknowledge consumes the request. On a real burst UM 7.3.7
-        // holds CBREQ until STERM for the third of four long words; with no
-        // streaming engine there is only ever one cycle to hold it for, so it
-        // is released at the end of that cycle instead. An acknowledge on a
-        // DSACKx-terminated cycle is not one, and must leave CBREQ alone.
-        // UM 6.1.3.1: CIIN also negates CBREQ, aborting the burst.
+    end else if (!BURST_CBREQ_HOLD || CACHE_INHIBIT_IN) begin
+        // UM 7.3.7: "If the MC68030 executes a full burst operation and fetches
+        // four long words, CBREQ is negated after STERM is asserted for the third
+        // cycle, indicating that the MC68030 only requests one more long word."
+        // BURST_CBREQ_HOLD is the bus interface's count of long words taken, so
+        // the request survives the acknowledge and the first two beats, and drops
+        // at the third or on an abort. An acknowledge on a DSACKx-terminated
+        // cycle never enters burst mode and must leave CBREQ alone -- UM 6.1.3.2:
+        // "The MC68030 ignores the assertion of CBACK during cycles terminated
+        // with DSACKx." UM 6.1.3.2 also has CIIN negate CBREQ, aborting a burst
+        // on the cycle it is asserted for.
         CBREQ_REQ_LATCH <= 1'b0;
     end
 end
 
 assign CBREQ_ASSERT = BUS_BSY ? CBREQ_REQ_LATCH : CBREQ_REQ_NOW;
+
+// The bus interface's streaming engine is armed from the request the pin is
+// driven from, minus the AS qualifier it generates itself.
+assign BURST_REQ_BUSIF = CBREQ_ASSERT && !RMC;
 
 // UM 7.3.7: "CBREQ is not asserted during the read or write cycles of any
 // read-modify-write operation." That is a statement about the pin, so it is

@@ -2,6 +2,23 @@
 // Submodule instantiations
 // ========================================================================
 
+    // Retired background line-completion context. WF68K30L_TOP_CACHE_STATE no
+    // longer produces it -- UM 7.3.7's address-held burst streaming replaced the
+    // separate fill cycles it drove -- but WF68K30L_TOP_ROUTING_BUS_CACHE still
+    // declares the inputs, so the nets are held inactive here.
+    assign ICACHE_BURST_FILL_VALID = 1'b0;
+    assign ICACHE_BURST_FILL_LINE = 4'h0;
+    assign ICACHE_BURST_FILL_TAG = 24'h0;
+    assign ICACHE_BURST_FILL_PENDING = 8'h00;
+    assign ICACHE_BURST_FILL_FC = 3'b000;
+    assign ICACHE_BURST_FILL_NEXT_WORD = 3'd0;
+    assign DCACHE_BURST_FILL_VALID = 1'b0;
+    assign DCACHE_BURST_FILL_LINE = 4'h0;
+    assign DCACHE_BURST_FILL_TAG = 24'h0;
+    assign DCACHE_BURST_FILL_PENDING = 4'h0;
+    assign DCACHE_BURST_FILL_FC = 3'b000;
+    assign DCACHE_BURST_FILL_NEXT_ENTRY = 2'd0;
+
     // Instruction-cache data store (16 lines * 8 words, 16-bit words).
     WF68K30L_SYNC_RAM_1R1W #(
         .WIDTH(16),
@@ -192,7 +209,20 @@
 
         .STERMn             (STERMn),
         .CIINn              (CIINn),
+        .CBACKn             (CBACKn),
         .CACHE_INHIBIT_IN   (CACHE_INHIBIT_IN),
+
+        // Address-held burst streaming (UM 7.3.7). The engine is armed from the
+        // same request term CBREQn is driven from, so it can only enter burst
+        // mode for a cycle on which the processor really did assert CBREQ.
+        .BURST_REQ          (BURST_REQ_BUSIF),
+        .BURST_ACTIVE       (BURST_ACTIVE),
+        .BURST_CBREQ_HOLD   (BURST_CBREQ_HOLD),
+        .BURST_BEAT_RDY     (BURST_BEAT_RDY),
+        .BURST_BEAT_FIRST   (BURST_BEAT_FIRST),
+        .BURST_BEAT_IS_OP   (BURST_BEAT_IS_OP),
+        .BURST_BEAT_ADDR    (BURST_BEAT_ADDR),
+        .BURST_BEAT_DATA    (BURST_BEAT_DATA),
 
         .BRn                (BRn),
         .BGACKn             (BGACKn),
@@ -213,12 +243,11 @@
 
     // Core-facing return muxes: bus data/opcodes vs cache/fault synthesized responses.
     // A descriptor cycle raised by the table search is not the core's access, so
-    // its acknowledge is hidden exactly as a background burst fill's is.
-    assign DATA_RDY_BUSIF_CORE = DATA_RDY_BUSIF &&
-                                 !(BUS_CYCLE_BURST && !BUS_CYCLE_BURST_IS_OP) &&
-                                 !BUS_CYCLE_MMU_WALK;
-    assign OPCODE_RDY_BUSIF_CORE = OPCODE_RDY_BUSIF &&
-                                   !(BUS_CYCLE_BURST && BUS_CYCLE_BURST_IS_OP);
+    // its acknowledge is hidden from the core. Every other cycle now is the
+    // core's: a burst's tail long words arrive on the beat port rather than as
+    // bus cycles of their own, so there is nothing else to hide.
+    assign DATA_RDY_BUSIF_CORE = DATA_RDY_BUSIF && !BUS_CYCLE_MMU_WALK;
+    assign OPCODE_RDY_BUSIF_CORE = OPCODE_RDY_BUSIF;
 
     // Data source mux: bus interface or data-cache hit path.
     // An untranslatable access terminates with error (RDY without VALID) so the
