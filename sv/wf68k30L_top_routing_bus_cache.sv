@@ -524,7 +524,16 @@ assign MMU_TWALK_BUS_LOCK = BUS_BSY ? MMU_TWALK_BUS_LOCK_HELD : MMU_DESC_SEARCH_
 // two of PTEST's descriptor fetches and PTEST would report a mixture of the
 // before and after trees. PTEST never writes a descriptor, so the "modify" half
 // stays unused -- RMC here is about indivisibility, not about updating.
-assign MMU_TWALK_RMC = MMU_TWALK_RMC_R || MMU_DESC_BUS_DRIVE;
+// UM 9.5.2 attaches RMC to the table-search procedure: asserted from the first
+// descriptor cycle to the last, and negated with it. MMU_TWALK_RMC_R is cleared
+// through a register, so on its own it held RMCn one cycle past the end of the
+// search and the core's first post-search cycle could still see it asserted.
+// Qualifying the held copy combinationally removes that tail. The
+// MMU_TWALK_BUS_ACTIVE term is what keeps this from overcorrecting: a search that
+// reports done while its final descriptor cycle is still on the bus must keep RMCn
+// asserted until that cycle drains, so the negation waits for both.
+assign MMU_TWALK_RMC = (MMU_TWALK_RMC_R || MMU_DESC_BUS_DRIVE) &&
+                       (MMU_DESC_SEARCH_BUSY || MMU_TWALK_BUS_ACTIVE);
 
 always_ff @(posedge CLK) begin : mmu_desc_bus_port
     if (RESET_CPU) begin
@@ -878,7 +887,17 @@ always_ff @(posedge CLK) begin : mmu_runtime_walk_eval
                 // M in the page descriptor of a write, except after a supervisor
                 // violation. The update is a real memory write (UM 13), so it is
                 // sequenced before the search advances or reports.
-                if (!walk_fault) begin
+                //
+                // An INVALID descriptor is excluded, and this is not a judgement
+                // call. UM 9.9.3.4: "When the MC68030 encounters an invalid
+                // descriptor, it makes no interpretation (or modification) of any
+                // fields of this descriptor other than the DT field, allowing the
+                // operating system to store system-defined information in the
+                // remaining bits." The OS keeps the reason for the invalid encoding
+                // and, for a non-resident table, the disk address in exactly those
+                // bits -- so setting U here would corrupt operating-system data,
+                // not merely record a spurious access.
+                if (!walk_fault && walk_desc_dt != 2'b00) begin
                     walk_hist_data = mmu_desc_history_bits(
                         walk_desc,
                         (walk_desc_dt == 2'b01) && MMU_TWALK_WRITE && !walk_wp_accum

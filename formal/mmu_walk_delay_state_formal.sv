@@ -494,20 +494,20 @@ module mmu_walk_delay_state_formal;
             if (f_search_drove && (MMU_TWALK_BUSY || MMU_PTEST_BUSY))
                 assert(MMU_TWALK_RMC);
 
-            // The negation is one cycle late: MMU_TWALK_RMC_R is cleared by a
-            // registered "no search is in flight", so RMC stays asserted for
-            // the cycle after the search retires. That is a real deviation --
-            // the core's first post-search bus cycle can be presented with
-            // RMCn asserted -- but it is not this harness's subject and it
-            // predates the PTEST search joining the port: the clear was
-            // "else if (!MMU_TWALK_BUSY)" before and is
-            // "else if (!MMU_DESC_SEARCH_BUSY)" now, the same shape with a
-            // wider hold. Tightening it means negating RMC while the last
-            // descriptor cycle may still have AS asserted, which is a change to
-            // the bus contract rather than to the search. Stated here as a
-            // bound so the tail cannot silently grow past one cycle.
+            // RMC negates WITH the search, no tail. This used to permit one
+            // trailing cycle via $past, because MMU_TWALK_RMC_R is cleared by a
+            // registered "no search is in flight" and so held RMCn for the cycle
+            // after the search retired -- meaning the core's first post-search bus
+            // cycle could be presented with RMCn asserted.
+            //
+            // The objection to tightening it was that negating RMC the moment the
+            // search reports done could drop it while the final descriptor cycle
+            // still has AS asserted. MMU_TWALK_BUS_ACTIVE is exactly that
+            // condition, so it is admitted here rather than a blanket $past: RMC
+            // may be asserted while a search is in flight, or while a descriptor
+            // cycle is draining, and at no other time.
             assert(!MMU_TWALK_RMC || MMU_TWALK_BUSY || MMU_PTEST_BUSY ||
-                   $past(MMU_TWALK_BUSY) || $past(MMU_PTEST_BUSY));
+                   MMU_TWALK_BUS_ACTIVE);
 
             if (!f_pload_req && !$past(RESET_CPU) && !$past(BUS_BSY)) begin
                 // Nothing arms a walk except a request for one.

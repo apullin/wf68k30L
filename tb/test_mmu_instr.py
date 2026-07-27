@@ -4058,3 +4058,65 @@ async def test_mmu_ptest_and_runtime_walk_share_the_descriptor_bus(dut):
         f"0x{h.read_result_long(8):08X}, expected 0x{value_5:08X}"
     )
     h.cleanup()
+
+
+@cocotb.test()
+async def test_invalid_descriptor_is_never_modified_by_a_search(dut):
+    """A search must not write history bits into an invalid descriptor.
+
+    UM 9.9.3.4 is explicit: "When the MC68030 encounters an invalid descriptor, it
+    makes no interpretation (or modification) of any fields of this descriptor
+    other than the DT field, allowing the operating system to store system-defined
+    information in the remaining bits."  The manual then names what the OS keeps
+    there -- the reason for the invalid encoding, and for a non-resident table the
+    disk address.  So setting the U bit in an invalid descriptor does not merely
+    record a spurious access, it corrupts operating-system data.
+
+    The history write-back used to be gated only on fetch-valid and the supervisor
+    check, both of which an invalid descriptor passes, so U was written to it.
+    PLOADR is the vehicle because UM 9.9.1 has it update the used bit "as if a read
+    operation had occurred" while, unlike a real access, not faulting the
+    instruction -- so the search runs to the invalid descriptor and the program
+    still reaches its sentinel.
+    """
+    h = CPUTestHarness(dut)
+
+    s = _short_walk_setup(h, 0x1400)
+    logical_addr = 0x12345008
+
+    program = [
+        *_mmu_enable_words(s),
+        *movea(LONG, SPECIAL, IMMEDIATE, 0),
+        *imm_long(logical_addr),
+        0xF010, 0x2215,                       # PLOADR #5,(A0)
+        *h.sentinel_program(),
+    ]
+
+    await h.setup(program)
+    desc_a_addr, desc_b_addr, _ = _load_short_tree(h, s, 0x00234000)
+
+    # Level B is invalid (DT = 2'b00) and its spare bits carry an OS payload.
+    # Bit 3 -- the U bit -- is clear, so a spurious write is visible as 0xDEADBEE8.
+    os_payload = 0xDEADBEE0
+    h.mem.load_long(desc_b_addr, os_payload)
+
+    found = await h.run_until_sentinel(max_cycles=70000)
+    assert found, "PLOADR did not retire after meeting an invalid descriptor"
+
+    after = h.mem.read(desc_b_addr, 4)
+    assert after == os_payload, (
+        f"Invalid descriptor at 0x{desc_b_addr:06X} was modified by the table "
+        f"search: 0x{after:08X}, expected 0x{os_payload:08X} untouched. "
+        f"{'Bit 3 (U) was set, which is the history write-back reaching an invalid descriptor.' if after == os_payload | 0x8 else ''} "
+        f"UM 9.9.3.4 reserves every field but DT for the operating system."
+    )
+
+    # The valid root descriptor on the way in SHOULD have gained U, otherwise this
+    # test would also pass with the history write-back broken outright.
+    root_after = h.mem.read(desc_a_addr, 4)
+    assert root_after & 0x8, (
+        f"Root descriptor at 0x{desc_a_addr:06X} = 0x{root_after:08X} did not gain "
+        f"U, so the history write-back is not running at all and the assertion "
+        f"above proves nothing"
+    )
+    h.cleanup()
