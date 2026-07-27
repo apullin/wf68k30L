@@ -27,7 +27,7 @@ VHDL_SRC := $(VHDL_DIR)/wf68k30L_address_registers.vhd \
 
 ALL_SRC := $(VHDL_PKG) $(VHDL_SRC)
 
-.PHONY: all synth json clean test-fast test-full test-mmu-random test-csmith-smoke test-csmith-smoke-jump-tables test-coremark-smoke test-jump-tables test-qemu-diff test-qemu-diff-fuzz test-qemu-diff-campaign test-software-torture test-shakeout formal-smoke
+.PHONY: all synth json clean test-fast test-full test-known-gaps test-mmu-random test-csmith-smoke test-csmith-smoke-jump-tables test-coremark-smoke test-jump-tables test-qemu-diff test-qemu-diff-fuzz test-qemu-diff-campaign test-software-torture test-shakeout formal-smoke
 
 all: json
 
@@ -88,6 +88,12 @@ test-full: test-fast
 	$(MAKE) -C tb TEST_MODULE=test_mbit_probe TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_datapath_probe TOPLEVEL=WF68K30L_TOP
 	$(MAKE) -C tb TEST_MODULE=test_decode_probe TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_instr_bcd TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_instr_bitfield TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_instr_atomic TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_instr_misc TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_bus_arbitration TOPLEVEL=WF68K30L_TOP
+	$(MAKE) -C tb TEST_MODULE=test_fullformat_ea_probe TOPLEVEL=WF68K30L_TOP
 
 # Focused repro suite for switch/jump-table control-flow issues.
 test-jump-tables:
@@ -270,4 +276,11 @@ formal-selftest:
 	   exit 1; \
 	 fi
 
-
+# Suites that fail by design against known, documented RTL gaps. Kept out of
+# test-full so the gate stays meaningful, but runnable so the gaps stay visible.
+# Every failure here has its diagnosis in the test docstring.
+#   test_bus_arbitration_um_gaps -- UM 7.7.2/7.7.4 deviations: BG deferred to
+#     cycle end rather than cycle start, amplified across split transfers, and
+#     relinquish-and-retry unable to break into the first RMC read.
+test-known-gaps:
+	-$(MAKE) -C tb TEST_MODULE=test_bus_arbitration_um_gaps TOPLEVEL=WF68K30L_TOP
