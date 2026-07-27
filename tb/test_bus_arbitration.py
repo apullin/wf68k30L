@@ -299,6 +299,63 @@ async def test_single_wire_bgack_alone_releases_idle_bus(dut):
     )
     h.cleanup()
 
+
+@cocotb.test()
+async def test_single_wire_bgack_alone_releases_bus_during_rmc(dut):
+    """UM 7.7.4: single-wire release "applies to all bus cycles of a
+    read-modify-write sequence".
+
+    "A second method is single-wire arbitration... An alternate master forces
+    the MC68030 to release the bus by asserting BGACK and waits for AS to
+    negate before taking the bus. It applies to all bus cycles of a
+    read-modify-write sequence."
+
+    BGACK is asserted in the gap between the TAS read and the TAS write, which
+    is the case an alternate master actually needs: the bus is locked, BG will
+    never come (UM 7.3.3), and this is the only remaining escape.
+    """
+    h = CPUTestHarness(dut)
+    tas_addr = h.DATA_BASE + 0x40
+    h.mem.write(tas_addr, 1, 0x00)
+    await h.setup(_tas_program(h, tas_addr))
+    alt = AlternateBusMaster(dut, responder=h.bus)
+
+    # Sit in the gap between the locked read and the locked write.
+    saw_read = False
+    reached_gap = False
+    for _ in range(6000):
+        await RisingEdge(dut.CLK)
+        rmcn = _rd(dut, "RMCn", 1)
+        as_n = _rd(dut, "ASn", 1)
+        rw_n = _rd(dut, "RWn", 1)
+        adr = _rd(dut, "ADR_OUT")
+        if rmcn == 0 and as_n == 0 and rw_n == 1 and adr == tas_addr:
+            saw_read = True
+        if saw_read and rmcn == 0 and as_n == 1:
+            reached_gap = True
+            break
+    assert reached_gap, "never reached the gap inside the RMC sequence"
+
+    await alt.force_release_now(hold_clocks=32)
+    assert alt.bus_en_release_clocks is not None, (
+        f"the core did not three-state for a single-wire BGACK inside a "
+        f"read-modify-write sequence, so an alternate master cannot force it "
+        f"off the locked bus at all: {alt.report()}"
+    )
+    assert alt.as_low_clocks == 0, (
+        f"core drove AS at the alternate master inside RMC: {alt.report()}"
+    )
+    await alt.release()
+
+    found = await h.run_until_sentinel(max_cycles=12000)
+    assert found, "TAS did not complete after the bus was handed back"
+    assert h.mem.read(tas_addr, 1) == 0x80, (
+        f"TAS did not set bit 7 after a single-wire release: "
+        f"0x{h.mem.read(tas_addr, 1):02X}"
+    )
+    h.cleanup()
+
+
 # ===================================================================
 # Read-modify-write indivisibility (UM 5.6.4, 7.3.3)
 # ===================================================================

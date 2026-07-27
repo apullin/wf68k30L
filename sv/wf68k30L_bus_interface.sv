@@ -739,10 +739,15 @@ end
 always_comb begin : arb_dec
     case (ARB_STATE)
         ARB_IDLE: begin
-            if (RMC && !RETRY)
-                NEXT_ARB_STATE = ARB_IDLE;
-            else if (!BGACK_In && BUS_CTRL_STATE == BUS_IDLE)
+            // UM 7.7.4: BGACK alone is the single-wire forced release, the
+            // state 0 -> state 4 path of Figure 7-61, and it "applies to all
+            // bus cycles of a read-modify-write sequence". Only BG is held off
+            // while RMC is asserted (UM 7.3.3 and the Figure 7-61 NOTE), so
+            // the acknowledge path has to be tested ahead of the RMC lock.
+            if (!BGACK_In && BUS_CTRL_STATE == BUS_IDLE)
                 NEXT_ARB_STATE = WAIT_RELEASE_3WIRE;
+            else if (RMC && !RETRY)
+                NEXT_ARB_STATE = ARB_IDLE;
             else if (!BR_In && BUS_CTRL_STATE == BUS_IDLE)
                 NEXT_ARB_STATE = GRANT;
             else
@@ -757,7 +762,10 @@ always_comb begin : arb_dec
                 NEXT_ARB_STATE = GRANT;
         end
         WAIT_RELEASE_3WIRE: begin
-            if (BGACK_In && !BR_In)
+            // Figure 7-61 NOTE: BG is never asserted while RMC is asserted, so
+            // a request left pending over a single-wire release during a locked
+            // sequence has to wait for the sequence to end.
+            if (BGACK_In && !BR_In && !(RMC && !RETRY))
                 NEXT_ARB_STATE = GRANT;
             else if (BGACK_In)
                 NEXT_ARB_STATE = ARB_IDLE;
