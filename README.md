@@ -142,7 +142,19 @@ Seeded randomized differential run (register-state check at epilogue):
 
 A bare-metal csmith flow is available for fuzz-style software smoke tests.
 Each seed builds a random C program with `csmith`, cross-compiles with
-`m68k-elf-gcc`, and runs in the cocotb harness until it writes the sentinel.
+`m68k-elf-gcc`, runs it in the cocotb harness, and **compares the program's
+checksum against `qemu-system-m68k -cpu m68030` running the identical binary**.
+
+That checksum comparison is the strongest end-to-end gate in the repo: it checks
+computed results on real compiler output, not just that the program terminated.
+It is also what caught the base-register-suppression defect that made every
+indexed array access read through the wrong address (see
+`notes/AUDIT_2026-07.md`) -- the core computed `0xFFFFFFFF` where QEMU computed
+`0x3FE75C61`, while every hand-written instruction test passed.
+
+Note the cycle budget: verifying the checksum costs real work, so the default is
+12M cycles per seed. A budget too low presents as "did not reach sentinel",
+which looks like a hang rather than the wrong answer it may actually be.
 
 Requirements:
 
