@@ -985,12 +985,28 @@ always_comb begin : alu_condition_eval
     c_flag = STATUS_REG[SR_C];
     n_xor_v = n_flag ^ v_flag;
 
+    // Compared as an equality of the operands rather than as "the subtract came
+    // out zero". For CAS and CAS2 the integer_op block computes
+    // RESULT_INTOP = OP2_SIGNEXT - OP1_SIGNEXT, so (RESULT_INTOP == 0) is exactly
+    // (OP2_SIGNEXT == OP1_SIGNEXT) in two's complement, and the sized variants hold
+    // too because a borrow only propagates upward -- the low n bits of a difference
+    // depend only on the low n bits of the operands.
+    //
+    // Why it is worth writing this way: cas_compare_match feeds ALU_COND, and
+    // reading RESULT_INTOP made it wait for the full 32-bit subtract and its carry
+    // chain. That put roughly 24 logic levels of arithmetic on the design's worst
+    // path for the benefit of one instruction pair. An equality is an XOR-reduce
+    // with no carry propagation. ALU_COND cannot be registered instead (Bcc samples
+    // it in the same cycle as the single-cycle FETCH_RETIRE pulse), and registering
+    // only this arm breaks CAS, which needs the compare in its first EXECUTE cycle
+    // -- measured, 6 of 16 tests in test_instr_atomic.
     cas_compare_match = 1'b0;
     if (OP == CAS || OP == CAS2) begin
         case (OP_SIZE)
-            LONG:    cas_compare_match = (RESULT_INTOP == 32'h00000000);
-            WORD:    cas_compare_match = (RESULT_INTOP[15:0] == 16'h0000);
-            default: cas_compare_match = (OP == CAS) && (RESULT_INTOP[7:0] == 8'h00);
+            LONG:    cas_compare_match = (OP2_SIGNEXT == OP1_SIGNEXT);
+            WORD:    cas_compare_match = (OP2_SIGNEXT[15:0] == OP1_SIGNEXT[15:0]);
+            default: cas_compare_match = (OP == CAS) &&
+                                         (OP2_SIGNEXT[7:0] == OP1_SIGNEXT[7:0]);
         endcase
     end
 
