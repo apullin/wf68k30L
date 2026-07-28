@@ -1,4 +1,3 @@
-(* keep_hierarchy = "yes" *)
 module WF68K30L_TOP_ROUTING_MMU_TRANSLATE #(
     parameter int MMU_ATC_LINES = 8,
     parameter int MMU_ATC_WAYS = 2,

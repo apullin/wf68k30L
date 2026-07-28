@@ -15,7 +15,6 @@
 // that was never in memory.
 // ====================================================================
 
-(* keep_hierarchy = "yes" *)
 module WF68K30L_SYNC_RAM_1R1W #(
     parameter int WIDTH = 8,
     parameter int DEPTH = 32,

@@ -71,9 +71,11 @@ echo "=== gate: working tree ==="
 echo "=== proving equivalence over $CYCLES cycles ==="
 
 # memory_map bit-blasts the register files and caches; the SAT engine wants them
-# as plain logic rather than $mem cells. keep_hierarchy (set for the FPGA timing
-# flow) would otherwise survive prep -flatten and leave cells the SAT engine
-# cannot import.
+# as plain logic rather than $mem cells. The setattr lines are now defensive only:
+# the RTL used to carry (* keep_hierarchy = "yes" *) on 23 modules, which survived
+# prep -flatten and left cells the SAT engine could not import. Those attributes
+# were removed -- they cost 19% Fmax on the KV260 and 18% area on the ECP5 -- but
+# the unset is kept so this flow still works if one is ever reintroduced.
 yosys -p "
     read_verilog -sv -I $GOLDTREE/sv $(srcs "$GOLDTREE");
     hierarchy -top WF68K30L_TOP;

@@ -36,7 +36,6 @@
 //   Various fixes.
 //
 
-(* keep_hierarchy = "yes" *)
 module WF68K30L_EXCEPTION_HANDLER #(
     // Must match WF68K30L_TOP and WF68K30L_CPU_WRAPPER: VERSION gates format-$B
     // frame validation below, so a direct instantiation that relies on this

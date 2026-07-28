@@ -15,7 +15,6 @@
 //                                                                      //
 //----------------------------------------------------------------------//
 
-(* keep_hierarchy = "yes" *)
 module WF68K30L_OPERAND_MUX (
     input  logic        CLK,
 

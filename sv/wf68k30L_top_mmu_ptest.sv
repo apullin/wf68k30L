@@ -21,7 +21,6 @@
 //                                                                    //
 //--------------------------------------------------------------------//
 
-(* keep_hierarchy = "yes" *)
 module WF68K30L_TOP_MMU_PTEST (
     input  logic        CLK,
     input  logic        RESET_CPU,

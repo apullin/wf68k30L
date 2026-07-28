@@ -147,7 +147,6 @@
 //   Introdeced a new state CALC_AEFF which results in no need of ADR_ATN and a twice highre fmax.
 //
 
-(* keep_hierarchy = "yes" *)
 module WF68K30L_CONTROL #(
     parameter NO_PIPELINE = 0  // If true the controller work in scalar mode.
 ) (

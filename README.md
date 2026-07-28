@@ -34,6 +34,38 @@ that used to appear here predates the MMU, cache and coprocessor subsystems and
 is not comparable -- those were added after it was measured, and they dominate
 the growth.
 
+### Frequency: what the number means
+
+Three figures, all the same netlist on the KV260 (xck26-sfvc784-2LV-c):
+
+| Measurement | Fmax |
+|---|---|
+| At the 25 MHz target (`impl`), with `keep_hierarchy` on 23 modules | 30.01 MHz |
+| At the 25 MHz target, hierarchy pins removed | 35.82 MHz |
+| Pushed at a 20 ns clock (`push`), retiming + Explore directives | **50.92 MHz** |
+
+Two things this table is really saying. First, `(* keep_hierarchy = "yes" *)` with
+`-flatten_hierarchy none` forbade optimisation across every module boundary, and
+the worst path duly ran `I_OPCODE_DECODER/OP_reg -> I_BUS_IF/WP_BUFFER_reg` with
+74 logic levels and 74% of its delay in routing. Removing the pins was worth
+19% and let Vivado replicate the source register. `validation/run_equiv.sh`
+already stripped the attribute itself, so nothing depended on it.
+
+Second, and more important: **timing-driven place and route stops working once the
+constraint is met.** Measuring at the 25 MHz target reports the margin, not the
+capability. The `push` stage exists to measure the ceiling and should be used for
+that; `impl` remains the pass/fail check against the goal.
+
+Beyond ~51 MHz there is no hot spot left to fix. The ten worst paths are all 59
+logic levels with slacks spread over 54 ps, so the design is depth-limited across
+a whole class of paths rather than held back by one. That class is a serial chain
+-- ALU operand through a 32-bit result and two carry chains, to `ALU_COND`, into
+the control next-state logic, out as a control request, on to the bus sequencer --
+and it closes an architectural loop between the ALU and the control FSM. Cutting
+it would add latency inside that loop, which changes cycles per instruction and
+the bus cycle timing this core is otherwise careful about. That is a
+microarchitectural change, not a pipelining tweak.
+
 Xilinx, for cross-checking portability (Vivado 2025.2.1, xc7a200tfbg484-2,
 `synth_design -flatten_hierarchy none`): 18,899 LUTs (14.0%) and 6,170
 registers (2.3%), with zero latches, zero combinational loops and zero

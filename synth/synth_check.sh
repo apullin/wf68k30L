@@ -4,8 +4,8 @@
 # Usage: ./synth_check.sh [--ecp5]
 #
 # Baseline values (from reference synthesis):
-#   LUT4:       39317
-#   TRELLIS_FF: 6515
+#   LUT4:       32209
+#   TRELLIS_FF: 6404
 
 set -euo pipefail
 
@@ -16,8 +16,12 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # plain `synth_ecp5` defaults on the whole sv/ tree (no ABC9 flags, no
 # -noflatten). They are much larger than the pre-2026 figures because the MMU
 # and cache subsystems did not exist then. Re-measure and update deliberately.
-BASELINE_LUT4=39317
-BASELINE_FF=6515
+#
+# Dropped 39,317 -> 32,209 LUT4 (-18%) when the (* keep_hierarchy = "yes" *)
+# attributes came off the 23 modules: they blocked cross-boundary optimisation in
+# Yosys as well as Vivado, where they also cost 19% Fmax.
+BASELINE_LUT4=32209
+BASELINE_FF=6404
 TOLERANCE_PCT=10  # Allow +/- 10% deviation
 
 # Source files
@@ -32,7 +36,9 @@ while IFS= read -r f; do
 done < <(ls "$SV_DIR"/wf68k30L_*.sv | sort)
 
 TOP=WF68K30L_TOP
-TMPLOG=$(mktemp /tmp/synth_check_XXXXXX.log)
+# Honour TMPDIR rather than hardcoding /tmp: an absolute mktemp template ignores
+# TMPDIR, which makes this fail outright anywhere /tmp is unwritable or sandboxed.
+TMPLOG=$(mktemp "${TMPDIR:-/tmp}/synth_check_XXXXXX.log")
 trap "rm -f $TMPLOG" EXIT
 
 echo "=== WF68K30L Synthesis Check ==="

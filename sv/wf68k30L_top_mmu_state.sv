@@ -1,4 +1,3 @@
-(* keep_hierarchy = "yes" *)
 module WF68K30L_TOP_MMU_STATE #(
     parameter int MMU_ATC_LINES = 8,
     parameter int MMU_ATC_WAYS = 2,

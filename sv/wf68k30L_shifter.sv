@@ -6,7 +6,6 @@
 // -- CERN OHL v. 1.2                                                    --
 // ------------------------------------------------------------------------
 
-(* keep_hierarchy = "yes" *)
 module WF68K30L_SHIFTER (
     input  logic        CLK,
 

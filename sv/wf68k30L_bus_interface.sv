@@ -5,7 +5,6 @@
 // -- CERN OHL v. 1.2                                                    --
 // ------------------------------------------------------------------------
 
-(* keep_hierarchy = "yes" *)
 module WF68K30L_BUS_INTERFACE (
     input  logic        CLK,
 
@@ -323,8 +322,22 @@ end
 
 // ---- Write buffer latch ----
 // Captures data from core at bus cycle start so it remains stable throughout.
+//
+// The enable is BUS_IDLE alone, deliberately, and it is a superset of the old
+// "BUS_IDLE && NEXT_BUS_CTRL_STATE == START_CYCLE" rather than a change of
+// behaviour. On the edge that actually starts a cycle both forms load the same
+// DATA_FROM_CORE; the extra loads happen only on idle edges that do not start
+// one, and WP_BUFFER is read only during a cycle -- when the state is not
+// BUS_IDLE, so no load can occur and the value stays frozen for the whole cycle,
+// which is the property DATA_PORT_OUT depends on.
+//
+// Why it is written this way: NEXT_BUS_CTRL_STATE is the combinational next state
+// of the bus FSM, so it pulls FETCH_STATE -> ctrl_comb -> DATA_WR -> WR_REQ into
+// this register's clock enable. That made I_BUS_IF/WP_BUFFER_reg/CE the endpoint
+// of the worst path in every Vivado run, 63-74 logic levels deep. BUS_CTRL_STATE
+// is already a register, so this reduces the enable cone to one comparison.
 always_ff @(posedge CLK) begin : writeback_info
-    if (BUS_CTRL_STATE == BUS_IDLE && NEXT_BUS_CTRL_STATE == START_CYCLE)
+    if (BUS_CTRL_STATE == BUS_IDLE)
         WP_BUFFER <= DATA_FROM_CORE;
 end
 

@@ -9,7 +9,6 @@
 //                                                                    //
 //--------------------------------------------------------------------//
 
-(* keep_hierarchy = "yes" *)
 module WF68K30L_CTRL_EXEC_DEC (
     // Current states
     input  logic [2:0]  EXEC_WB_STATE,

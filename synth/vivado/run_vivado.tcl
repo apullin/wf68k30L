@@ -3,7 +3,8 @@
 #   vivado -mode batch -source synth/vivado/run_vivado.tcl \
 #          [-tclargs <part> <stage>]
 #
-# stage: "synth" (default) or "impl" for full place & route with timing.
+# stage: "synth" (default), "impl" for full place & route against the 25 MHz
+#        target, or "push" for a maximum-frequency measurement at a 20 ns clock.
 #
 # Default part is the Kria K26 SOM used on the KV260 (Zynq UltraScale+ MPSoC).
 # Pass a part as the first tclarg for anything else, e.g. xc7a200tfbg484-2.
@@ -26,13 +27,26 @@ file mkdir $out
 create_project -in_memory -part $part
 
 read_verilog -sv [glob [file join $repo sv wf68k30L_*.sv]]
-read_xdc [file join $repo synth constraints wf68k30L_vivado.xdc]
+# The push stage measures the ceiling; every other stage checks the 25 MHz target.
+set xdc    [expr {$stage eq "push" ? "wf68k30L_vivado_push.xdc" : "wf68k30L_vivado.xdc"}]
+set period [expr {$stage eq "push" ? 20.0 : 40.0}]
+read_xdc [file join $repo synth constraints $xdc]
 
 # -mode out_of_context: no pinout is asserted, so do not insert I/O buffers or
 # require a package pin for every port.
+# -flatten_hierarchy rebuilt (Vivado's default) rather than none: the RTL used to
+# carry (* keep_hierarchy = "yes" *) on 23 modules, which together with
+# -flatten_hierarchy none forbade any optimisation across a module boundary. The
+# worst path ran I_OPCODE_DECODER/OP_reg -> I_BUS_IF/WP_BUFFER_reg with 74 logic
+# levels and 74% of its delay in routing, precisely the shape that boundary
+# restriction produces. Removing both was worth 30.01 -> 33.37 MHz and 646 LUTs.
+# -retiming lets synthesis rebalance logic across existing registers, which is the
+# tool-driven form of the pipelining this path would otherwise need by hand.
 synth_design -top WF68K30L_TOP \
              -include_dirs [file join $repo sv] \
-             -flatten_hierarchy none \
+             -flatten_hierarchy rebuilt \
+             -retiming \
+             -directive PerformanceOptimized \
              -mode out_of_context
 
 report_utilization    -file [file join $out utilization_synth.rpt]
@@ -49,16 +63,17 @@ if {[catch {report_drc -return_string -checks {MDRV-1 LUTLP-1}} drc]} {
     puts $drc
 }
 
-if {$stage eq "impl"} {
-    opt_design
-    place_design
-    phys_opt_design
-    route_design
+if {$stage eq "impl" || $stage eq "push"} {
+    # Explore directives and a second phys_opt pass cost runtime only.
+    opt_design      -directive Explore
+    place_design    -directive Explore
+    phys_opt_design -directive AggressiveExplore
+    route_design    -directive Explore
+    phys_opt_design -directive AggressiveExplore
     report_utilization    -file [file join $out utilization_impl.rpt]
     report_timing_summary -file [file join $out timing_impl.rpt] -max_paths 10
 
     set wns [get_property SLACK [get_timing_paths -delay_type max]]
-    set period 40.0
     puts "=== implementation timing ==="
     puts [format "WNS %.3f ns at %.1f ns period -> Fmax %.2f MHz" \
               $wns $period [expr {1000.0 / ($period - $wns)}]]
